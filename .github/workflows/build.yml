@@ -40,9 +40,13 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+        with:
+          # The cached install metadata can outlive the binaries themselves,
+          # which then makes binstall skip an install that is not there.
+          cache-bin: false
       - uses: cargo-bins/cargo-binstall@main
       - name: Install build tools
-        run: cargo binstall -y --locked trunk tauri-cli@^2
+        run: cargo binstall -y --locked --force trunk tauri-cli@^2
       - name: Build MathNote
         run: cargo tauri build
       - uses: actions/upload-artifact@v4
