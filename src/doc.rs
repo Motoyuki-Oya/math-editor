@@ -56,7 +56,7 @@ pub fn init(element: &HtmlElement) {
     let element_for_keys = element.clone();
     let on_keydown =
         Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |event: web_sys::KeyboardEvent| {
-            if event.ctrl_key() || event.meta_key() || event.alt_key() {
+            if event.ctrl_key() || event.meta_key() || event.alt_key() || event.is_composing() {
                 return;
             }
             handle_caret_into_field(&element_for_keys, &event);
@@ -158,17 +158,10 @@ fn handle_math_trigger(host: &HtmlElement, event: &web_sys::KeyboardEvent) {
                 Seed::Typed(run, key.chars().next().unwrap()),
             )
         }
-        " " => {
-            let word = trailing_command(&before);
-            let Some(word) = word.filter(|word| commands::is_command(word)) else {
-                return;
-            };
-            let consumed = word.encode_utf16().count() + 1;
-            match commands::node_for(&word) {
-                Some(node) => (consumed, Seed::Node(node)),
-                None => return,
-            }
-        }
+        " " => match trailing_shortcut(&before) {
+            Some((consumed, node)) => (consumed, Seed::Node(node)),
+            None => return,
+        },
         _ => return,
     };
 
@@ -252,6 +245,19 @@ fn trailing_run(text: &str) -> String {
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '.')
         .collect();
     run.chars().rev().collect()
+}
+
+/// A `\name` or a directly typed glyph such as `√`, with how much text it
+/// takes with it when it turns into a formula.
+fn trailing_shortcut(text: &str) -> Option<(usize, crate::math::ast::Node)> {
+    if let Some(name) = trailing_command(text) {
+        if let Some(node) = commands::node_for(&name) {
+            return Some((name.encode_utf16().count() + 1, node));
+        }
+    }
+    let glyph = text.chars().next_back()?;
+    let node = commands::node_for_glyph(glyph)?;
+    Some((glyph.len_utf16(), node))
 }
 
 fn trailing_command(text: &str) -> Option<String> {

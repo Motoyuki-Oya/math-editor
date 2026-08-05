@@ -138,23 +138,32 @@ impl MathState {
         }
     }
 
-    /// Turns a just-typed `\name` into the structure it names, the way a
-    /// Markdown editor expands a shortcut once it is complete.
+    /// Turns a just-typed `\name` (or a typed glyph such as `√`) into the
+    /// structure it names, the way a Markdown editor expands a shortcut.
     pub fn commit_command(&mut self) -> bool {
         let index = self.cursor.index;
         let row = self.current_row();
-        let Some(start) = command_start(row, index) else {
-            return false;
-        };
-        let name: String = row[start + 1..index]
-            .iter()
-            .filter_map(|node| match node {
-                Node::Char(c) => Some(*c),
-                _ => None,
-            })
-            .collect();
-        let Some(node) = commands::node_for(&name) else {
-            return false;
+        let (start, node) = match command_start(row, index) {
+            Some(start) => {
+                let name: String = row[start + 1..index]
+                    .iter()
+                    .filter_map(|node| match node {
+                        Node::Char(c) => Some(*c),
+                        _ => None,
+                    })
+                    .collect();
+                match commands::node_for(&name) {
+                    Some(node) => (start, node),
+                    None => return false,
+                }
+            }
+            None => match row.get(index.wrapping_sub(1)) {
+                Some(Node::Char(c)) => match commands::node_for_glyph(*c) {
+                    Some(node) => (index - 1, node),
+                    None => return false,
+                },
+                _ => return false,
+            },
         };
         self.snapshot();
         self.current_row_mut().drain(start..index);
@@ -504,6 +513,15 @@ mod tests {
         for c in "\\sqrt".chars() {
             state.insert_char(c);
         }
+        assert!(state.commit_command());
+        state.insert_char('2');
+        assert_eq!(state.to_latex(), "\\sqrt{2}");
+    }
+
+    #[test]
+    fn typed_glyph_expands_like_its_command() {
+        let mut state = MathState::new();
+        state.insert_char('√');
         assert!(state.commit_command());
         state.insert_char('2');
         assert_eq!(state.to_latex(), "\\sqrt{2}");

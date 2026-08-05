@@ -21,8 +21,19 @@ pub fn node_for(name: &str) -> Option<Node> {
     }
 }
 
-pub fn is_command(name: &str) -> bool {
-    node_for(name).is_some()
+/// The node a directly typed glyph expands to, so `√` works like `\sqrt`.
+pub fn node_for_glyph(glyph: char) -> Option<Node> {
+    if glyph == '√' {
+        return Some(ast::sqrt());
+    }
+    let text = glyph.to_string();
+    if let Some(op) = symbols::BIG_OPS.iter().find(|op| op.glyph == text) {
+        return Some(ast::big_op(op.name));
+    }
+    symbols::SYMBOLS
+        .iter()
+        .find(|symbol| symbol.glyph == text)
+        .map(|symbol| Node::Sym(symbol.name.to_string()))
 }
 
 #[cfg(test)]
@@ -41,5 +52,13 @@ mod tests {
     #[test]
     fn unknown_names_are_rejected() {
         assert!(node_for("notacommand").is_none());
+    }
+
+    #[test]
+    fn glyphs_expand_like_their_commands() {
+        assert!(matches!(node_for_glyph('√'), Some(Node::Sqrt { .. })));
+        assert!(matches!(node_for_glyph('∑'), Some(Node::BigOp { .. })));
+        assert!(matches!(node_for_glyph('α'), Some(Node::Sym(_))));
+        assert!(node_for_glyph('a').is_none());
     }
 }
