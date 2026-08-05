@@ -1,0 +1,345 @@
+:root {
+  --bg: #ffffff;
+  --fg: #1b1b1f;
+  --muted: #6b6b76;
+  --line: #d9d9e0;
+  --panel: #f6f6f8;
+  --accent: #2f6feb;
+  --font-text: "Noto Sans JP", "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
+  --font-math: "Cambria Math", "STIX Two Math", "Latin Modern Math", Georgia, "Times New Roman",
+    serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1c20;
+    --fg: #ececf1;
+    --muted: #9a9aa6;
+    --line: #34343c;
+    --panel: #26262c;
+    --accent: #6ea0ff;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-text);
+  font-size: 15px;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.toolbar,
+.palette,
+.findbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 6px 10px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.group {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.tool,
+.pal {
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--fg);
+  border-radius: 5px;
+  padding: 4px 9px;
+  font-size: 13px;
+  cursor: pointer;
+  line-height: 1.5;
+}
+
+.pal {
+  min-width: 32px;
+  font-family: var(--font-math);
+  font-size: 15px;
+}
+
+.pal-word {
+  font-style: normal;
+  font-size: 13px;
+}
+
+.tool:hover,
+.pal:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.find-input {
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 4px 8px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.editor {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px 22px;
+  outline: none;
+  line-height: 2;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.statusbar {
+  display: flex;
+  gap: 18px;
+  padding: 4px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.status-message {
+  margin-left: auto;
+  color: var(--accent);
+}
+
+/* ---- formulas ---- */
+
+.mn-field {
+  display: inline-block;
+  font-family: var(--font-math);
+  padding: 1px 3px;
+  border-radius: 4px;
+  outline: none;
+  vertical-align: middle;
+  white-space: nowrap;
+  cursor: text;
+}
+
+.mn-field:focus {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.mn-field-empty {
+  min-width: 12px;
+  border-bottom: 1px dashed var(--muted);
+}
+
+.mn-field-block {
+  display: block;
+  text-align: center;
+  margin: 6px 0;
+  font-size: 1.15em;
+}
+
+.mn-row {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 1em;
+}
+
+.mn-atom {
+  display: inline-block;
+}
+
+.mn-ident {
+  font-style: italic;
+  padding: 0 0.02em;
+}
+
+.mn-func {
+  padding: 0 0.15em 0 0;
+}
+
+.mn-bin {
+  padding: 0 0.22em;
+}
+
+.mn-rel {
+  padding: 0 0.28em;
+}
+
+.mn-punct {
+  padding: 0 0.05em;
+}
+
+.mn-placeholder {
+  display: inline-block;
+  width: 0.55em;
+  height: 1em;
+  border: 1px dashed var(--muted);
+  border-radius: 2px;
+  opacity: 0.5;
+}
+
+.mn-caret {
+  display: inline-block;
+  width: 0;
+  height: 1.15em;
+  border-left: 1.5px solid var(--accent);
+  margin: 0 -0.75px;
+  animation: mn-blink 1.1s steps(1) infinite;
+}
+
+@keyframes mn-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.mn-frac {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  vertical-align: middle;
+  margin: 0 0.15em;
+  font-size: 0.98em;
+}
+
+.mn-frac-num {
+  padding: 0 0.3em 0.08em;
+  border-bottom: 1px solid currentColor;
+}
+
+.mn-frac-den {
+  padding: 0.08em 0.3em 0;
+}
+
+.mn-sqrt {
+  display: inline-flex;
+  align-items: stretch;
+  vertical-align: middle;
+  margin: 0 0.1em;
+}
+
+.mn-sqrt-index {
+  align-self: flex-start;
+  font-size: 0.7em;
+  transform: translate(0.45em, 0.1em);
+  z-index: 1;
+}
+
+.mn-radical {
+  width: 0.55em;
+  align-self: stretch;
+  min-height: 1.1em;
+  overflow: visible;
+}
+
+.mn-sqrt-body {
+  border-top: 1px solid currentColor;
+  padding: 0.12em 0.2em 0.05em 0.1em;
+  display: inline-flex;
+  align-items: center;
+}
+
+.mn-sup,
+.mn-sub {
+  display: inline-block;
+  font-size: 0.72em;
+  padding: 0 0.05em;
+}
+
+.mn-sup {
+  vertical-align: super;
+}
+
+.mn-sub {
+  vertical-align: sub;
+}
+
+.mn-group {
+  display: inline-flex;
+  align-items: stretch;
+  vertical-align: middle;
+}
+
+.mn-group-body {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 0.1em;
+}
+
+.mn-delim {
+  width: 0.36em;
+  align-self: stretch;
+  min-height: 1.15em;
+  overflow: visible;
+}
+
+.mn-bigop {
+  display: inline-flex;
+  vertical-align: middle;
+  margin: 0 0.18em;
+}
+
+.mn-bigop-stacked {
+  flex-direction: column;
+  align-items: center;
+}
+
+.mn-bigop-side {
+  flex-direction: row-reverse;
+  align-items: center;
+}
+
+.mn-bigop-side .mn-limit {
+  display: flex;
+  flex-direction: column;
+}
+
+.mn-bigop-symbol {
+  font-size: 1.5em;
+  line-height: 1;
+}
+
+.mn-bigop-word {
+  font-size: 1em;
+  font-style: normal;
+}
+
+.mn-limit {
+  font-size: 0.68em;
+  line-height: 1.1;
+}
+
+.mn-limit-empty:not(:focus-within) .mn-placeholder {
+  display: none;
+}
+
+.mn-matrix {
+  display: inline-flex;
+  align-items: stretch;
+  vertical-align: middle;
+}
+
+.mn-matrix-grid {
+  display: grid;
+  gap: 0.15em 0.6em;
+  padding: 0 0.2em;
+  align-items: center;
+  justify-items: center;
+}
+
+.mn-matrix-cell {
+  display: inline-flex;
+  align-items: center;
+}
