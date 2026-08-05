@@ -8,6 +8,7 @@ use wasm_bindgen::JsCast;
 use web_sys::{Document, Element, HtmlElement, Node, Range, Selection};
 
 use crate::markdown::{self, Segment};
+use crate::math::commands;
 use crate::math::edit::Escape;
 use crate::math::field::{self, FIELD_CLASS};
 
@@ -55,7 +56,11 @@ pub fn init(element: &HtmlElement) {
     let element_for_keys = element.clone();
     let on_keydown =
         Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |event: web_sys::KeyboardEvent| {
+            if event.ctrl_key() || event.meta_key() || event.alt_key() {
+                return;
+            }
             handle_caret_into_field(&element_for_keys, &event);
+            handle_math_trigger(&element_for_keys, &event);
         });
     element
         .add_event_listener_with_callback("keydown", on_keydown.as_ref().unchecked_ref())
@@ -121,6 +126,146 @@ fn handle_caret_into_field(host: &HtmlElement, event: &web_sys::KeyboardEvent) {
     } else {
         field::focus_at_end(&neighbour);
     }
+}
+
+/// Starts a formula straight from the text, so `1/`, `x^` or `\sqrt ` switch
+/// into math without a menu, the way Markdown shortcuts work.
+fn handle_math_trigger(host: &HtmlElement, event: &web_sys::KeyboardEvent) {
+    if event.default_prevented() {
+        return;
+    }
+    let key = event.key();
+    let caret = caret_in_text(host);
+    let before = caret
+        .as_ref()
+        .map(|(node, offset)| prefix_utf16(&node.text_content().unwrap_or_default(), *offset))
+        .unwrap_or_default();
+
+    let (consume, seed): (usize, Seed) = match key.as_str() {
+        "$" => (0, Seed::Empty),
+        "/" | "^" | "_" => {
+            let run = trailing_run(&before);
+            // `and/or` should stay prose; `1/`, `x/` and `x^` are formulas.
+            let mathlike = !run.is_empty()
+                && (key != "/"
+                    || run.chars().any(|c| c.is_ascii_digit())
+                    || run.chars().count() == 1);
+            if !mathlike {
+                return;
+            }
+            (
+                run.encode_utf16().count(),
+                Seed::Typed(run, key.chars().next().unwrap()),
+            )
+        }
+        " " => {
+            let word = trailing_command(&before);
+            let Some(word) = word.filter(|word| commands::is_command(word)) else {
+                return;
+            };
+            let consumed = word.encode_utf16().count() + 1;
+            match commands::node_for(&word) {
+                Some(node) => (consumed, Seed::Node(node)),
+                None => return,
+            }
+        }
+        _ => return,
+    };
+
+    event.prevent_default();
+    let field_host = match caret {
+        Some((node, offset)) => replace_with_field(host, &node, offset, consume),
+        // An empty line has no text node to cut from, so just open a formula.
+        None => {
+            insert_math(false);
+            field::focused_host()
+        }
+    };
+    let Some(field_host) = field_host else { return };
+    match seed {
+        Seed::Empty => {}
+        Seed::Typed(run, trigger) => {
+            for c in run.chars() {
+                field::type_char(&field_host, c);
+            }
+            field::type_char(&field_host, trigger);
+        }
+        Seed::Node(node) => {
+            field::insert_into_focused(node);
+        }
+    }
+    notify_change();
+}
+
+enum Seed {
+    /// `$`: an empty formula.
+    Empty,
+    /// `1/`, `x^`: the text that was already typed, then the trigger.
+    Typed(String, char),
+    /// `\sqrt `: the structure the command names.
+    Node(crate::math::ast::Node),
+}
+
+/// Replaces the `consume` code units before the caret with a formula field.
+fn replace_with_field(
+    host: &HtmlElement,
+    node: &Node,
+    offset: u32,
+    consume: usize,
+) -> Option<HtmlElement> {
+    let doc = document()?;
+    let range = doc.create_range().ok()?;
+    range.set_start(node, offset - consume as u32).ok()?;
+    range.set_end(node, offset).ok()?;
+    range.delete_contents().ok()?;
+    let element = field::create_element(&doc, "", false);
+    range.insert_node(&element).ok()?;
+    let element = element.dyn_into::<HtmlElement>().ok()?;
+    field::attach(&element);
+    field::focus_at_end(&element);
+    host.normalize();
+    Some(element)
+}
+
+fn caret_in_text(host: &HtmlElement) -> Option<(Node, u32)> {
+    let selection = window_selection()?;
+    if !selection.is_collapsed() {
+        return None;
+    }
+    let node = selection.anchor_node()?;
+    if node.node_type() != Node::TEXT_NODE || !host.contains(Some(&node)) {
+        return None;
+    }
+    Some((node, selection.anchor_offset()))
+}
+
+/// The text before the caret. DOM offsets count UTF-16 code units.
+fn prefix_utf16(text: &str, offset: u32) -> String {
+    let units: Vec<u16> = text.encode_utf16().take(offset as usize).collect();
+    String::from_utf16_lossy(&units)
+}
+
+fn trailing_run(text: &str) -> String {
+    let run: String = text
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '.')
+        .collect();
+    run.chars().rev().collect()
+}
+
+fn trailing_command(text: &str) -> Option<String> {
+    let letters: String = text
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect();
+    if letters.is_empty() {
+        return None;
+    }
+    let name: String = letters.chars().rev().collect();
+    let start = text.len() - name.len();
+    text[..start].ends_with('\\').then_some(name)
 }
 
 fn next_element(node: &Node) -> Option<Element> {

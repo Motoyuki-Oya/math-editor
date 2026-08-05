@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod commands;
 pub mod edit;
 pub mod field;
 pub mod latex;

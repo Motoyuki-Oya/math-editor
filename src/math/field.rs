@@ -220,6 +220,12 @@ fn on_keydown(host: &HtmlElement, id: &str, event: KeyboardEvent) {
             (false, "&") => {
                 state.grow_matrix(false);
             }
+            // A space either completes a `\name` shortcut or is just a space.
+            (false, " ") => {
+                if !state.commit_command() {
+                    state.insert_char(' ');
+                }
+            }
             (false, other) => {
                 let mut chars = other.chars();
                 match (chars.next(), chars.next()) {
@@ -236,6 +242,18 @@ fn on_keydown(host: &HtmlElement, id: &str, event: KeyboardEvent) {
     if let Some(escape) = escape {
         crate::doc::leave_field(host, escape);
     }
+}
+
+/// Feeds a character to a field as if it had been typed there, used when a
+/// trigger character in the text starts a formula.
+pub fn type_char(host: &HtmlElement, c: char) {
+    let Some(id) = host.get_attribute(ID_ATTR) else {
+        return;
+    };
+    let Some(state) = state_of(&id) else { return };
+    state.borrow_mut().insert_char(c);
+    redraw(host, &state.borrow(), true);
+    notify_change();
 }
 
 /// Inserts a node into the focused formula; used by the toolbar buttons.

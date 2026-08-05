@@ -1,6 +1,7 @@
 //! Cursor movement and editing commands on a formula.
 
 use super::ast::{row_at, row_at_mut, Cursor, Delim, Node, Row};
+use super::commands;
 use super::latex::{parse_latex, row_to_latex};
 
 const UNDO_LIMIT: usize = 200;
@@ -122,6 +123,10 @@ impl MathState {
     /// into the first one, which is what makes palette buttons feel natural.
     pub fn insert(&mut self, node: Node) {
         self.snapshot();
+        self.place(node);
+    }
+
+    fn place(&mut self, node: Node) {
         let enter = node.slot_count() > 0;
         let index = self.cursor.index;
         self.current_row_mut().insert(index, node);
@@ -131,6 +136,31 @@ impl MathState {
         } else {
             self.cursor.index += 1;
         }
+    }
+
+    /// Turns a just-typed `\name` into the structure it names, the way a
+    /// Markdown editor expands a shortcut once it is complete.
+    pub fn commit_command(&mut self) -> bool {
+        let index = self.cursor.index;
+        let row = self.current_row();
+        let Some(start) = command_start(row, index) else {
+            return false;
+        };
+        let name: String = row[start + 1..index]
+            .iter()
+            .filter_map(|node| match node {
+                Node::Char(c) => Some(*c),
+                _ => None,
+            })
+            .collect();
+        let Some(node) = commands::node_for(&name) else {
+            return false;
+        };
+        self.snapshot();
+        self.current_row_mut().drain(start..index);
+        self.cursor.index = start;
+        self.place(node);
+        true
     }
 
     pub fn insert_char(&mut self, c: char) {
@@ -442,6 +472,19 @@ fn numerator_start(row: &Row, index: usize) -> usize {
     }
 }
 
+/// Finds the `\` that starts the command word ending at the caret.
+fn command_start(row: &Row, index: usize) -> Option<usize> {
+    let mut start = index;
+    while start > 0 {
+        match &row[start - 1] {
+            Node::Char(c) if c.is_ascii_alphabetic() => start -= 1,
+            Node::Char('\\') => return (start < index).then_some(start - 1),
+            _ => return None,
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,6 +496,26 @@ mod tests {
             state.insert_char(c);
         }
         assert_eq!(state.to_latex(), "x+1");
+    }
+
+    #[test]
+    fn backslash_shortcut_expands_into_a_structure() {
+        let mut state = MathState::new();
+        for c in "\\sqrt".chars() {
+            state.insert_char(c);
+        }
+        assert!(state.commit_command());
+        state.insert_char('2');
+        assert_eq!(state.to_latex(), "\\sqrt{2}");
+    }
+
+    #[test]
+    fn unknown_backslash_shortcut_is_left_alone() {
+        let mut state = MathState::new();
+        for c in "\\nope".chars() {
+            state.insert_char(c);
+        }
+        assert!(!state.commit_command());
     }
 
     #[test]
