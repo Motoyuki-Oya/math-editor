@@ -26,6 +26,8 @@ pub struct Session {
     pub active: Option<Active>,
     pub focused: bool,
     pub composing: bool,
+    /// What the IME is composing right now, drawn where it will be inserted.
+    pub preedit: String,
     pub dragging: bool,
     pub on_change: Option<Box<dyn Fn()>>,
     pub search_from: Option<Pos>,
@@ -57,6 +59,7 @@ pub fn init(root: &HtmlElement) {
         active: None,
         focused: false,
         composing: false,
+        preedit: String::new(),
         dragging: false,
         on_change: None,
         search_from: None,
@@ -88,17 +91,19 @@ pub fn redraw(session: &Rc<RefCell<Session>>) {
         at: active.at,
         cursor: active.state.cursor(),
     });
-    session.view.draw(
-        session.editor.text(),
-        session.editor.sels(),
-        active,
-        session.focused,
-    );
     let caret = session
         .active
         .as_ref()
         .map(|active| active.at)
         .unwrap_or_else(|| session.editor.primary().head);
+    let preedit = (!session.preedit.is_empty()).then_some((caret, session.preedit.as_str()));
+    session.view.draw(
+        session.editor.text(),
+        session.editor.sels(),
+        active,
+        session.focused,
+        preedit,
+    );
     if let Some(rect) = session.view.reveal(caret) {
         let style = format!(
             "left:{}px;top:{}px;height:{}px",
@@ -131,7 +136,7 @@ pub fn on_input(session: &Rc<RefCell<Session>>, event: InputEvent) {
     let textarea = session.borrow().textarea.clone();
     let text = textarea.value();
     if session.borrow().composing {
-        // The composed text is still being edited; it shows in the input itself.
+        // Still being composed; `compositionupdate` draws it until it is done.
         event.stop_propagation();
         return;
     }
@@ -142,8 +147,15 @@ pub fn on_input(session: &Rc<RefCell<Session>>, event: InputEvent) {
     insert_text(session, &text);
 }
 
+/// Shows what the IME is composing before it is committed.
+pub fn update_composition(session: &Rc<RefCell<Session>>, text: &str) {
+    session.borrow_mut().preedit = text.to_string();
+    redraw(session);
+}
+
 pub fn commit_composition(session: &Rc<RefCell<Session>>, text: &str) {
     session.borrow().textarea.set_value("");
+    session.borrow_mut().preedit.clear();
     if !text.is_empty() {
         insert_text(session, text);
     }

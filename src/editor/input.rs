@@ -55,7 +55,16 @@ pub fn install(session: &Rc<RefCell<Session>>) {
         session,
         |session, _: CompositionEvent| {
             session.borrow_mut().composing = true;
+            session.borrow_mut().preedit.clear();
             state::sync_input_box(session);
+        },
+    );
+    on(
+        &textarea,
+        "compositionupdate",
+        session,
+        |session, event: CompositionEvent| {
+            state::update_composition(session, &event.data().unwrap_or_default());
         },
     );
     on(

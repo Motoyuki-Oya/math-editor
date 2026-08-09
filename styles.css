@@ -129,6 +129,13 @@ body {
   min-height: 1.6em;
 }
 
+/* Text an IME has not committed yet. */
+.mn-preedit {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
 /* Selections and carets are drawn here, under the text. */
 .mn-overlay {
   position: absolute;
