@@ -116,8 +116,14 @@ pub fn sync_input_box(session: &Rc<RefCell<Session>>) {
 }
 
 pub fn focus() {
-    if let Some(session) = session() {
-        session.borrow().textarea.focus().ok();
+    let Some(session) = session() else { return };
+    let textarea = session.borrow().textarea.clone();
+    textarea.focus().ok();
+    // Focusing an element that already has the focus fires no event, so the
+    // carets would stay hidden if we waited for one.
+    if !session.borrow().focused {
+        session.borrow_mut().focused = true;
+        redraw(&session);
     }
 }
 
@@ -334,9 +340,9 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
         (false, "End") => act(session, |editor| editor.move_line_edge(true, shift)),
         (true, "Home") => act(session, |editor| editor.move_document_edge(false, shift)),
         (true, "End") => act(session, |editor| editor.move_document_edge(true, shift)),
-        (false, "Backspace") => backspace(session),
-        (false, "Delete") => act(session, Editor::delete_forward),
-        (false, "Enter") => act(session, Editor::split_line),
+        (false, "Backspace") => edit(session, Editor::backspace),
+        (false, "Delete") => edit(session, Editor::delete_forward),
+        (false, "Enter") => edit(session, Editor::split_line),
         (false, "Escape") => act(session, |editor| {
             editor.collapse_sels();
         }),
@@ -368,8 +374,9 @@ fn act(session: &Rc<RefCell<Session>>, command: impl FnOnce(&mut Editor)) -> boo
     true
 }
 
-fn backspace(session: &Rc<RefCell<Session>>) -> bool {
-    session.borrow_mut().editor.backspace();
+/// Runs a model command that changes the text, so the file becomes dirty.
+fn edit(session: &Rc<RefCell<Session>>, command: impl FnOnce(&mut Editor)) -> bool {
+    command(&mut session.borrow_mut().editor);
     changed(session);
     true
 }

@@ -237,6 +237,21 @@ impl Text {
     }
 }
 
+/// Where `pos` ends up once the text up to `to` has been replaced by text that
+/// now ends at `end`.
+fn shifted(pos: Pos, to: Pos, end: Pos) -> Pos {
+    if pos <= to {
+        // Anything the edit swallowed sits at its end.
+        return end;
+    }
+    let line = (pos.line + end.line).saturating_sub(to.line);
+    if pos.line == to.line {
+        Pos::new(line, pos.col - to.col + end.col)
+    } else {
+        Pos::new(line, pos.col)
+    }
+}
+
 /// The place one item to the left on the same line, if there is one.
 pub fn before_col(at: Pos) -> Option<Pos> {
     (at.col > 0).then(|| Pos::new(at.line, at.col - 1))
@@ -358,15 +373,23 @@ impl Editor {
 
     /// Applies an edit at every selection as one step. `edit` returns the items
     /// to put in place of the selection, together with the range to remove.
+    ///
+    /// The edits run front to back, and every edit moves the selections that
+    /// come after it, so each one still points at the same text afterwards.
     fn edit_each(&mut self, step: Step, edit: impl Fn(&Text, Sel) -> (Pos, Pos, Vec<Vec<Item>>)) {
         self.record(step);
         let mut order: Vec<usize> = (0..self.sels.len()).collect();
         order.sort_by_key(|&i| self.sels[i].start());
-        for &i in order.iter().rev() {
+        for (done, &i) in order.iter().enumerate() {
             let (from, to, what) = edit(&self.text, self.sels[i]);
             let at = self.text.remove(from, to);
             let end = self.text.insert(at, what);
             self.sels[i] = Sel::caret(end);
+            for &later in &order[done + 1..] {
+                let sel = self.sels[later];
+                self.sels[later] =
+                    Sel::range(shifted(sel.anchor, to, end), shifted(sel.head, to, end));
+            }
         }
         self.merge_sels();
     }
@@ -702,6 +725,28 @@ mod tests {
         assert_eq!(plain(&editor), "aXb\naXb");
         assert_eq!(editor.sels().len(), 2);
         assert_eq!(editor.sels()[0].head, Pos::new(0, 2));
+    }
+
+    #[test]
+    fn cursors_on_one_line_stay_on_their_own_text() {
+        let mut editor = editor("AAA BBB");
+        editor.set_caret(Pos::new(0, 3));
+        editor.add_caret(Pos::new(0, 7));
+        editor.insert_text("X");
+        assert_eq!(plain(&editor), "AAAX BBBX");
+        // Each caret must delete the character it just typed.
+        editor.backspace();
+        assert_eq!(plain(&editor), "AAA BBB");
+    }
+
+    #[test]
+    fn a_newline_at_an_earlier_cursor_moves_the_later_one() {
+        let mut editor = editor("ab cd");
+        editor.set_caret(Pos::new(0, 2));
+        editor.add_caret(Pos::new(0, 5));
+        editor.split_line();
+        assert_eq!(plain(&editor), "ab\n cd\n");
+        assert_eq!(editor.sels()[1].head, Pos::new(2, 0));
     }
 
     #[test]
