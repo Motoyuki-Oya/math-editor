@@ -21,19 +21,22 @@ pub fn node_for(name: &str) -> Option<Node> {
     }
 }
 
-/// The node a directly typed glyph expands to, so `√` works like `\sqrt`.
+/// The structure a directly typed glyph expands to, so `√` works like
+/// `\sqrt`. Glyphs that need no structure (`α`, `×`) stay plain text.
 pub fn node_for_glyph(glyph: char) -> Option<Node> {
     if glyph == '√' {
         return Some(ast::sqrt());
     }
     let text = glyph.to_string();
-    if let Some(op) = symbols::BIG_OPS.iter().find(|op| op.glyph == text) {
-        return Some(ast::big_op(op.name));
-    }
-    symbols::SYMBOLS
+    symbols::BIG_OPS
         .iter()
-        .find(|symbol| symbol.glyph == text)
-        .map(|symbol| Node::Sym(symbol.name.to_string()))
+        .find(|op| op.glyph == text)
+        .map(|op| ast::big_op(op.name))
+}
+
+/// The glyph a symbol name prints as, for inserting it as plain text.
+pub fn glyph_for(name: &str) -> Option<&'static str> {
+    symbols::lookup(name).map(|symbol| symbol.glyph)
 }
 
 #[cfg(test)]
@@ -55,10 +58,16 @@ mod tests {
     }
 
     #[test]
-    fn glyphs_expand_like_their_commands() {
+    fn only_structural_glyphs_expand() {
         assert!(matches!(node_for_glyph('√'), Some(Node::Sqrt { .. })));
         assert!(matches!(node_for_glyph('∑'), Some(Node::BigOp { .. })));
-        assert!(matches!(node_for_glyph('α'), Some(Node::Sym(_))));
+        assert!(node_for_glyph('α').is_none());
         assert!(node_for_glyph('a').is_none());
+    }
+
+    #[test]
+    fn symbol_names_have_glyphs() {
+        assert_eq!(glyph_for("alpha"), Some("α"));
+        assert_eq!(glyph_for("nope"), None);
     }
 }

@@ -8,7 +8,8 @@ use web_sys::{HtmlElement, KeyboardEvent};
 
 use crate::doc;
 use crate::ipc;
-use crate::math::ast::{self, Delim, MatrixKind, Node};
+use crate::math::ast::{self, MatrixKind, Node};
+use crate::math::commands;
 use crate::math::field;
 
 const UNTITLED: &str = "無題";
@@ -28,7 +29,7 @@ impl Shell {
             .get()
             .as_deref()
             .and_then(|path| path.rsplit(['/', '\\']).next().map(str::to_string))
-            .unwrap_or_else(|| format!("{UNTITLED}.md"))
+            .unwrap_or_else(|| format!("{UNTITLED}.txt"))
     }
 
     fn refresh(&self) {
@@ -108,7 +109,9 @@ impl Shell {
 
     fn export_html(&self) {
         let shell = *self;
-        let default_name = self.file_name().replace(".md", "") + ".html";
+        let name = self.file_name();
+        let stem = name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(&name);
+        let default_name = format!("{stem}.html");
         spawn_local(async move {
             let Some(path) = ipc::pick_export_path(&default_name).await else {
                 return;
@@ -137,6 +140,19 @@ fn insert(node: Node) {
     field::insert_into_focused(node);
 }
 
+/// Inserts text that needs no formula, either into the formula being edited or
+/// straight into the document.
+fn insert_text(text: &'static str) {
+    match field::focused_host() {
+        Some(host) => {
+            for c in text.chars() {
+                field::type_char(&host, c);
+            }
+        }
+        None => doc::insert_text(text),
+    }
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     let shell = Shell {
@@ -149,6 +165,12 @@ pub fn App() -> impl IntoView {
     let editor_ref = NodeRef::<leptos::html::Div>::new();
     let query = RwSignal::new(String::new());
     let replacement = RwSignal::new(String::new());
+    let regex = RwSignal::new(false);
+    let case_sensitive = RwSignal::new(false);
+    let options = move || doc::SearchOptions {
+        regex: regex.get_untracked(),
+        case_sensitive: case_sensitive.get_untracked(),
+    };
 
     Effect::new(move |_| {
         let Some(element) = editor_ref.get() else {
@@ -205,11 +227,11 @@ pub fn App() -> impl IntoView {
                         on:input=move |ev| query.set(event_target_value(&ev))
                         on:keydown=move |ev: KeyboardEvent| {
                             if ev.key() == "Enter" {
-                                doc::find_next(&query.get_untracked());
+                                doc::find_next(&query.get_untracked(), options());
                             }
                         }
                     />
-                    <button class="tool" on:click=move |_| { doc::find_next(&query.get_untracked()); }>"次を検索"</button>
+                    <button class="tool" on:click=move |_| { doc::find_next(&query.get_untracked(), options()); }>"次を検索"</button>
                     <input
                         class="find-input"
                         placeholder="置換後"
@@ -217,9 +239,25 @@ pub fn App() -> impl IntoView {
                         on:input=move |ev| replacement.set(event_target_value(&ev))
                     />
                     <button class="tool" on:click=move |_| {
-                        let replaced = doc::replace_all(&query.get_untracked(), &replacement.get_untracked());
+                        let replaced = doc::replace_all(&query.get_untracked(), &replacement.get_untracked(), options());
                         shell.status.set(format!("{replaced} 件置換しました"));
                     }>"すべて置換"</button>
+                    <label class="find-toggle" title="大文字小文字を区別">
+                        <input
+                            type="checkbox"
+                            prop:checked=move || case_sensitive.get()
+                            on:change=move |ev| case_sensitive.set(event_target_checked(&ev))
+                        />
+                        "Aa"
+                    </label>
+                    <label class="find-toggle" title="正規表現（置換では $1 で後方参照）">
+                        <input
+                            type="checkbox"
+                            prop:checked=move || regex.get()
+                            on:change=move |ev| regex.set(event_target_checked(&ev))
+                        />
+                        ".*"
+                    </label>
                     <button class="tool" on:click=move |_| shell.searching.set(false)>"閉じる"</button>
                 </div>
             </Show>
@@ -252,9 +290,6 @@ fn Palette() -> impl IntoView {
         ("ⁿ√", "n乗根", Structure::NthRoot),
         ("x²", "上付き (^)", Structure::Sup),
         ("xₙ", "下付き (_)", Structure::Sub),
-        ("( )", "括弧", Structure::Paren),
-        ("[ ]", "角括弧", Structure::Bracket),
-        ("|x|", "絶対値", Structure::Bar),
         ("∑", "総和", Structure::Sum),
         ("∏", "総乗", Structure::Prod),
         ("∫", "積分", Structure::Int),
@@ -312,32 +347,15 @@ fn Palette() -> impl IntoView {
             <div class="group">
                 {symbols
                     .into_iter()
+                    .chain(greek)
                     .map(|name| {
-                        let glyph = crate::math::symbols::lookup(name).map(|s| s.glyph).unwrap_or(name);
+                        let glyph = commands::glyph_for(name).unwrap_or(name);
                         view! {
                             <button
                                 class="pal"
                                 title=name
                                 on:mousedown=hold_focus
-                                on:click=move |_| insert(Node::Sym(name.to_string()))
-                            >
-                                {glyph}
-                            </button>
-                        }
-                    })
-                    .collect::<Vec<_>>()}
-            </div>
-            <div class="group">
-                {greek
-                    .into_iter()
-                    .map(|name| {
-                        let glyph = crate::math::symbols::lookup(name).map(|s| s.glyph).unwrap_or(name);
-                        view! {
-                            <button
-                                class="pal"
-                                title=name
-                                on:mousedown=hold_focus
-                                on:click=move |_| insert(Node::Sym(name.to_string()))
+                                on:click=move |_| insert_text(glyph)
                             >
                                 {glyph}
                             </button>
@@ -353,7 +371,7 @@ fn Palette() -> impl IntoView {
                             <button
                                 class="pal pal-word"
                                 on:mousedown=hold_focus
-                                on:click=move |_| insert(Node::Func(name.to_string()))
+                                on:click=move |_| insert_text(name)
                             >
                                 {name}
                             </button>
@@ -372,9 +390,6 @@ enum Structure {
     NthRoot,
     Sup,
     Sub,
-    Paren,
-    Bracket,
-    Bar,
     Sum,
     Prod,
     Int,
@@ -391,18 +406,6 @@ impl Structure {
             Structure::NthRoot => ast::nth_root(),
             Structure::Sup => Node::Sup(Vec::new()),
             Structure::Sub => Node::Sub(Vec::new()),
-            Structure::Paren => Node::Group {
-                delim: Delim::Paren,
-                body: Vec::new(),
-            },
-            Structure::Bracket => Node::Group {
-                delim: Delim::Bracket,
-                body: Vec::new(),
-            },
-            Structure::Bar => Node::Group {
-                delim: Delim::Bar,
-                body: Vec::new(),
-            },
             Structure::Sum => ast::big_op("sum"),
             Structure::Prod => ast::big_op("prod"),
             Structure::Int => ast::big_op("int"),
@@ -445,6 +448,19 @@ fn install_shortcuts(shell: Shell) {
             "m" => {
                 event.prevent_default();
                 doc::insert_math(shift);
+            }
+            // The formula being edited has its own history.
+            "z" if field::focused_host().is_none() => {
+                event.prevent_default();
+                if shift {
+                    doc::redo();
+                } else {
+                    doc::undo();
+                }
+            }
+            "y" if field::focused_host().is_none() => {
+                event.prevent_default();
+                doc::redo();
             }
             _ => {}
         }
