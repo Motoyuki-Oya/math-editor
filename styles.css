@@ -322,6 +322,14 @@ body {
   margin-bottom: 0.06em;
 }
 
+/* Two stretched arrows facing each other, one above the other. */
+.mn-arrow-pair {
+  display: flex;
+  flex-direction: column;
+  align-self: stretch;
+  font-size: 0.8em;
+}
+
 .mn-arrow-head {
   /* Hides the glyph's own short shaft behind the flexible one. */
   margin: 0 -0.12em;

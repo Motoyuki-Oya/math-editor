@@ -305,7 +305,28 @@ impl<'a> Renderer<'a> {
                 holder.append_child(&glyph).ok();
                 holder.append_child(&shaft()).ok();
             }
-            // Two heads: nothing to stretch, so the glyph stands on its own.
+            // Two heads: each end is a glyph of its own, with the line between.
+            '↔' | '⇔' => {
+                let (left, right) = if arrow == '↔' {
+                    ('←', '→')
+                } else {
+                    ('⇐', '⇒')
+                };
+                holder
+                    .append_child(&self.span("mn-arrow-head", &left.to_string()))
+                    .ok();
+                holder.append_child(&shaft()).ok();
+                holder
+                    .append_child(&self.span("mn-arrow-head", &right.to_string()))
+                    .ok();
+            }
+            // A pair of arrows, one above the other, both stretched.
+            '⇄' => {
+                let column = self.el("span", "mn-arrow-pair");
+                column.append_child(&self.arrow('→')).ok();
+                column.append_child(&self.arrow('←')).ok();
+                return column;
+            }
             _ => {
                 holder.append_child(&glyph).ok();
             }
