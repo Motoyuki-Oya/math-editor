@@ -17,7 +17,7 @@ description: How to run and GUI-test the MathNote Tauri v2 + Leptos desktop edit
   - Put the non-ASCII text in a file (e.g. `/tmp/x.txt`) and load it with the 開く button.
   - To get non-ASCII into an input field: select the text in the document (a double-click selects a Japanese word cleanly), `Ctrl+C`, click the input, `Ctrl+V`. No `xclip`/`xsel` is installed, so shell-side clipboard tricks are unavailable.
   - Keyboard triggers that require typing a non-ASCII glyph (e.g. `√` + space) may be impossible to test directly; use the equivalent `\sqrt` + space or the palette button and report the glyph trigger as untested.
-- **The unsaved-changes confirm dialog may be broken.** `window.confirm()` appears to return `false` in the Linux webkit2gtk WebView, so 新規 / 開く silently do nothing while the status bar says 未保存. Workaround: save the document first (名前を付けて → a path) so it becomes 保存済み, then 開く/新規 works. Use `Ctrl+A` + `Delete` in the editor to clear a document instead of 新規.
+- **Do not use `window.confirm()` in this app.** It returns `false` in the Linux webkit2gtk WebView, which once made 新規 / 開く silently do nothing while unsaved. The unsaved-changes question now goes through the `confirm_discard` Tauri command (native dialog, buttons 破棄する / キャンセル); when testing 新規 / 開く while 未保存, expect that dialog and answer it.
 - **Native GTK file dialogs are usable.** In the save/open dialog, `Ctrl+A` in the name field then typing a full absolute path (e.g. `/tmp/out.txt`) and pressing `Return` works. For opening arbitrary extensions, pick the「すべてのファイル」filter from the dropdown at the bottom-right first.
 
 ## Useful UI facts (for locating things)
