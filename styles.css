@@ -301,6 +301,11 @@ body {
   padding: 0.08em 0.3em 0;
 }
 
+/* The same stack, written without a rule. */
+.mn-frac-bare .mn-frac-num {
+  border-bottom: none;
+}
+
 .mn-sqrt {
   display: inline-flex;
   align-items: stretch;

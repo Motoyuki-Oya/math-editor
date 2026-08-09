@@ -12,5 +12,5 @@ pub mod view;
 pub use search::SearchOptions;
 pub use state::{
     find_next, focus, init, insert_math, insert_node, insert_plain, load, redo, replace_all,
-    set_on_change, stats, to_html, to_markdown, undo,
+    set_on_change, stats, to_document, undo,
 };

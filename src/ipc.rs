@@ -72,13 +72,6 @@ pub async fn pick_save_path(default_name: &str) -> Option<String> {
         .as_string()
 }
 
-pub async fn pick_export_path(default_name: &str) -> Option<String> {
-    call("pick_export_path", DefaultName { default_name })
-        .await
-        .ok()?
-        .as_string()
-}
-
 pub async fn read_document(path: &str) -> Result<String, String> {
     let value = call("read_document", PathArg { path }).await?;
     Ok(value.as_string().unwrap_or_default())

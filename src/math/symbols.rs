@@ -144,59 +144,48 @@ pub const FUNCTIONS: &[&str] = &[
     "mod",
 ];
 
-/// Large operators. `limits_below` marks the ones whose limits are drawn above
-/// and below the glyph instead of beside it.
+/// Symbols that are usually written with something above and below them.
 pub struct BigOp {
     pub name: &'static str,
     pub glyph: &'static str,
-    pub limits_below: bool,
 }
 
 pub const BIG_OPS: &[BigOp] = &[
     BigOp {
         name: "sum",
         glyph: "∑",
-        limits_below: true,
     },
     BigOp {
         name: "prod",
         glyph: "∏",
-        limits_below: true,
     },
     BigOp {
         name: "coprod",
         glyph: "∐",
-        limits_below: true,
     },
     BigOp {
         name: "bigcup",
         glyph: "⋃",
-        limits_below: true,
     },
     BigOp {
         name: "bigcap",
         glyph: "⋂",
-        limits_below: true,
     },
     BigOp {
         name: "lim",
         glyph: "lim",
-        limits_below: true,
     },
     BigOp {
         name: "int",
         glyph: "∫",
-        limits_below: false,
     },
     BigOp {
         name: "iint",
         glyph: "∬",
-        limits_below: false,
     },
     BigOp {
         name: "oint",
         glyph: "∮",
-        limits_below: false,
     },
 ];
 

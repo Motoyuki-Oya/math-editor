@@ -179,17 +179,17 @@ pub fn insert_text(session: &Rc<RefCell<Session>>, text: &str) {
     changed(session);
 }
 
-/// Puts a formula at the caret and starts editing it.
-pub fn insert_math(display: bool) {
+/// Puts an island at the caret and starts editing it.
+pub fn insert_math() {
     let Some(session) = session() else { return };
     leave_math(&session);
     {
         let mut borrowed = session.borrow_mut();
-        borrowed.editor.insert_math("", display);
+        borrowed.editor.insert_math("");
         let at = super::model::before_pos(borrowed.editor.primary().head);
         borrowed.active = Some(Active {
             at,
-            state: MathState::from_latex(""),
+            state: MathState::from_notation(""),
         });
     }
     focus();
@@ -201,7 +201,7 @@ pub fn insert_math(display: bool) {
 pub fn insert_node(node: Node) {
     let Some(session) = session() else { return };
     if session.borrow().active.is_none() {
-        insert_math(false);
+        insert_math();
     }
     let Some(session) = self::session() else {
         return;
@@ -245,17 +245,13 @@ pub fn load(text: &str) {
     changed(&session);
 }
 
-pub fn to_markdown() -> String {
+pub fn to_document() -> String {
     session()
         .map(|session| {
             write_back(&session);
-            session.borrow().editor.to_markdown()
+            session.borrow().editor.to_document()
         })
         .unwrap_or_default()
-}
-
-pub fn to_html(title: &str) -> String {
-    crate::markdown::to_html(&to_markdown(), title)
 }
 
 pub fn stats() -> (usize, usize) {
@@ -264,13 +260,13 @@ pub fn stats() -> (usize, usize) {
         .unwrap_or((0, 1))
 }
 
-pub fn selected_markdown(session: &Rc<RefCell<Session>>) -> String {
+pub fn selected_text(session: &Rc<RefCell<Session>>) -> String {
     let borrowed = session.borrow();
     let sel = borrowed.editor.primary();
     if sel.is_caret() {
         return String::new();
     }
-    input::markdown_of(borrowed.editor.text().slice(sel.start(), sel.end()))
+    input::text_of(borrowed.editor.text().slice(sel.start(), sel.end()))
 }
 
 pub fn delete_selection(session: &Rc<RefCell<Session>>) {
@@ -284,8 +280,8 @@ pub fn write_back(session: &Rc<RefCell<Session>>) {
     let Some(active) = borrowed.active.as_ref() else {
         return;
     };
-    let (at, latex) = (active.at, active.state.to_latex());
-    borrowed.editor.set_math_at(at, &latex);
+    let (at, source) = (active.at, active.state.to_notation());
+    borrowed.editor.set_math_at(at, &source);
 }
 
 /// Stops editing a formula, leaving the caret next to it.
@@ -301,14 +297,14 @@ pub fn leave_math(session: &Rc<RefCell<Session>>) {
 /// Starts editing the formula at `at`, from either end.
 pub fn enter_math(session: &Rc<RefCell<Session>>, at: Pos, from_start: bool) -> bool {
     leave_math(session);
-    let latex = {
+    let source = {
         let borrowed = session.borrow();
         match borrowed.editor.text().item_at(at) {
-            Some(Item::Math { latex, .. }) => latex.clone(),
+            Some(Item::Math { source }) => source.clone(),
             _ => return false,
         }
     };
-    let mut state = MathState::from_latex(&latex);
+    let mut state = MathState::from_notation(&source);
     if from_start {
         state.move_to_start();
     } else {
@@ -429,6 +425,15 @@ fn keydown_in_math(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
             return;
         };
         let state = &mut active.state;
+        // A grid grows by a row on Alt+Enter, wherever the caret is inside it.
+        if event.alt_key() && key == "Enter" {
+            state.grow_matrix(true);
+            drop(borrowed);
+            event.prevent_default();
+            write_back(session);
+            changed(session);
+            return;
+        }
         match (ctrl, key.as_str()) {
             (true, "z") if event.shift_key() => {
                 state.redo();

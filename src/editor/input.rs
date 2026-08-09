@@ -141,7 +141,7 @@ pub fn install(session: &Rc<RefCell<Session>>) {
 }
 
 fn copy_selection(session: &Rc<RefCell<Session>>, event: &web_sys::ClipboardEvent, remove: bool) {
-    let text = state::selected_markdown(session);
+    let text = state::selected_text(session);
     if text.is_empty() {
         return;
     }
@@ -178,18 +178,15 @@ pub fn adds_caret(event: &MouseEvent) -> bool {
     event.alt_key()
 }
 
-/// The text a selection covers, joined with newlines, formulas as `$...$`.
-pub fn markdown_of(items: Vec<Vec<Item>>) -> String {
+/// The text a selection covers, joined with newlines, islands as `$( ... )`.
+pub fn text_of(items: Vec<Vec<Item>>) -> String {
     items
         .into_iter()
         .map(|line| {
             line.into_iter()
                 .map(|item| match item {
                     Item::Char(c) => c.to_string(),
-                    Item::Math { latex, display } => {
-                        let fence = if display { "$$" } else { "$" };
-                        format!("{fence}{latex}{fence}")
-                    }
+                    Item::Math { source } => format!("$({source})"),
                 })
                 .collect::<String>()
         })

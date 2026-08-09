@@ -1,8 +1,8 @@
-//! Cursor movement and editing commands on a formula.
+//! Cursor movement and editing commands inside an island.
 
 use super::ast::{row_at, row_at_mut, Cursor, Delim, Node, Row};
 use super::commands;
-use super::latex::{parse_latex, row_to_latex};
+use super::notation::{island_text, parse_island};
 
 const UNDO_LIMIT: usize = 200;
 
@@ -37,8 +37,8 @@ impl MathState {
         }
     }
 
-    pub fn from_latex(latex: &str) -> MathState {
-        let root = parse_latex(latex);
+    pub fn from_notation(source: &str) -> MathState {
+        let root = parse_island(source);
         let index = root.len();
         MathState {
             root,
@@ -62,8 +62,8 @@ impl MathState {
         self.root.is_empty()
     }
 
-    pub fn to_latex(&self) -> String {
-        row_to_latex(&self.root)
+    pub fn to_notation(&self) -> String {
+        island_text(&self.root)
     }
 
     fn snapshot(&mut self) {
@@ -170,7 +170,7 @@ impl MathState {
 
     pub fn insert_char(&mut self, c: char) {
         match c {
-            '/' => self.insert_fraction(),
+            '/' => self.insert_stack(),
             '^' => self.insert(Node::Sup(Row::new())),
             '_' => self.insert(Node::Sub(Row::new())),
             '(' | '[' => self.insert(Node::Group {
@@ -182,19 +182,20 @@ impl MathState {
         }
     }
 
-    /// Typing `/` turns whatever was just typed into the numerator, the way a
-    /// person would write the fraction on paper.
-    pub fn insert_fraction(&mut self) {
+    /// Typing `/` puts whatever was just typed above the rule, the way a person
+    /// would write it on paper.
+    pub fn insert_stack(&mut self) {
         self.snapshot();
         let index = self.cursor.index;
         let start = {
             let row = self.current_row();
-            numerator_start(row, index)
+            above_start(row, index)
         };
-        let num: Row = self.current_row_mut().drain(start..index).collect();
-        let node = Node::Frac {
-            num,
-            den: Row::new(),
+        let above: Row = self.current_row_mut().drain(start..index).collect();
+        let node = Node::Stack {
+            above,
+            below: Row::new(),
+            rule: true,
         };
         self.current_row_mut().insert(start, node);
         self.cursor.path.push((start, 1));
@@ -358,12 +359,12 @@ impl MathState {
                 continue;
             };
             let target = match &node {
-                Node::Frac { .. } => match (up, slot) {
+                Node::Stack { .. } => match (up, slot) {
                     (true, 1) => Some(0),
                     (false, 0) => Some(1),
                     _ => None,
                 },
-                Node::BigOp { .. } => match (up, slot) {
+                Node::Limits { .. } => match (up, slot) {
                     (true, 0) => Some(1),
                     (false, 1) => Some(0),
                     _ => None,
@@ -456,9 +457,9 @@ impl Default for MathState {
     }
 }
 
-/// Finds where the implicit numerator starts when `/` is typed: the run of
+/// Finds where the implicit upper row starts when `/` is typed: the run of
 /// characters (or the single group) immediately before the caret.
-fn numerator_start(row: &Row, index: usize) -> usize {
+fn above_start(row: &Row, index: usize) -> usize {
     if index == 0 {
         return 0;
     }
@@ -500,7 +501,7 @@ mod tests {
         for c in "x+1".chars() {
             state.insert_char(c);
         }
-        assert_eq!(state.to_latex(), "x+1");
+        assert_eq!(state.to_notation(), "x+1");
     }
 
     #[test]
@@ -511,7 +512,7 @@ mod tests {
         }
         assert!(state.commit_command());
         state.insert_char('2');
-        assert_eq!(state.to_latex(), "\\sqrt{2}");
+        assert_eq!(state.to_notation(), "√ 2");
     }
 
     #[test]
@@ -520,7 +521,7 @@ mod tests {
         state.insert_char('√');
         assert!(state.commit_command());
         state.insert_char('2');
-        assert_eq!(state.to_latex(), "\\sqrt{2}");
+        assert_eq!(state.to_notation(), "√ 2");
     }
 
     #[test]
@@ -533,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_takes_the_preceding_run_as_numerator() {
+    fn slash_takes_the_preceding_run_as_the_upper_row() {
         let mut state = MathState::new();
         for c in "1+ab/".chars() {
             state.insert_char(c);
@@ -541,12 +542,12 @@ mod tests {
         for c in "2c".chars() {
             state.insert_char(c);
         }
-        assert_eq!(state.to_latex(), "1+\\frac{ab}{2c}");
+        assert_eq!(state.to_notation(), "1+$(ab/2c)");
     }
 
     #[test]
-    fn caret_enters_and_leaves_a_fraction() {
-        let mut state = MathState::from_latex("\\frac{a}{b}");
+    fn caret_enters_and_leaves_a_stack() {
+        let mut state = MathState::from_notation("a/b");
         state.move_to_start();
         assert_eq!(state.move_right(), None);
         assert_eq!(state.cursor().path, vec![(0, 0)]);
@@ -556,8 +557,8 @@ mod tests {
     }
 
     #[test]
-    fn up_and_down_switch_between_numerator_and_denominator() {
-        let mut state = MathState::from_latex("\\frac{a}{b}");
+    fn up_and_down_switch_between_the_upper_and_lower_row() {
+        let mut state = MathState::from_notation("a/b");
         state.move_to_start();
         state.move_right();
         assert!(state.move_down());
@@ -568,10 +569,10 @@ mod tests {
 
     #[test]
     fn backspace_keeps_the_content_of_a_deleted_structure() {
-        let mut state = MathState::from_latex("\\frac{ab}{c}");
+        let mut state = MathState::from_notation("ab/c");
         state.move_to_end();
         assert_eq!(state.backspace(), None);
-        assert_eq!(state.to_latex(), "abc");
+        assert_eq!(state.to_notation(), "abc");
     }
 
     #[test]
@@ -582,7 +583,7 @@ mod tests {
 
     #[test]
     fn arrow_past_the_edge_reports_escape() {
-        let mut state = MathState::from_latex("x");
+        let mut state = MathState::from_notation("x");
         state.move_to_end();
         assert_eq!(state.move_right(), Some(Escape::Right));
         state.move_to_start();
@@ -595,9 +596,9 @@ mod tests {
         state.insert_char('a');
         state.insert_char('b');
         assert!(state.undo());
-        assert_eq!(state.to_latex(), "a");
+        assert_eq!(state.to_notation(), "a");
         assert!(state.redo());
-        assert_eq!(state.to_latex(), "ab");
+        assert_eq!(state.to_notation(), "ab");
     }
 
     #[test]
@@ -607,14 +608,14 @@ mod tests {
         state.insert_char('x');
         state.insert_char(')');
         state.insert_char('+');
-        assert_eq!(state.to_latex(), "\\left(x\\right)+");
+        assert_eq!(state.to_notation(), "(x)+");
     }
 
     #[test]
     fn matrix_grows_by_row_and_column() {
         let mut state = MathState::new();
         state.insert(super::super::ast::matrix(
-            super::super::ast::MatrixKind::Paren,
+            super::super::ast::MatrixKind::Grid,
             1,
             2,
         ));

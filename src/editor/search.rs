@@ -220,8 +220,8 @@ mod tests {
     }
 
     #[test]
-    fn formulas_break_up_the_searched_text() {
-        let text = Text::from_markdown("ab$x$cd");
+    fn islands_break_up_the_searched_text() {
+        let text = Text::from_document("ab$(x)cd");
         let runs = runs(text.line(0));
         assert_eq!(runs, vec![(0, "ab".to_string()), (3, "cd".to_string())]);
     }

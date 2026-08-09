@@ -47,7 +47,7 @@ pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
                 let mut borrowed = session.borrow_mut();
                 borrowed.editor.replace_range(from, sel.head, "");
             }
-            state::insert_math(false);
+            state::insert_math();
             let Some(session) = state::session() else {
                 return true;
             };
