@@ -332,6 +332,9 @@ pub fn render_into(host: &Element, row: &Row, cursor: Option<&Cursor>) {
 pub fn position_at_point(host: &Element, x: f64, y: f64) -> Option<Cursor> {
     let candidates = host.query_selector_all("[data-pos]").ok()?;
     let mut best: Option<(f64, Cursor)> = None;
+    // A click inside a nested slot also lands inside the rectangle of every
+    // enclosing structure, so the innermost hit wins over its ancestors.
+    let mut inside: Option<(usize, f64, Cursor)> = None;
     for i in 0..candidates.length() {
         let Some(element) = candidates
             .item(i)
@@ -359,11 +362,23 @@ pub fn position_at_point(host: &Element, x: f64, y: f64) -> Option<Cursor> {
             cursor.index += 1;
         }
         let score = dy * 4.0 + dx;
+        if dy == 0.0 && x >= rect.left() && x <= rect.right() {
+            let depth = cursor.path.len();
+            let better = inside
+                .as_ref()
+                .is_none_or(|(deep, close, _)| depth > *deep || (depth == *deep && score < *close));
+            if better {
+                inside = Some((depth, score, cursor));
+            }
+            continue;
+        }
         if best.as_ref().is_none_or(|(current, _)| score < *current) {
             best = Some((score, cursor));
         }
     }
-    best.map(|(_, cursor)| cursor)
+    inside
+        .map(|(_, _, cursor)| cursor)
+        .or(best.map(|(_, cursor)| cursor))
 }
 
 #[cfg(test)]

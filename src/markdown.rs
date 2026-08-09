@@ -99,6 +99,26 @@ fn find_close(chars: &[char], from: usize, close: &str) -> Option<usize> {
     None
 }
 
+/// Writes lines back out in the file format `parse` reads.
+pub fn serialize(lines: &[Line]) -> String {
+    lines
+        .iter()
+        .map(|segments| {
+            segments
+                .iter()
+                .map(|segment| match segment {
+                    Segment::Text(text) => escape_text(text),
+                    Segment::Math { latex, display } => {
+                        let fence = if *display { "$$" } else { "$" };
+                        format!("{fence}{latex}{fence}")
+                    }
+                })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn escape_html(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")

@@ -15,8 +15,11 @@ console_error_panic_hook = "0.1.7"
 [dependencies.web-sys]
 version = "0.3"
 features = [
+  "ClipboardEvent",
+  "CompositionEvent",
   "console",
   "CssStyleDeclaration",
+  "DataTransfer",
   "Document",
   "DomRect",
   "DomTokenList",
@@ -24,8 +27,11 @@ features = [
   "Event",
   "EventTarget",
   "FocusEvent",
+  "HtmlCollection",
   "HtmlElement",
   "HtmlInputElement",
+  "HtmlTextAreaElement",
+  "InputEvent",
   "KeyboardEvent",
   "MouseEvent",
   "Node",
