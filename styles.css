@@ -95,6 +95,14 @@ body {
   color: var(--fg);
 }
 
+.find-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--fg);
+}
+
 .editor {
   flex: 1;
   overflow-y: auto;

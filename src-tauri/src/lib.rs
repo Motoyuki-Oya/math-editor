@@ -27,7 +27,11 @@ async fn pick_open_path(app: tauri::AppHandle) -> Option<String> {
         app.dialog()
             .file()
             .set_title("開く")
-            .add_filter("テキスト / Markdown", &["md", "markdown", "txt"])
+            .add_filter(
+                "テキスト",
+                &["txt", "md", "markdown", "text", "log", "csv", "tex"],
+            )
+            .add_filter("すべてのファイル", &["*"])
             .pick_file(cb);
     })
     .map(|p| p.to_string_lossy().into_owned())
@@ -40,8 +44,9 @@ async fn pick_save_path(app: tauri::AppHandle, default_name: String) -> Option<S
             .file()
             .set_title("名前を付けて保存")
             .set_file_name(default_name)
-            .add_filter("Markdown", &["md"])
             .add_filter("テキスト", &["txt"])
+            .add_filter("Markdown", &["md"])
+            .add_filter("すべてのファイル", &["*"])
             .save_file(cb);
     })
     .map(|p| p.to_string_lossy().into_owned())
