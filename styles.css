@@ -306,6 +306,27 @@ body {
   border-bottom: none;
 }
 
+/* An arrow between the rows, as wide as the wider of the two. */
+.mn-arrow {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  line-height: 1;
+}
+
+.mn-arrow-shaft {
+  flex: 1;
+  min-width: 0.5em;
+  border-top: 1px solid currentColor;
+  /* Meets the shaft the glyph draws for its head. */
+  margin-bottom: 0.06em;
+}
+
+.mn-arrow-head {
+  /* Hides the glyph's own short shaft behind the flexible one. */
+  margin: 0 -0.12em;
+}
+
 .mn-sqrt {
   display: inline-flex;
   align-items: stretch;

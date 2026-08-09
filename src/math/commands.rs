@@ -1,14 +1,16 @@
 //! `\name` shortcuts. The same table serves the text editor and the island
 //! editor, so `\sqrt` behaves identically wherever it is typed.
 
-use super::ast::{self, MatrixKind, Node};
+use super::ast::{self, Between, MatrixKind, Node};
 use super::symbols;
 
 /// The node a `\name` shortcut expands to, if the name is known.
 pub fn node_for(name: &str) -> Option<Node> {
     match name {
-        "stack" | "frac" => Some(ast::stack(true)),
-        "atop" => Some(ast::stack(false)),
+        "stack" | "frac" => Some(ast::stack(Between::Rule)),
+        "atop" => Some(ast::stack(Between::Nothing)),
+        "arrow" | "xrightarrow" => Some(ast::stack(Between::Arrow('→'))),
+        "xleftarrow" => Some(ast::stack(Between::Arrow('←'))),
         "sqrt" => Some(ast::sqrt()),
         "root" | "nthroot" => Some(ast::nth_root()),
         "matrix" => Some(ast::matrix(MatrixKind::Grid, 2, 2)),

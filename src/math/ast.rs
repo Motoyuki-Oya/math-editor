@@ -42,6 +42,17 @@ pub enum MatrixKind {
     Cases,
 }
 
+/// What is drawn between the two rows of a [`Node::Stack`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Between {
+    /// A rule the width of the wider row.
+    Rule,
+    /// Nothing: the rows are simply piled up.
+    Nothing,
+    /// An arrow, stretched to the width of the wider row.
+    Arrow(char),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Node {
     /// A directly typed character: a variable, a digit or an operator.
@@ -50,11 +61,12 @@ pub enum Node {
     Sym(String),
     /// An upright function name such as `\sin`, stored without the backslash.
     Func(String),
-    /// A rule with something above and below it; the rule can be left out.
+    /// Something above and something below, with a rule, an arrow or nothing
+    /// drawn between them.
     Stack {
         above: Row,
         below: Row,
-        rule: bool,
+        between: Between,
     },
     Sqrt {
         index: Option<Row>,
@@ -210,11 +222,11 @@ pub fn empty_row() -> Row {
     Vec::new()
 }
 
-pub fn stack(rule: bool) -> Node {
+pub fn stack(between: Between) -> Node {
     Node::Stack {
         above: empty_row(),
         below: empty_row(),
-        rule,
+        between,
     }
 }
 
@@ -255,7 +267,7 @@ mod tests {
 
     #[test]
     fn slots_are_addressable() {
-        let node = stack(true);
+        let node = stack(Between::Rule);
         assert_eq!(node.slot_count(), 2);
         assert!(node.slot(0).is_some());
         assert!(node.slot(2).is_none());
@@ -274,7 +286,7 @@ mod tests {
         let root: Row = vec![Node::Stack {
             above: vec![Node::Char('a')],
             below: vec![Node::Char('b')],
-            rule: true,
+            between: Between::Rule,
         }];
         assert_eq!(row_at(&root, &[(0, 1)]), Some(&vec![Node::Char('b')]));
         assert_eq!(row_at(&root, &[(0, 5)]), None);

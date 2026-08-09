@@ -1,8 +1,8 @@
 //! Cursor movement and editing commands inside an island.
 
-use super::ast::{row_at, row_at_mut, Cursor, Delim, Node, Row};
+use super::ast::{row_at, row_at_mut, Between, Cursor, Delim, Node, Row};
 use super::commands;
-use super::notation::{island_text, parse_island};
+use super::notation::{self, island_text, parse_island};
 
 const UNDO_LIMIT: usize = 200;
 
@@ -170,7 +170,8 @@ impl MathState {
 
     pub fn insert_char(&mut self, c: char) {
         match c {
-            '/' => self.insert_stack(),
+            '/' => self.insert_stack(Between::Rule),
+            c if notation::is_arrow(c) => self.insert_stack(Between::Arrow(c)),
             '^' => self.insert(Node::Sup(Row::new())),
             '_' => self.insert(Node::Sub(Row::new())),
             '(' | '[' => self.insert(Node::Group {
@@ -182,9 +183,9 @@ impl MathState {
         }
     }
 
-    /// Typing `/` puts whatever was just typed above the rule, the way a person
-    /// would write it on paper.
-    pub fn insert_stack(&mut self) {
+    /// Typing `/` (or an arrow) puts whatever was just typed above it, the way
+    /// a person would write it on paper.
+    pub fn insert_stack(&mut self, between: Between) {
         self.snapshot();
         let index = self.cursor.index;
         let start = {
@@ -195,7 +196,7 @@ impl MathState {
         let node = Node::Stack {
             above,
             below: Row::new(),
-            rule: true,
+            between,
         };
         self.current_row_mut().insert(start, node);
         self.cursor.path.push((start, 1));

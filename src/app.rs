@@ -8,7 +8,7 @@ use web_sys::{HtmlElement, KeyboardEvent};
 
 use crate::editor;
 use crate::ipc;
-use crate::math::ast::{self, MatrixKind, Node};
+use crate::math::ast::{self, Between, MatrixKind, Node};
 use crate::math::commands;
 
 const UNTITLED: &str = "無題";
@@ -247,6 +247,7 @@ fn Palette() -> impl IntoView {
     let structures = [
         ("½", "罫線とその上下  $(上/下)", Structure::Stack),
         ("ⁿ", "罫線なしの上下  $(上 - 下)", Structure::Bare),
+        ("→", "矢印とその上下  $(上 → 下)", Structure::Arrow),
         ("√", "ルート  $(√ x)", Structure::Sqrt),
         ("ⁿ√", "n乗根  $(√[n] x)", Structure::NthRoot),
         ("x²", "上付き  x$(^ 3)", Structure::Sup),
@@ -356,6 +357,7 @@ fn Palette() -> impl IntoView {
 enum Structure {
     Stack,
     Bare,
+    Arrow,
     Sqrt,
     NthRoot,
     Sup,
@@ -371,8 +373,9 @@ enum Structure {
 impl Structure {
     fn node(self) -> Node {
         match self {
-            Structure::Stack => ast::stack(true),
-            Structure::Bare => ast::stack(false),
+            Structure::Stack => ast::stack(Between::Rule),
+            Structure::Bare => ast::stack(Between::Nothing),
+            Structure::Arrow => ast::stack(Between::Arrow('→')),
             Structure::Sqrt => ast::sqrt(),
             Structure::NthRoot => ast::nth_root(),
             Structure::Sup => Node::Sup(Vec::new()),

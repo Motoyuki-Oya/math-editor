@@ -3,19 +3,27 @@
 //! Everything inside `$(` … `)` is read here and written back out here, so the
 //! saved file stays plain text and no other format is involved.
 
-use super::ast::{Delim, MatrixKind, Node, Row};
+use super::ast::{Between, Delim, MatrixKind, Node, Row};
 use super::symbols;
 
 pub const LIMITS_MARK: char = '↨';
 pub const ROOT_MARK: char = '√';
 pub const ROOT_WORD: &str = "sqrt";
 
+/// Arrows that can be drawn between the two rows of a stack, stretched to fit
+/// them, the way a rule is.
+const ARROWS: [char; 8] = ['→', '←', '↔', '⇒', '⇐', '⇔', '⇄', '↦'];
+
+pub fn is_arrow(c: char) -> bool {
+    ARROWS.contains(&c)
+}
+
 /// Characters that mean something structurally, so writing one as an ordinary
 /// character means writing it twice.
 const SPECIAL: [char; 7] = ['$', '/', '-', ',', ';', '[', ']'];
 
 fn is_special(c: char) -> bool {
-    SPECIAL.contains(&c)
+    SPECIAL.contains(&c) || is_arrow(c)
 }
 
 // ---------------------------------------------------------------- reading
@@ -85,13 +93,6 @@ fn top_level(chars: &[char]) -> Vec<(usize, char)> {
     out
 }
 
-fn find_top(chars: &[char], sep: char) -> Option<usize> {
-    top_level(chars)
-        .into_iter()
-        .find(|&(_, c)| c == sep)
-        .map(|(i, _)| i)
-}
-
 /// Splits on the top level commas, so `Σ, n, x=1` becomes three arguments and
 /// `lim,, n→∞` leaves the middle one out.
 fn split_args(chars: &[char]) -> Vec<&[char]> {
@@ -137,20 +138,12 @@ fn content(chars: &[char]) -> Row {
         return Row::new();
     }
     match chars[0] {
-        '/' if chars.get(1) != Some(&'/') => {
+        c if is_stack_mark(c) && chars.get(1) != Some(&c) => {
             let args = split_args(trim(&chars[1..]));
             return vec![Node::Stack {
                 above: arg(&args, 0),
                 below: arg(&args, 1),
-                rule: true,
-            }];
-        }
-        '-' if chars.get(1) != Some(&'-') => {
-            let args = split_args(trim(&chars[1..]));
-            return vec![Node::Stack {
-                above: arg(&args, 0),
-                below: arg(&args, 1),
-                rule: false,
+                between: between(c),
             }];
         }
         LIMITS_MARK => {
@@ -175,21 +168,30 @@ fn content(chars: &[char]) -> Row {
         };
         return root(rest);
     }
-    if let Some(i) = find_top(chars, '/') {
+    if let Some((i, c)) = top_level(chars)
+        .into_iter()
+        .find(|&(_, c)| is_stack_mark(c))
+    {
         return vec![Node::Stack {
             above: row(trim(&chars[..i])),
             below: row(trim(&chars[i + 1..])),
-            rule: true,
-        }];
-    }
-    if let Some(i) = find_top(chars, '-') {
-        return vec![Node::Stack {
-            above: row(trim(&chars[..i])),
-            below: row(trim(&chars[i + 1..])),
-            rule: false,
+            between: between(c),
         }];
     }
     row(chars)
+}
+
+/// The characters that separate the two rows of a stack.
+fn is_stack_mark(c: char) -> bool {
+    c == '/' || c == '-' || is_arrow(c)
+}
+
+fn between(mark: char) -> Between {
+    match mark {
+        '/' => Between::Rule,
+        '-' => Between::Nothing,
+        arrow => Between::Arrow(arrow),
+    }
 }
 
 /// `√[n] x`: the index is optional, the body is the one chunk that follows,
@@ -452,12 +454,16 @@ fn text(row: &Row) -> String {
 /// A structure written without its island.
 fn bare(node: &Node) -> String {
     match node {
-        Node::Stack { above, below, rule } => {
+        Node::Stack {
+            above,
+            below,
+            between,
+        } => {
             let (above, below) = (text(above), text(below));
-            if *rule {
-                format!("{above}/{below}")
-            } else {
-                format!("{above} - {below}")
+            match between {
+                Between::Rule => format!("{above}/{below}"),
+                Between::Nothing => format!("{above} - {below}"),
+                Between::Arrow(arrow) => format!("{above} {arrow} {below}"),
             }
         }
         Node::Sqrt { index, body } => match index {
@@ -500,7 +506,10 @@ mod tests {
         assert_eq!(roundtrip("/ x+1, 2y"), "x+1/2y");
         assert!(matches!(
             parse_island("1/2").as_slice(),
-            [Node::Stack { rule: true, .. }]
+            [Node::Stack {
+                between: Between::Rule,
+                ..
+            }]
         ));
     }
 
@@ -510,8 +519,26 @@ mod tests {
         assert_eq!(roundtrip("- n, k"), "n - k");
         assert!(matches!(
             parse_island("- n, k").as_slice(),
-            [Node::Stack { rule: false, .. }]
+            [Node::Stack {
+                between: Between::Nothing,
+                ..
+            }]
         ));
+    }
+
+    #[test]
+    fn an_arrow_may_be_drawn_between_the_rows() {
+        assert_eq!(roundtrip("→ f, g"), "f → g");
+        assert_eq!(roundtrip("n→∞"), "n → ∞");
+        match parse_island("→ f,").as_slice() {
+            [Node::Stack { between, below, .. }] => {
+                assert_eq!(*between, Between::Arrow('→'));
+                assert!(below.is_empty());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        // Doubled, it is an ordinary arrow again.
+        assert_eq!(parse_island("a→→b").len(), 3);
     }
 
     #[test]
@@ -561,7 +588,8 @@ mod tests {
         match parse_island("↨ lim,, n→∞").as_slice() {
             [Node::Limits { upper, lower, .. }] => {
                 assert!(upper.is_empty());
-                assert_eq!(text(lower), "n→∞");
+                // The arrow is an ordinary character here, so it is doubled.
+                assert_eq!(text(lower), "n→→∞");
             }
             other => panic!("unexpected {other:?}"),
         }

@@ -4,7 +4,7 @@
 use wasm_bindgen::JsCast;
 use web_sys::{Document, Element};
 
-use super::ast::{Cursor, Delim, MatrixKind, Node, Row};
+use super::ast::{Between, Cursor, Delim, MatrixKind, Node, Row};
 use super::symbols::{self, Class};
 
 const SVG_NS: &str = "http://www.w3.org/2000/svg";
@@ -156,13 +156,12 @@ impl<'a> Renderer<'a> {
                 self.span(class, glyph)
             }
             Node::Func(name) => self.span("mn-atom mn-func", name),
-            Node::Stack { rule, .. } => {
+            Node::Stack { between, .. } => {
                 let frac = self.el(
                     "span",
-                    if *rule {
-                        "mn-frac"
-                    } else {
-                        "mn-frac mn-frac-bare"
+                    match between {
+                        Between::Rule => "mn-frac",
+                        _ => "mn-frac mn-frac-bare",
                     },
                 );
                 let num = self.el("span", "mn-frac-num");
@@ -170,6 +169,9 @@ impl<'a> Renderer<'a> {
                 let den = self.el("span", "mn-frac-den");
                 den.append_child(&self.child_row(node, 1, path, index)).ok();
                 frac.append_child(&num).ok();
+                if let Between::Arrow(arrow) = between {
+                    frac.append_child(&self.arrow(*arrow)).ok();
+                }
                 frac.append_child(&den).ok();
                 frac
             }
@@ -285,6 +287,30 @@ impl<'a> Renderer<'a> {
                 container
             }
         }
+    }
+
+    /// An arrow between the two rows of a stack. The shaft is a flexible line
+    /// so the arrow ends up as wide as the wider row, like the rule is.
+    fn arrow(&self, arrow: char) -> Element {
+        let holder = self.el("span", "mn-arrow");
+        let shaft = || self.el("span", "mn-arrow-shaft");
+        let glyph = self.span("mn-arrow-head", &arrow.to_string());
+        match arrow {
+            // The glyph carries the head, so the line goes on its blunt side.
+            '→' | '⇒' | '↦' => {
+                holder.append_child(&shaft()).ok();
+                holder.append_child(&glyph).ok();
+            }
+            '←' | '⇐' => {
+                holder.append_child(&glyph).ok();
+                holder.append_child(&shaft()).ok();
+            }
+            // Two heads: nothing to stretch, so the glyph stands on its own.
+            _ => {
+                holder.append_child(&glyph).ok();
+            }
+        }
+        holder
     }
 
     fn delimiter(&self, delim: &Delim, open: bool) -> Element {
