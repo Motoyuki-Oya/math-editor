@@ -92,6 +92,25 @@ fn frontend_ready(state: State<'_, AppState>) {
     }
 }
 
+/// Asks before losing unsaved work. The WebView's own `confirm()` is not
+/// usable on every platform, so the question goes through the native dialog.
+#[tauri::command]
+async fn confirm_discard(app: tauri::AppHandle, message: String) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.dialog()
+        .message(message)
+        .title("MathNote")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "破棄する".into(),
+            "キャンセル".into(),
+        ))
+        .show(move |discard| {
+            let _ = tx.send(discard);
+        });
+    rx.recv().unwrap_or(false)
+}
+
 fn is_dirty(window: &tauri::Window) -> bool {
     window
         .state::<AppState>()
@@ -145,7 +164,8 @@ pub fn run() {
             read_document,
             write_document,
             set_dirty,
-            frontend_ready
+            frontend_ready,
+            confirm_discard
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -51,23 +51,32 @@ impl Shell {
     }
 
     fn new_document(&self) {
-        if self.dirty.get_untracked() && !confirm("保存されていない変更があります。破棄しますか？")
-        {
-            return;
+        let shell = *self;
+        spawn_local(async move {
+            if !shell.may_discard().await {
+                return;
+            }
+            doc::load("");
+            shell.path.set(None);
+            shell.status.set(String::new());
+            shell.mark_clean();
+        });
+    }
+
+    /// Whether unsaved work may be thrown away.
+    async fn may_discard(&self) -> bool {
+        if !self.dirty.get_untracked() {
+            return true;
         }
-        doc::load("");
-        self.path.set(None);
-        self.status.set(String::new());
-        self.mark_clean();
+        ipc::confirm_discard("保存されていない変更があります。破棄しますか？").await
     }
 
     fn open(&self) {
-        if self.dirty.get_untracked() && !confirm("保存されていない変更があります。破棄しますか？")
-        {
-            return;
-        }
         let shell = *self;
         spawn_local(async move {
+            if !shell.may_discard().await {
+                return;
+            }
             let Some(path) = ipc::pick_open_path().await else {
                 return;
             };
@@ -123,12 +132,6 @@ impl Shell {
             }
         });
     }
-}
-
-fn confirm(message: &str) -> bool {
-    web_sys::window()
-        .and_then(|window| window.confirm_with_message(message).ok())
-        .unwrap_or(true)
 }
 
 /// Inserts a structure into the formula being edited, starting a new formula

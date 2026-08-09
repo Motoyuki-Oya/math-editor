@@ -47,6 +47,20 @@ struct DirtyArg {
     dirty: bool,
 }
 
+#[derive(Serialize)]
+struct MessageArg<'a> {
+    message: &'a str,
+}
+
+/// Asks the user whether unsaved work may be thrown away.
+pub async fn confirm_discard(message: &str) -> bool {
+    call("confirm_discard", MessageArg { message })
+        .await
+        .ok()
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
 pub async fn pick_open_path() -> Option<String> {
     call("pick_open_path", NoArgs {}).await.ok()?.as_string()
 }
