@@ -182,6 +182,18 @@ impl MathState {
                 body: Row::new(),
             }),
             ')' | ']' => self.leave_group(),
+            // A pipe opens the absolute value it is typed in front of, and the
+            // closing pipe steps back out of it.
+            '|' => {
+                if self.in_group(Delim::Bar) {
+                    self.leave_group();
+                } else {
+                    self.insert(Node::Group {
+                        delim: Delim::Bar,
+                        body: Row::new(),
+                    });
+                }
+            }
             _ => self.insert(Node::Char(c)),
         }
     }
@@ -203,6 +215,18 @@ impl MathState {
         self.current_row_mut().insert(start, node);
         self.cursor.path.push((start, 1));
         self.cursor.index = 0;
+    }
+
+    /// Whether the caret sits inside a group with the given delimiter.
+    fn in_group(&self, delim: Delim) -> bool {
+        self.cursor
+            .path
+            .last()
+            .and_then(|&(node, _)| {
+                let parent = &self.cursor.path[..self.cursor.path.len() - 1];
+                self.node_at(parent, node)
+            })
+            .is_some_and(|node| matches!(node, Node::Group { delim: d, .. } if *d == delim))
     }
 
     /// Closing a delimiter moves the caret just past the group it closes.
@@ -516,6 +540,15 @@ mod tests {
         assert!(state.commit_command());
         state.insert_char('2');
         assert_eq!(state.to_latex(), "\\sqrt{2}");
+    }
+
+    #[test]
+    fn pipes_wrap_an_absolute_value() {
+        let mut state = MathState::new();
+        for c in "|x|+1".chars() {
+            state.insert_char(c);
+        }
+        assert_eq!(state.to_latex(), "\\left|x\\right|+1");
     }
 
     #[test]

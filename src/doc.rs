@@ -143,6 +143,8 @@ fn handle_math_trigger(host: &HtmlElement, event: &web_sys::KeyboardEvent) {
 
     let (consume, seed): (usize, Seed) = match key.as_str() {
         "$" => (0, Seed::Empty),
+        // A pipe means absolute value, so it opens a formula on its own.
+        "|" => (0, Seed::Typed(String::new(), '|')),
         "/" | "^" | "_" => {
             let run = trailing_run(&before);
             // `and/or` should stay prose; `1/`, `x/` and `x^` are formulas.

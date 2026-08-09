@@ -254,7 +254,6 @@ fn Palette() -> impl IntoView {
         ("xₙ", "下付き (_)", Structure::Sub),
         ("( )", "括弧", Structure::Paren),
         ("[ ]", "角括弧", Structure::Bracket),
-        ("|x|", "絶対値", Structure::Bar),
         ("∑", "総和", Structure::Sum),
         ("∏", "総乗", Structure::Prod),
         ("∫", "積分", Structure::Int),
@@ -374,7 +373,6 @@ enum Structure {
     Sub,
     Paren,
     Bracket,
-    Bar,
     Sum,
     Prod,
     Int,
@@ -397,10 +395,6 @@ impl Structure {
             },
             Structure::Bracket => Node::Group {
                 delim: Delim::Bracket,
-                body: Vec::new(),
-            },
-            Structure::Bar => Node::Group {
-                delim: Delim::Bar,
                 body: Vec::new(),
             },
             Structure::Sum => ast::big_op("sum"),
