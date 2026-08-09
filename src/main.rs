@@ -1,5 +1,5 @@
 mod app;
-mod doc;
+mod editor;
 mod ipc;
 mod markdown;
 mod math;

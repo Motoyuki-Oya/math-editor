@@ -6,11 +6,10 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{HtmlElement, KeyboardEvent};
 
-use crate::doc;
+use crate::editor;
 use crate::ipc;
 use crate::math::ast::{self, MatrixKind, Node};
 use crate::math::commands;
-use crate::math::field;
 
 const UNTITLED: &str = "無題";
 
@@ -33,7 +32,7 @@ impl Shell {
     }
 
     fn refresh(&self) {
-        self.stats.set(doc::stats());
+        self.stats.set(editor::stats());
     }
 
     fn mark_dirty(&self) {
@@ -56,7 +55,7 @@ impl Shell {
             if !shell.may_discard().await {
                 return;
             }
-            doc::load("");
+            editor::load("");
             shell.path.set(None);
             shell.status.set(String::new());
             shell.mark_clean();
@@ -82,7 +81,7 @@ impl Shell {
             };
             match ipc::read_document(&path).await {
                 Ok(text) => {
-                    doc::load(&text);
+                    editor::load(&text);
                     shell.path.set(Some(path));
                     shell.status.set("開きました".into());
                     shell.mark_clean();
@@ -104,7 +103,7 @@ impl Shell {
                     None => return,
                 },
             };
-            let contents = doc::to_markdown();
+            let contents = editor::to_markdown();
             match ipc::write_document(&path, &contents).await {
                 Ok(()) => {
                     shell.path.set(Some(path));
@@ -125,34 +124,12 @@ impl Shell {
             let Some(path) = ipc::pick_export_path(&default_name).await else {
                 return;
             };
-            let contents = doc::to_html(&default_name);
+            let contents = editor::to_html(&default_name);
             match ipc::write_document(&path, &contents).await {
                 Ok(()) => shell.status.set("MathML (HTML) を書き出しました".into()),
                 Err(error) => shell.status.set(error),
             }
         });
-    }
-}
-
-/// Inserts a structure into the formula being edited, starting a new formula
-/// when the caret is in ordinary text.
-fn insert(node: Node) {
-    if field::focused_host().is_none() {
-        doc::insert_math(false);
-    }
-    field::insert_into_focused(node);
-}
-
-/// Inserts text that needs no formula, either into the formula being edited or
-/// straight into the document.
-fn insert_text(text: &'static str) {
-    match field::focused_host() {
-        Some(host) => {
-            for c in text.chars() {
-                field::type_char(&host, c);
-            }
-        }
-        None => doc::insert_text(text),
     }
 }
 
@@ -170,7 +147,7 @@ pub fn App() -> impl IntoView {
     let replacement = RwSignal::new(String::new());
     let regex = RwSignal::new(false);
     let case_sensitive = RwSignal::new(false);
-    let options = move || doc::SearchOptions {
+    let options = move || editor::SearchOptions {
         regex: regex.get_untracked(),
         case_sensitive: case_sensitive.get_untracked(),
     };
@@ -182,11 +159,10 @@ pub fn App() -> impl IntoView {
         let Ok(element) = element.dyn_into::<HtmlElement>() else {
             return;
         };
-        doc::init(&element);
-        doc::set_on_change(Box::new(move || shell.mark_dirty()));
-        field::set_on_change(Box::new(move || shell.mark_dirty()));
+        editor::init(&element);
+        editor::set_on_change(Box::new(move || shell.mark_dirty()));
         install_shortcuts(shell);
-        element.focus().ok();
+        editor::focus();
         shell.refresh();
         spawn_local(ipc::frontend_ready());
     });
@@ -213,8 +189,8 @@ pub fn App() -> impl IntoView {
                     <button class="tool" on:mousedown=hold_focus on:click=move |_| shell.export_html()>"HTML出力"</button>
                 </div>
                 <div class="group">
-                    <button class="tool" on:mousedown=hold_focus on:click=move |_| doc::insert_math(false) title="数式を挿入 (Ctrl+M)">"数式"</button>
-                    <button class="tool" on:mousedown=hold_focus on:click=move |_| doc::insert_math(true) title="独立行の数式 (Ctrl+Shift+M)">"数式(行)"</button>
+                    <button class="tool" on:mousedown=hold_focus on:click=move |_| editor::insert_math(false) title="数式を挿入 (Ctrl+M)">"数式"</button>
+                    <button class="tool" on:mousedown=hold_focus on:click=move |_| editor::insert_math(true) title="独立行の数式 (Ctrl+Shift+M)">"数式(行)"</button>
                     <button class="tool" on:mousedown=hold_focus on:click=move |_| shell.searching.update(|s| *s = !*s) title="検索と置換 (Ctrl+F)">"検索"</button>
                 </div>
             </div>
@@ -230,11 +206,11 @@ pub fn App() -> impl IntoView {
                         on:input=move |ev| query.set(event_target_value(&ev))
                         on:keydown=move |ev: KeyboardEvent| {
                             if ev.key() == "Enter" {
-                                doc::find_next(&query.get_untracked(), options());
+                                editor::find_next(&query.get_untracked(), options());
                             }
                         }
                     />
-                    <button class="tool" on:click=move |_| { doc::find_next(&query.get_untracked(), options()); }>"次を検索"</button>
+                    <button class="tool" on:click=move |_| { editor::find_next(&query.get_untracked(), options()); }>"次を検索"</button>
                     <input
                         class="find-input"
                         placeholder="置換後"
@@ -242,7 +218,7 @@ pub fn App() -> impl IntoView {
                         on:input=move |ev| replacement.set(event_target_value(&ev))
                     />
                     <button class="tool" on:click=move |_| {
-                        let replaced = doc::replace_all(&query.get_untracked(), &replacement.get_untracked(), options());
+                        let replaced = editor::replace_all(&query.get_untracked(), &replacement.get_untracked(), options());
                         shell.status.set(format!("{replaced} 件置換しました"));
                     }>"すべて置換"</button>
                     <label class="find-toggle" title="大文字小文字を区別">
@@ -339,7 +315,7 @@ fn Palette() -> impl IntoView {
                                 class="pal"
                                 title=tip
                                 on:mousedown=hold_focus
-                                on:click=move |_| insert(structure.node())
+                                on:click=move |_| editor::insert_node(structure.node())
                             >
                                 {label}
                             </button>
@@ -358,7 +334,7 @@ fn Palette() -> impl IntoView {
                                 class="pal"
                                 title=name
                                 on:mousedown=hold_focus
-                                on:click=move |_| insert_text(glyph)
+                                on:click=move |_| editor::insert_plain(glyph)
                             >
                                 {glyph}
                             </button>
@@ -374,7 +350,7 @@ fn Palette() -> impl IntoView {
                             <button
                                 class="pal pal-word"
                                 on:mousedown=hold_focus
-                                on:click=move |_| insert_text(name)
+                                on:click=move |_| editor::insert_plain(name)
                             >
                                 {name}
                             </button>
@@ -424,6 +400,11 @@ fn install_shortcuts(shell: Shell) {
         return;
     };
     let handler = Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
+        // The formula being edited keeps its own history, and handles the key
+        // itself before it reaches here.
+        if event.default_prevented() {
+            return;
+        }
         if !(event.ctrl_key() || event.meta_key()) {
             if event.key() == "Escape" {
                 shell.searching.set(false);
@@ -450,20 +431,19 @@ fn install_shortcuts(shell: Shell) {
             }
             "m" => {
                 event.prevent_default();
-                doc::insert_math(shift);
+                editor::insert_math(shift);
             }
-            // The formula being edited has its own history.
-            "z" if field::focused_host().is_none() => {
+            "z" => {
                 event.prevent_default();
                 if shift {
-                    doc::redo();
+                    editor::redo();
                 } else {
-                    doc::undo();
+                    editor::undo();
                 }
             }
-            "y" if field::focused_host().is_none() => {
+            "y" => {
                 event.prevent_default();
-                doc::redo();
+                editor::redo();
             }
             _ => {}
         }

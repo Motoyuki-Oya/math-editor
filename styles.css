@@ -104,13 +104,76 @@ body {
 }
 
 .editor {
+  position: relative;
   flex: 1;
-  overflow-y: auto;
+  overflow: auto;
   padding: 18px 22px;
   outline: none;
   line-height: 2;
-  white-space: pre-wrap;
-  word-break: break-word;
+  cursor: text;
+}
+
+.mn-content {
+  position: relative;
+  min-height: 100%;
+  width: max-content;
+  min-width: 100%;
+}
+
+.mn-lines {
+  position: relative;
+  white-space: pre;
+}
+
+.mn-line {
+  min-height: 1.6em;
+}
+
+/* Selections and carets are drawn here, under the text. */
+.mn-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.mn-sel {
+  position: absolute;
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  border-radius: 2px;
+}
+
+.mn-cursor {
+  position: absolute;
+  background: var(--accent);
+  animation: mn-blink 1.1s steps(1) infinite;
+}
+
+.mn-cursor-primary {
+  background: var(--fg);
+}
+
+/* Takes the keystrokes and the IME, and follows the caret so the candidate
+   window shows up in the right place. */
+.mn-input {
+  position: absolute;
+  z-index: 1;
+  width: 1px;
+  min-width: 1px;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  overflow: hidden;
+  background: transparent;
+  color: transparent;
+  caret-color: transparent;
+  font: inherit;
+  line-height: inherit;
+}
+
+.mn-input:focus {
+  outline: none;
 }
 
 .statusbar {
@@ -141,7 +204,7 @@ body {
   cursor: text;
 }
 
-.mn-field:focus {
+.mn-field-active {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 

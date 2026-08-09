@@ -48,10 +48,6 @@ impl MathState {
         }
     }
 
-    pub fn root(&self) -> &Row {
-        &self.root
-    }
-
     pub fn cursor(&self) -> &Cursor {
         &self.cursor
     }
@@ -623,12 +619,12 @@ mod tests {
             2,
         ));
         assert!(state.grow_matrix(true));
-        match &state.root()[0] {
+        match &state.root[0] {
             Node::Matrix { cells, .. } => assert_eq!(cells.len(), 2),
             other => panic!("expected a matrix, got {other:?}"),
         }
         assert!(state.grow_matrix(false));
-        match &state.root()[0] {
+        match &state.root[0] {
             Node::Matrix { cells, .. } => assert_eq!(cells[0].len(), 3),
             other => panic!("expected a matrix, got {other:?}"),
         }
