@@ -14,6 +14,7 @@ use crate::math::render;
 pub const LINE_CLASS: &str = "mn-line";
 pub const RUN_CLASS: &str = "mn-run";
 pub const FIELD_CLASS: &str = "mn-field";
+const PREEDIT_CLASS: &str = "mn-preedit";
 const LINE_ATTR: &str = "data-line";
 const COL_ATTR: &str = "data-col";
 
@@ -48,17 +49,26 @@ impl View {
         })
     }
 
-    pub fn draw(&self, text: &Text, sels: &[Sel], active: Option<ActiveMath<'_>>, focused: bool) {
+    pub fn draw(
+        &self,
+        text: &Text,
+        sels: &[Sel],
+        active: Option<ActiveMath<'_>>,
+        focused: bool,
+        preedit: Option<(Pos, &str)>,
+    ) {
         let Some(doc) = self.lines.owner_document() else {
             return;
         };
         self.lines.set_inner_html("");
         for line in 0..text.line_count() {
-            if let Some(element) = self.draw_line(&doc, text, line, active.as_ref()) {
+            let composing = preedit.filter(|(at, _)| at.line == line);
+            if let Some(element) = self.draw_line(&doc, text, line, active.as_ref(), composing) {
                 append(&self.lines, &element);
             }
         }
-        self.draw_carets(&doc, sels, focused && active.is_none());
+        // While an IME is composing, the underlined text stands in for the caret.
+        self.draw_carets(&doc, sels, focused && active.is_none() && preedit.is_none());
     }
 
     fn draw_line(
@@ -67,6 +77,7 @@ impl View {
         text: &Text,
         line: usize,
         active: Option<&ActiveMath<'_>>,
+        preedit: Option<(Pos, &str)>,
     ) -> Option<Element> {
         let holder = element(doc, "div", LINE_CLASS)?;
         holder.set_attribute(LINE_ATTR, &line.to_string()).ok();
@@ -74,6 +85,13 @@ impl View {
         let mut run_start = 0usize;
         let items = text.line(line);
         for (col, item) in items.iter().enumerate() {
+            if let Some((_, composing)) = preedit.filter(|(at, _)| at.col == col) {
+                if !run.is_empty() {
+                    append(&holder, &run_element(doc, &run, run_start)?);
+                    run.clear();
+                }
+                append(&holder, &preedit_element(doc, composing)?);
+            }
             match item {
                 Item::Char(c) => {
                     if run.is_empty() {
@@ -108,6 +126,9 @@ impl View {
         }
         if !run.is_empty() {
             append(&holder, &run_element(doc, &run, run_start)?);
+        }
+        if let Some((_, composing)) = preedit.filter(|(at, _)| at.col >= items.len()) {
+            append(&holder, &preedit_element(doc, composing)?);
         }
         if items.is_empty() {
             // An empty line still needs a box to measure and click on.
@@ -192,6 +213,9 @@ impl View {
         let mut last: Option<Box2> = None;
         for i in 0..children.length() {
             let child = children.item(i)?;
+            if child.class_list().contains(PREEDIT_CLASS) {
+                continue;
+            }
             let start: usize = child
                 .get_attribute(COL_ATTR)
                 .and_then(|value| value.parse().ok())
@@ -337,6 +361,13 @@ fn element(doc: &Document, tag: &str, class: &str) -> Option<Element> {
     Some(element)
 }
 
+/// The text an IME is still composing, shown inline where it will land.
+fn preedit_element(doc: &Document, text: &str) -> Option<Element> {
+    let element = element(doc, "span", PREEDIT_CLASS)?;
+    element.set_text_content(Some(text));
+    Some(element)
+}
+
 fn run_element(doc: &Document, run: &str, start: usize) -> Option<Element> {
     let element = element(doc, "span", RUN_CLASS)?;
     element.set_attribute(COL_ATTR, &start.to_string()).ok();
@@ -350,8 +381,8 @@ fn text_boundary(run: &Element, offset: usize) -> Option<Box2> {
     let doc = run.owner_document()?;
     let text = run.text_content().unwrap_or_default();
     let Some(node) = run.first_child() else {
-        // An empty line has no text node to measure; the run's own box will do.
-        return Some(box_of(&run.get_bounding_client_rect()));
+        // An empty line has no text node to measure.
+        return Some(empty_run_box(run));
     };
     let units: u32 = text
         .chars()
@@ -366,9 +397,24 @@ fn text_boundary(run: &Element, offset: usize) -> Option<Box2> {
         return Some(rect);
     }
     // A collapsed range in an empty text node has no box; use the run itself.
-    let fallback = box_of(&run.get_bounding_client_rect());
-    Some(Box2 {
-        left: fallback.left,
-        ..fallback
-    })
+    Some(empty_run_box(run))
+}
+
+/// An empty inline run has no height of its own, which would leave the caret
+/// invisible, so the height comes from the line the run sits on.
+fn empty_run_box(run: &Element) -> Box2 {
+    let rect = box_of(&run.get_bounding_client_rect());
+    if rect.height > 0.0 {
+        return rect;
+    }
+    let Some(line) = run.parent_element() else {
+        return rect;
+    };
+    let holder = box_of(&line.get_bounding_client_rect());
+    Box2 {
+        left: rect.left,
+        top: holder.top,
+        width: rect.width,
+        height: holder.height,
+    }
 }
