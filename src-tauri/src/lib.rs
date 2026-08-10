@@ -53,19 +53,6 @@ async fn pick_save_path(app: tauri::AppHandle, default_name: String) -> Option<S
 }
 
 #[tauri::command]
-async fn pick_export_path(app: tauri::AppHandle, default_name: String) -> Option<String> {
-    pick_path(|cb| {
-        app.dialog()
-            .file()
-            .set_title("MathML (HTML) としてエクスポート")
-            .set_file_name(default_name)
-            .add_filter("HTML", &["html"])
-            .save_file(cb);
-    })
-    .map(|p| p.to_string_lossy().into_owned())
-}
-
-#[tauri::command]
 fn read_document(path: String) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|e| format!("{path} を読み込めませんでした: {e}"))
 }
@@ -160,7 +147,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             pick_open_path,
             pick_save_path,
-            pick_export_path,
             read_document,
             write_document,
             set_dirty,

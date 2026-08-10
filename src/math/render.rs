@@ -4,7 +4,7 @@
 use wasm_bindgen::JsCast;
 use web_sys::{Document, Element};
 
-use super::ast::{Cursor, Delim, MatrixKind, Node, Row};
+use super::ast::{Between, Cursor, Delim, MatrixKind, Node, Row};
 use super::symbols::{self, Class};
 
 const SVG_NS: &str = "http://www.w3.org/2000/svg";
@@ -156,13 +156,22 @@ impl<'a> Renderer<'a> {
                 self.span(class, glyph)
             }
             Node::Func(name) => self.span("mn-atom mn-func", name),
-            Node::Frac { .. } => {
-                let frac = self.el("span", "mn-frac");
+            Node::Stack { between, .. } => {
+                let frac = self.el(
+                    "span",
+                    match between {
+                        Between::Rule => "mn-frac",
+                        _ => "mn-frac mn-frac-bare",
+                    },
+                );
                 let num = self.el("span", "mn-frac-num");
                 num.append_child(&self.child_row(node, 0, path, index)).ok();
                 let den = self.el("span", "mn-frac-den");
                 den.append_child(&self.child_row(node, 1, path, index)).ok();
                 frac.append_child(&num).ok();
+                if let Between::Arrow(arrow) = between {
+                    frac.append_child(&self.arrow(*arrow)).ok();
+                }
                 frac.append_child(&den).ok();
                 frac
             }
@@ -208,18 +217,9 @@ impl<'a> Renderer<'a> {
                 group.append_child(&self.delimiter(delim, false)).ok();
                 group
             }
-            Node::BigOp { name, lower, upper } => {
-                let op = symbols::big_op(name);
-                let glyph = op.map(|o| o.glyph).unwrap_or(name.as_str());
-                let limits_below = op.map(|o| o.limits_below).unwrap_or(true);
-                let container = self.el(
-                    "span",
-                    if limits_below {
-                        "mn-bigop mn-bigop-stacked"
-                    } else {
-                        "mn-bigop mn-bigop-side"
-                    },
-                );
+            Node::Limits { sym, lower, upper } => {
+                let glyph = sym.as_str();
+                let container = self.el("span", "mn-bigop mn-bigop-stacked");
                 let upper_el = self.el("span", "mn-limit mn-limit-upper");
                 upper_el
                     .append_child(&self.child_row(node, 1, path, index))
@@ -247,12 +247,7 @@ impl<'a> Renderer<'a> {
             Node::Matrix { kind, cells } => {
                 let container = self.el("span", "mn-matrix");
                 match kind {
-                    MatrixKind::Paren => {
-                        container
-                            .append_child(&self.delimiter(&Delim::Paren, true))
-                            .ok();
-                    }
-                    MatrixKind::Bracket => {
+                    MatrixKind::Grid => {
                         container
                             .append_child(&self.delimiter(&Delim::Bracket, true))
                             .ok();
@@ -262,7 +257,6 @@ impl<'a> Renderer<'a> {
                             .append_child(&self.delimiter(&Delim::Brace, true))
                             .ok();
                     }
-                    MatrixKind::Plain => {}
                 }
                 let grid = self.el("span", "mn-matrix-grid");
                 let cols = cells.first().map(|r| r.len()).unwrap_or(1).max(1);
@@ -285,22 +279,59 @@ impl<'a> Renderer<'a> {
                     }
                 }
                 container.append_child(&grid).ok();
-                match kind {
-                    MatrixKind::Paren => {
-                        container
-                            .append_child(&self.delimiter(&Delim::Paren, false))
-                            .ok();
-                    }
-                    MatrixKind::Bracket => {
-                        container
-                            .append_child(&self.delimiter(&Delim::Bracket, false))
-                            .ok();
-                    }
-                    MatrixKind::Plain | MatrixKind::Cases => {}
+                if matches!(kind, MatrixKind::Grid) {
+                    container
+                        .append_child(&self.delimiter(&Delim::Bracket, false))
+                        .ok();
                 }
                 container
             }
         }
+    }
+
+    /// An arrow between the two rows of a stack. The shaft is a flexible line
+    /// so the arrow ends up as wide as the wider row, like the rule is.
+    fn arrow(&self, arrow: char) -> Element {
+        let holder = self.el("span", "mn-arrow");
+        let shaft = || self.el("span", "mn-arrow-shaft");
+        let glyph = self.span("mn-arrow-head", &arrow.to_string());
+        match arrow {
+            // The glyph carries the head, so the line goes on its blunt side.
+            '→' | '⇒' | '↦' => {
+                holder.append_child(&shaft()).ok();
+                holder.append_child(&glyph).ok();
+            }
+            '←' | '⇐' => {
+                holder.append_child(&glyph).ok();
+                holder.append_child(&shaft()).ok();
+            }
+            // Two heads: each end is a glyph of its own, with the line between.
+            '↔' | '⇔' => {
+                let (left, right) = if arrow == '↔' {
+                    ('←', '→')
+                } else {
+                    ('⇐', '⇒')
+                };
+                holder
+                    .append_child(&self.span("mn-arrow-head", &left.to_string()))
+                    .ok();
+                holder.append_child(&shaft()).ok();
+                holder
+                    .append_child(&self.span("mn-arrow-head", &right.to_string()))
+                    .ok();
+            }
+            // A pair of arrows, one above the other, both stretched.
+            '⇄' => {
+                let column = self.el("span", "mn-arrow-pair");
+                column.append_child(&self.arrow('→')).ok();
+                column.append_child(&self.arrow('←')).ok();
+                return column;
+            }
+            _ => {
+                holder.append_child(&glyph).ok();
+            }
+        }
+        holder
     }
 
     fn delimiter(&self, delim: &Delim, open: bool) -> Element {

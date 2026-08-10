@@ -1,4 +1,4 @@
-//! Application shell: toolbar, formula palette, search bar and status bar.
+//! Application shell: toolbar, structure palette, search bar and status bar.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -8,7 +8,7 @@ use web_sys::{HtmlElement, KeyboardEvent};
 
 use crate::editor;
 use crate::ipc;
-use crate::math::ast::{self, MatrixKind, Node};
+use crate::math::ast::{self, Between, MatrixKind, Node};
 use crate::math::commands;
 
 const UNTITLED: &str = "無題";
@@ -103,30 +103,13 @@ impl Shell {
                     None => return,
                 },
             };
-            let contents = editor::to_markdown();
+            let contents = editor::to_document();
             match ipc::write_document(&path, &contents).await {
                 Ok(()) => {
                     shell.path.set(Some(path));
                     shell.status.set("保存しました".into());
                     shell.mark_clean();
                 }
-                Err(error) => shell.status.set(error),
-            }
-        });
-    }
-
-    fn export_html(&self) {
-        let shell = *self;
-        let name = self.file_name();
-        let stem = name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(&name);
-        let default_name = format!("{stem}.html");
-        spawn_local(async move {
-            let Some(path) = ipc::pick_export_path(&default_name).await else {
-                return;
-            };
-            let contents = editor::to_html(&default_name);
-            match ipc::write_document(&path, &contents).await {
-                Ok(()) => shell.status.set("MathML (HTML) を書き出しました".into()),
                 Err(error) => shell.status.set(error),
             }
         });
@@ -186,11 +169,9 @@ pub fn App() -> impl IntoView {
                     <button class="tool" on:mousedown=hold_focus on:click=move |_| shell.open()>"開く"</button>
                     <button class="tool" on:mousedown=hold_focus on:click=move |_| shell.save(false)>"保存"</button>
                     <button class="tool" on:mousedown=hold_focus on:click=move |_| shell.save(true)>"名前を付けて"</button>
-                    <button class="tool" on:mousedown=hold_focus on:click=move |_| shell.export_html()>"HTML出力"</button>
                 </div>
                 <div class="group">
-                    <button class="tool" on:mousedown=hold_focus on:click=move |_| editor::insert_math(false) title="数式を挿入 (Ctrl+M)">"数式"</button>
-                    <button class="tool" on:mousedown=hold_focus on:click=move |_| editor::insert_math(true) title="独立行の数式 (Ctrl+Shift+M)">"数式(行)"</button>
+                    <button class="tool" on:mousedown=hold_focus on:click=move |_| editor::insert_math() title="構造を挿入 (Ctrl+M)">"構造"</button>
                     <button class="tool" on:mousedown=hold_focus on:click=move |_| shell.searching.update(|s| *s = !*s) title="検索と置換 (Ctrl+F)">"検索"</button>
                 </div>
             </div>
@@ -264,17 +245,27 @@ fn hold_focus(event: web_sys::MouseEvent) {
 #[component]
 fn Palette() -> impl IntoView {
     let structures = [
-        ("½", "分数 (/)", Structure::Frac),
-        ("√", "平方根", Structure::Sqrt),
-        ("ⁿ√", "n乗根", Structure::NthRoot),
-        ("x²", "上付き (^)", Structure::Sup),
-        ("xₙ", "下付き (_)", Structure::Sub),
-        ("∑", "総和", Structure::Sum),
-        ("∏", "総乗", Structure::Prod),
-        ("∫", "積分", Structure::Int),
-        ("lim", "極限", Structure::Lim),
-        ("(⋮)", "行列", Structure::Matrix),
-        ("{⋮", "場合分け", Structure::Cases),
+        ("½", "罫線とその上下  $(上/下)", Structure::Stack),
+        ("ⁿ", "罫線なしの上下  $(上 - 下)", Structure::Bare),
+        ("→", "矢印とその上下  $(上 → 下)", Structure::Arrow),
+        ("√", "ルート  $(√ x)", Structure::Sqrt),
+        ("ⁿ√", "n乗根  $(√[n] x)", Structure::NthRoot),
+        ("x²", "上付き  x$(^ 3)", Structure::Sup),
+        ("xₙ", "下付き  x$(_ i)", Structure::Sub),
+        ("∑", "記号の上下  $(↨ Σ, 上, 下)", Structure::Sum),
+        ("∏", "記号の上下  $(↨ ∏, 上, 下)", Structure::Prod),
+        ("∫", "記号の上下  $(↨ ∫, 上, 下)", Structure::Int),
+        ("lim", "記号の上下  $(↨ lim, 上, 下)", Structure::Lim),
+        (
+            "[⋮]",
+            "格子状の並び  $([a, b][c, d])  行追加は Alt+Enter",
+            Structure::Matrix,
+        ),
+        (
+            "{⋮",
+            "場合分け  $({[…][…])  行追加は Alt+Enter",
+            Structure::Cases,
+        ),
     ];
     let symbols = [
         "times",
@@ -364,7 +355,9 @@ fn Palette() -> impl IntoView {
 
 #[derive(Clone, Copy)]
 enum Structure {
-    Frac,
+    Stack,
+    Bare,
+    Arrow,
     Sqrt,
     NthRoot,
     Sup,
@@ -380,16 +373,18 @@ enum Structure {
 impl Structure {
     fn node(self) -> Node {
         match self {
-            Structure::Frac => ast::frac(),
+            Structure::Stack => ast::stack(Between::Rule),
+            Structure::Bare => ast::stack(Between::Nothing),
+            Structure::Arrow => ast::stack(Between::Arrow('→')),
             Structure::Sqrt => ast::sqrt(),
             Structure::NthRoot => ast::nth_root(),
             Structure::Sup => Node::Sup(Vec::new()),
             Structure::Sub => Node::Sub(Vec::new()),
-            Structure::Sum => ast::big_op("sum"),
-            Structure::Prod => ast::big_op("prod"),
-            Structure::Int => ast::big_op("int"),
-            Structure::Lim => ast::big_op("lim"),
-            Structure::Matrix => ast::matrix(MatrixKind::Paren, 2, 2),
+            Structure::Sum => ast::limits("∑"),
+            Structure::Prod => ast::limits("∏"),
+            Structure::Int => ast::limits("∫"),
+            Structure::Lim => ast::limits("lim"),
+            Structure::Matrix => ast::matrix(MatrixKind::Grid, 2, 2),
             Structure::Cases => ast::matrix(MatrixKind::Cases, 2, 2),
         }
     }
@@ -431,7 +426,7 @@ fn install_shortcuts(shell: Shell) {
             }
             "m" => {
                 event.prevent_default();
-                editor::insert_math(shift);
+                editor::insert_math();
             }
             "z" => {
                 event.prevent_default();

@@ -1,16 +1,19 @@
 //! The document the editor owns, kept independent of the DOM.
 //!
-//! A line is a sequence of [`Item`]s, so a formula counts as one item and the
+//! A line is a sequence of [`Item`]s, so an island counts as one item and the
 //! caret can never land inside it by accident. Editing goes through [`Editor`],
 //! which holds one or more selections and applies every command to all of them
 //! as a single step, the way multiple cursors are expected to behave.
 
-use crate::markdown::{self, Segment};
+use crate::doc::{self, Segment};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Item {
     Char(char),
-    Math { latex: String, display: bool },
+    /// An island, kept as the notation between its `$(` and `)`.
+    Math {
+        source: String,
+    },
 }
 
 impl Item {
@@ -85,14 +88,14 @@ impl Default for Text {
 }
 
 impl Text {
-    pub fn from_markdown(source: &str) -> Self {
-        let lines = markdown::parse(source)
+    pub fn from_document(source: &str) -> Self {
+        let lines = doc::parse(source)
             .into_iter()
             .map(|line| {
                 line.into_iter()
                     .flat_map(|segment| match segment {
                         Segment::Text(text) => text.chars().map(Item::Char).collect::<Vec<_>>(),
-                        Segment::Math { latex, display } => vec![Item::Math { latex, display }],
+                        Segment::Island(source) => vec![Item::Math { source }],
                     })
                     .collect()
             })
@@ -106,24 +109,21 @@ impl Text {
         }
     }
 
-    pub fn to_markdown(&self) -> String {
-        let lines: Vec<markdown::Line> = self
+    pub fn to_document(&self) -> String {
+        let lines: Vec<doc::Line> = self
             .lines
             .iter()
             .map(|items| {
-                let mut segments = markdown::Line::new();
+                let mut segments = doc::Line::new();
                 let mut text = String::new();
                 for item in items {
                     match item {
                         Item::Char(c) => text.push(*c),
-                        Item::Math { latex, display } => {
+                        Item::Math { source } => {
                             if !text.is_empty() {
                                 segments.push(Segment::Text(std::mem::take(&mut text)));
                             }
-                            segments.push(Segment::Math {
-                                latex: latex.clone(),
-                                display: *display,
-                            });
+                            segments.push(Segment::Island(source.clone()));
                         }
                     }
                 }
@@ -133,7 +133,7 @@ impl Text {
                 segments
             })
             .collect();
-        markdown::serialize(&lines)
+        doc::serialize(&lines)
     }
 
     pub fn line_count(&self) -> usize {
@@ -217,14 +217,14 @@ impl Text {
         end
     }
 
-    pub fn set_math(&mut self, at: Pos, latex: String) -> bool {
+    pub fn set_math(&mut self, at: Pos, source: String) -> bool {
         match self
             .lines
             .get_mut(at.line)
             .and_then(|line| line.get_mut(at.col))
         {
-            Some(Item::Math { latex: slot, .. }) => {
-                *slot = latex;
+            Some(Item::Math { source: slot }) => {
+                *slot = source;
                 true
             }
             _ => false,
@@ -318,15 +318,15 @@ impl Editor {
     }
 
     pub fn load(&mut self, source: &str) {
-        self.text = Text::from_markdown(source);
+        self.text = Text::from_document(source);
         self.sels = vec![Sel::caret(Pos::default())];
         self.past.clear();
         self.future.clear();
         self.last = Step::Other;
     }
 
-    pub fn to_markdown(&self) -> String {
-        self.text.to_markdown()
+    pub fn to_document(&self) -> String {
+        self.text.to_document()
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -404,10 +404,9 @@ impl Editor {
         self.insert(items_of(text));
     }
 
-    pub fn insert_math(&mut self, latex: &str, display: bool) {
+    pub fn insert_math(&mut self, source: &str) {
         self.insert(vec![vec![Item::Math {
-            latex: latex.to_string(),
-            display,
+            source: source.to_string(),
         }]]);
     }
 
@@ -449,8 +448,8 @@ impl Editor {
         self.record(Step::Other);
     }
 
-    pub fn set_math_at(&mut self, at: Pos, latex: &str) {
-        self.text.set_math(at, latex.to_string());
+    pub fn set_math_at(&mut self, at: Pos, source: &str) {
+        self.text.set_math(at, source.to_string());
     }
 
     pub fn move_h(&mut self, forward: bool, extend: bool) {
@@ -690,7 +689,7 @@ mod tests {
         editor
     }
 
-    /// The text of the document, with each formula standing in as one character.
+    /// The text of the document, with each island standing in as one character.
     fn plain(editor: &Editor) -> String {
         (0..editor.text().line_count())
             .map(|line| {
@@ -706,14 +705,14 @@ mod tests {
     }
 
     #[test]
-    fn formulas_are_one_item() {
-        let editor = editor("a $\\frac{1}{2}$ b");
+    fn islands_are_one_item() {
+        let editor = editor("a $(1/2) b");
         assert_eq!(editor.text().line_len(0), 5);
         assert!(matches!(
             editor.text().item_at(Pos::new(0, 2)),
             Some(Item::Math { .. })
         ));
-        assert_eq!(editor.to_markdown(), "a $\\frac{1}{2}$ b");
+        assert_eq!(editor.to_document(), "a $(1/2) b");
     }
 
     #[test]
@@ -765,14 +764,14 @@ mod tests {
     }
 
     #[test]
-    fn backspace_joins_lines_and_deletes_a_formula_whole() {
-        let mut editor = editor("a$x$\nb");
+    fn backspace_joins_lines_and_deletes_an_island_whole() {
+        let mut editor = editor("a$(x)\nb");
         editor.set_caret(Pos::new(1, 0));
         editor.backspace();
         assert_eq!(plain(&editor), "a\u{fffc}b");
         editor.set_caret(Pos::new(0, 2));
         editor.backspace();
-        assert_eq!(editor.to_markdown(), "ab");
+        assert_eq!(editor.to_document(), "ab");
     }
 
     #[test]
@@ -825,8 +824,8 @@ mod tests {
     }
 
     #[test]
-    fn markdown_round_trips_through_the_model() {
-        let source = "text $a^{2}$ more\n$$\\frac{1}{2}$$\nend";
-        assert_eq!(editor(source).to_markdown(), source);
+    fn the_notation_round_trips_through_the_model() {
+        let source = "text a$(^ 2) more\n$(1/2)\nend";
+        assert_eq!(editor(source).to_document(), source);
     }
 }

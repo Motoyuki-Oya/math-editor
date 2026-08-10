@@ -1,7 +1,7 @@
-//! Structure of a formula and the cursor that walks through it.
+//! Structure of an island and the cursor that walks through it.
 //!
-//! A formula is a [`Row`]: a flat sequence of [`Node`]s. Nodes that contain
-//! sub-formulas (a fraction, a root, ...) expose them as numbered *slots*, so
+//! An island is a [`Row`]: a flat sequence of [`Node`]s. Nodes that contain
+//! sub-rows (a stack, a root, ...) expose them as numbered *slots*, so
 //! navigation and editing can treat every container uniformly.
 
 pub type Row = Vec<Node>;
@@ -15,12 +15,12 @@ pub enum Delim {
 }
 
 impl Delim {
-    pub fn latex(&self) -> (&'static str, &'static str) {
+    pub fn pair(&self) -> (char, char) {
         match self {
-            Delim::Paren => ("(", ")"),
-            Delim::Bracket => ("[", "]"),
-            Delim::Brace => ("\\{", "\\}"),
-            Delim::Bar => ("|", "|"),
+            Delim::Paren => ('(', ')'),
+            Delim::Bracket => ('[', ']'),
+            Delim::Brace => ('{', '}'),
+            Delim::Bar => ('|', '|'),
         }
     }
 
@@ -35,33 +35,22 @@ impl Delim {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A grid `[a, b][c, d]`, on its own or behind the brace of a case split.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MatrixKind {
-    Plain,
-    Paren,
-    Bracket,
+    Grid,
     Cases,
 }
 
-impl MatrixKind {
-    pub fn env(&self) -> &'static str {
-        match self {
-            MatrixKind::Plain => "matrix",
-            MatrixKind::Paren => "pmatrix",
-            MatrixKind::Bracket => "bmatrix",
-            MatrixKind::Cases => "cases",
-        }
-    }
-
-    pub fn from_env(env: &str) -> Option<MatrixKind> {
-        match env {
-            "matrix" => Some(MatrixKind::Plain),
-            "pmatrix" => Some(MatrixKind::Paren),
-            "bmatrix" => Some(MatrixKind::Bracket),
-            "cases" => Some(MatrixKind::Cases),
-            _ => None,
-        }
-    }
+/// What is drawn between the two rows of a [`Node::Stack`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Between {
+    /// A rule the width of the wider row.
+    Rule,
+    /// Nothing: the rows are simply piled up.
+    Nothing,
+    /// An arrow, stretched to the width of the wider row.
+    Arrow(char),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,9 +61,12 @@ pub enum Node {
     Sym(String),
     /// An upright function name such as `\sin`, stored without the backslash.
     Func(String),
-    Frac {
-        num: Row,
-        den: Row,
+    /// Something above and something below, with a rule, an arrow or nothing
+    /// drawn between them.
+    Stack {
+        above: Row,
+        below: Row,
+        between: Between,
     },
     Sqrt {
         index: Option<Row>,
@@ -88,9 +80,9 @@ pub enum Node {
         delim: Delim,
         body: Row,
     },
-    /// A large operator (`\sum`, `\int`, `\lim`, ...) with its two limits.
-    BigOp {
-        name: String,
+    /// Any symbol with something written above and below it.
+    Limits {
+        sym: String,
         lower: Row,
         upper: Row,
     },
@@ -104,7 +96,7 @@ impl Node {
     pub fn slot_count(&self) -> usize {
         match self {
             Node::Char(_) | Node::Sym(_) | Node::Func(_) => 0,
-            Node::Frac { .. } => 2,
+            Node::Stack { .. } => 2,
             Node::Sqrt { index, .. } => {
                 if index.is_some() {
                     2
@@ -113,7 +105,7 @@ impl Node {
                 }
             }
             Node::Sup(_) | Node::Sub(_) | Node::Group { .. } => 1,
-            Node::BigOp { .. } => 2,
+            Node::Limits { .. } => 2,
             Node::Matrix { cells, .. } => cells.iter().map(|r| r.len()).sum(),
         }
     }
@@ -121,9 +113,9 @@ impl Node {
     pub fn slot(&self, i: usize) -> Option<&Row> {
         match self {
             Node::Char(_) | Node::Sym(_) | Node::Func(_) => None,
-            Node::Frac { num, den } => match i {
-                0 => Some(num),
-                1 => Some(den),
+            Node::Stack { above, below, .. } => match i {
+                0 => Some(above),
+                1 => Some(below),
                 _ => None,
             },
             Node::Sqrt { index, body } => match (index, i) {
@@ -134,7 +126,7 @@ impl Node {
             Node::Sup(row) | Node::Sub(row) | Node::Group { body: row, .. } => {
                 (i == 0).then_some(row)
             }
-            Node::BigOp { lower, upper, .. } => match i {
+            Node::Limits { lower, upper, .. } => match i {
                 0 => Some(lower),
                 1 => Some(upper),
                 _ => None,
@@ -146,9 +138,9 @@ impl Node {
     pub fn slot_mut(&mut self, i: usize) -> Option<&mut Row> {
         match self {
             Node::Char(_) | Node::Sym(_) | Node::Func(_) => None,
-            Node::Frac { num, den } => match i {
-                0 => Some(num),
-                1 => Some(den),
+            Node::Stack { above, below, .. } => match i {
+                0 => Some(above),
+                1 => Some(below),
                 _ => None,
             },
             Node::Sqrt { index, body } => match (index.is_some(), i) {
@@ -159,7 +151,7 @@ impl Node {
             Node::Sup(row) | Node::Sub(row) | Node::Group { body: row, .. } => {
                 (i == 0).then_some(row)
             }
-            Node::BigOp { lower, upper, .. } => match i {
+            Node::Limits { lower, upper, .. } => match i {
                 0 => Some(lower),
                 1 => Some(upper),
                 _ => None,
@@ -176,8 +168,8 @@ impl Node {
     /// Slot the cursor should land in when entering the node from the right.
     pub fn exit_slot(&self) -> usize {
         match self {
-            // A fraction is entered from the right through its denominator.
-            Node::Frac { .. } => 1,
+            // A stack is entered from the right through its lower row.
+            Node::Stack { .. } => 1,
             other => other.slot_count().saturating_sub(1),
         }
     }
@@ -230,10 +222,11 @@ pub fn empty_row() -> Row {
     Vec::new()
 }
 
-pub fn frac() -> Node {
-    Node::Frac {
-        num: empty_row(),
-        den: empty_row(),
+pub fn stack(between: Between) -> Node {
+    Node::Stack {
+        above: empty_row(),
+        below: empty_row(),
+        between,
     }
 }
 
@@ -251,9 +244,9 @@ pub fn nth_root() -> Node {
     }
 }
 
-pub fn big_op(name: &str) -> Node {
-    Node::BigOp {
-        name: name.to_string(),
+pub fn limits(sym: &str) -> Node {
+    Node::Limits {
+        sym: sym.to_string(),
         lower: empty_row(),
         upper: empty_row(),
     }
@@ -274,7 +267,7 @@ mod tests {
 
     #[test]
     fn slots_are_addressable() {
-        let node = frac();
+        let node = stack(Between::Rule);
         assert_eq!(node.slot_count(), 2);
         assert!(node.slot(0).is_some());
         assert!(node.slot(2).is_none());
@@ -290,9 +283,10 @@ mod tests {
 
     #[test]
     fn rows_resolve_through_paths() {
-        let root: Row = vec![Node::Frac {
-            num: vec![Node::Char('a')],
-            den: vec![Node::Char('b')],
+        let root: Row = vec![Node::Stack {
+            above: vec![Node::Char('a')],
+            below: vec![Node::Char('b')],
+            between: Between::Rule,
         }];
         assert_eq!(row_at(&root, &[(0, 1)]), Some(&vec![Node::Char('b')]));
         assert_eq!(row_at(&root, &[(0, 5)]), None);
@@ -300,7 +294,7 @@ mod tests {
 
     #[test]
     fn matrix_slots_are_row_major() {
-        let node = matrix(MatrixKind::Paren, 2, 2);
+        let node = matrix(MatrixKind::Grid, 2, 2);
         assert_eq!(node.slot_count(), 4);
         assert_eq!(node.matrix_shape(), Some((2, 2)));
     }
