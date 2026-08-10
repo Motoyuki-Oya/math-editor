@@ -360,10 +360,8 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
         }),
         // Undo and redo are handled once, by the window shortcuts.
         (true, _) => false,
-        (false, "Tab") => {
-            insert_text(session, "\t");
-            true
-        }
+        // Tab is the column separator, which lines up with the neighbouring lines.
+        (false, "Tab") => edit(session, Editor::insert_tab),
         (false, other) => {
             // Printable keys arrive as input events, which also covers the IME.
             let _ = other;

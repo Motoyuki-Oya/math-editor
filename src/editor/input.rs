@@ -15,7 +15,7 @@ use web_sys::{
     MouseEvent,
 };
 
-use super::model::Item;
+use super::model::{self, Item};
 use super::state::{self, Session};
 
 pub fn build(doc: &Document, root: &HtmlElement) -> Option<HtmlTextAreaElement> {
@@ -186,6 +186,7 @@ pub fn text_of(items: Vec<Vec<Item>>) -> String {
             line.into_iter()
                 .map(|item| match item {
                     Item::Char(c) => c.to_string(),
+                    Item::Tab => format!("$({})", model::TAB_SOURCE),
                     Item::Math { source } => format!("$({source})"),
                 })
                 .collect::<String>()

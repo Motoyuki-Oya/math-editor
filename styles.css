@@ -129,6 +129,18 @@ body {
   min-height: 1.6em;
 }
 
+/* A column separator, $(t). Its width is set while drawing so that the
+   separators of neighbouring lines line up. */
+.mn-tab {
+  display: inline-block;
+  width: 1em;
+  vertical-align: baseline;
+}
+
+.mn-tab::after {
+  content: "\200B";
+}
+
 /* Text an IME has not committed yet. */
 .mn-preedit {
   text-decoration: underline;
