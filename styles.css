@@ -29,6 +29,8 @@ html,
 body {
   margin: 0;
   height: 100%;
+  /* Only the editor scrolls; the window itself never does. */
+  overflow: hidden;
   background: var(--bg);
   color: var(--fg);
   font-family: var(--font-text);
@@ -38,7 +40,8 @@ body {
 .app {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: 100%;
+  overflow: hidden;
 }
 
 .toolbar,
@@ -54,6 +57,7 @@ body {
 
 .group {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   align-items: center;
 }

@@ -268,12 +268,6 @@ pub fn insert_node(node: Node) {
     changed(&session);
 }
 
-/// Inserts plain text at the caret, used by the symbol and function buttons.
-pub fn insert_plain(text: &str) {
-    let Some(session) = session() else { return };
-    insert_text(&session, text);
-}
-
 pub fn undo() {
     let Some(session) = session() else { return };
     leave_math(&session);
