@@ -88,8 +88,15 @@ impl View {
         let mut run = String::new();
         let mut run_start = 0usize;
         let items = text.line(line);
+        // Text an IME is composing while a structure is being edited belongs at
+        // the caret inside that structure, not beside it.
+        let editing = active.map(|active| active.at);
+        let in_structure = preedit
+            .filter(|(at, _)| Some(*at) == editing)
+            .map(|(_, composing)| composing);
+        let inline = preedit.filter(|(at, _)| Some(*at) != editing);
         for (col, item) in items.iter().enumerate() {
-            if let Some((_, composing)) = preedit.filter(|(at, _)| at.col == col) {
+            if let Some((_, composing)) = inline.filter(|(at, _)| at.col == col) {
                 if !run.is_empty() {
                     append(&holder, &run_element(doc, &run, run_start)?);
                     run.clear();
@@ -120,6 +127,7 @@ impl View {
                     let cursor = active
                         .filter(|active| active.at == Pos::new(line, col))
                         .map(|active| active.cursor);
+                    let composing = cursor.and(in_structure);
                     let field = element(doc, "span", FIELD_CLASS)?;
                     field.set_attribute(COL_ATTR, &col.to_string()).ok();
                     if cursor.is_some() {
@@ -129,7 +137,7 @@ impl View {
                     if row.is_empty() {
                         field.class_list().add_1("mn-field-empty").ok();
                     }
-                    render::render_into(&field, &row, cursor);
+                    render::render_into(&field, &row, cursor, composing);
                     append(&holder, &field);
                 }
             }
@@ -137,7 +145,7 @@ impl View {
         if !run.is_empty() {
             append(&holder, &run_element(doc, &run, run_start)?);
         }
-        if let Some((_, composing)) = preedit.filter(|(at, _)| at.col >= items.len()) {
+        if let Some((_, composing)) = inline.filter(|(at, _)| at.col >= items.len()) {
             append(&holder, &preedit_element(doc, composing)?);
         }
         if items.is_empty() {
