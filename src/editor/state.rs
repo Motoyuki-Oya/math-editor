@@ -1,6 +1,6 @@
 //! Holds the editing session and turns events into model commands.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use web_sys::{HtmlElement, HtmlTextAreaElement, InputEvent, KeyboardEvent, MouseEvent};
@@ -20,6 +20,8 @@ pub struct Active {
 }
 
 pub struct Session {
+    /// Names the pane this document is shown in.
+    pub pane: usize,
     pub editor: Editor,
     pub view: View,
     pub textarea: HtmlTextAreaElement,
@@ -29,30 +31,53 @@ pub struct Session {
     /// What the IME is composing right now, drawn where it will be inserted.
     pub preedit: String,
     pub dragging: bool,
-    pub on_change: Option<Box<dyn Fn()>>,
     pub search_from: Option<Pos>,
 }
 
+/// Called with the pane whose document changed.
+type OnChange = Box<dyn Fn(usize)>;
+
 thread_local! {
-    static SESSION: RefCell<Option<Rc<RefCell<Session>>>> = const { RefCell::new(None) };
+    /// One session per pane on screen. Split view is what makes it a list.
+    static PANES: RefCell<Vec<Rc<RefCell<Session>>>> = const { RefCell::new(Vec::new()) };
+    /// The pane that takes the typing.
+    static FOCUSED: Cell<usize> = const { Cell::new(0) };
+    static NEXT_PANE: Cell<usize> = const { Cell::new(0) };
+    static ON_CHANGE: RefCell<Option<OnChange>> = const { RefCell::new(None) };
 }
 
+/// The session of the pane that takes the typing.
 pub fn session() -> Option<Rc<RefCell<Session>>> {
-    SESSION.with(|slot| slot.borrow().clone())
+    let focused = FOCUSED.get();
+    PANES.with(|panes| {
+        let panes = panes.borrow();
+        panes
+            .iter()
+            .find(|session| session.borrow().pane == focused)
+            .or_else(|| panes.first())
+            .cloned()
+    })
 }
 
-/// Builds the editor inside `root` and starts listening for input.
-pub fn init(root: &HtmlElement) {
-    let Some(doc) = root.owner_document() else {
-        return;
-    };
-    let Some(view) = View::new(root.clone()) else {
-        return;
-    };
-    let Some(textarea) = input::build(&doc, root) else {
-        return;
-    };
+fn pane_session(pane: usize) -> Option<Rc<RefCell<Session>>> {
+    PANES.with(|panes| {
+        panes
+            .borrow()
+            .iter()
+            .find(|session| session.borrow().pane == pane)
+            .cloned()
+    })
+}
+
+/// Builds an editor inside `root`. The returned number names the pane.
+pub fn init(root: &HtmlElement) -> Option<usize> {
+    let doc = root.owner_document()?;
+    let view = View::new(root.clone())?;
+    let textarea = input::build(&doc, root)?;
+    let pane = NEXT_PANE.get();
+    NEXT_PANE.set(pane + 1);
     let session = Rc::new(RefCell::new(Session {
+        pane,
         editor: Editor::default(),
         view,
         textarea,
@@ -61,27 +86,57 @@ pub fn init(root: &HtmlElement) {
         composing: false,
         preedit: String::new(),
         dragging: false,
-        on_change: None,
         search_from: None,
     }));
     input::install(&session);
-    SESSION.with(|slot| *slot.borrow_mut() = Some(session.clone()));
+    PANES.with(|panes| panes.borrow_mut().push(session.clone()));
+    if PANES.with(|panes| panes.borrow().len()) == 1 {
+        FOCUSED.set(pane);
+    }
     redraw(&session);
+    Some(pane)
 }
 
-pub fn set_on_change(callback: Box<dyn Fn()>) {
-    if let Some(session) = session() {
-        session.borrow_mut().on_change = Some(callback);
+/// Drops a pane, when the split is undone.
+pub fn close_pane(pane: usize) {
+    PANES.with(|panes| {
+        panes
+            .borrow_mut()
+            .retain(|session| session.borrow().pane != pane)
+    });
+    if FOCUSED.get() == pane {
+        if let Some(session) = PANES.with(|panes| panes.borrow().first().cloned()) {
+            let pane = session.borrow().pane;
+            focus_pane(pane);
+        }
     }
+}
+
+/// Sends the typing to `pane`.
+pub fn focus_pane(pane: usize) {
+    if pane_session(pane).is_some() {
+        FOCUSED.set(pane);
+    }
+    focus();
+}
+
+/// The pane the events came from is the one that takes the typing.
+pub fn note_focus(session: &Rc<RefCell<Session>>) {
+    FOCUSED.set(session.borrow().pane);
+}
+
+pub fn set_on_change(callback: OnChange) {
+    ON_CHANGE.with(|slot| *slot.borrow_mut() = Some(callback));
 }
 
 pub fn changed(session: &Rc<RefCell<Session>>) {
     session.borrow_mut().search_from = None;
     redraw(session);
-    let callback = session.borrow_mut().on_change.take();
+    let pane = session.borrow().pane;
+    let callback = ON_CHANGE.with(|slot| slot.borrow_mut().take());
     if let Some(callback) = callback {
-        callback();
-        session.borrow_mut().on_change = Some(callback);
+        callback(pane);
+        ON_CHANGE.with(|slot| *slot.borrow_mut() = Some(callback));
     }
 }
 
@@ -240,17 +295,19 @@ pub struct Parked {
     editor: Editor,
 }
 
-/// Takes the shown document out so that another one can take its place.
-pub fn park() -> Option<Parked> {
-    let session = session()?;
+/// Takes a pane's document out so that another one can take its place.
+pub fn park(pane: usize) -> Option<Parked> {
+    let session = pane_session(pane)?;
     leave_math(&session);
     let editor = std::mem::take(&mut session.borrow_mut().editor);
     Some(Parked { editor })
 }
 
-/// Shows a parked document again, or an empty one.
-pub fn restore(parked: Option<Parked>) {
-    let Some(session) = session() else { return };
+/// Shows a parked document in `pane`, or an empty one.
+pub fn restore(pane: usize, parked: Option<Parked>) {
+    let Some(session) = pane_session(pane) else {
+        return;
+    };
     {
         let mut borrowed = session.borrow_mut();
         borrowed.active = None;

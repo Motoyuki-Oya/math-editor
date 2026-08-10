@@ -158,6 +158,30 @@ body {
   color: var(--fg);
 }
 
+/* Split view: the panes sit side by side. */
+.panes {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  border-left: 1px solid var(--line);
+}
+
+.pane:first-child {
+  border-left: none;
+}
+
+/* The pane that does not take the typing reads as the quieter one. */
+.pane:not(.pane-focused) .tabbar {
+  opacity: 0.6;
+}
+
 .editor {
   position: relative;
   flex: 1;

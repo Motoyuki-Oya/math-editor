@@ -92,11 +92,13 @@ pub fn install(session: &Rc<RefCell<Session>>) {
         session,
         |session, _: web_sys::FocusEvent| {
             session.borrow_mut().focused = true;
+            state::note_focus(session);
             state::redraw(session);
         },
     );
 
     on(&root, "mousedown", session, |session, event: MouseEvent| {
+        state::note_focus(session);
         state::on_mousedown(session, event);
     });
     on(&root, "mousemove", session, |session, event: MouseEvent| {
