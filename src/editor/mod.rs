@@ -11,6 +11,6 @@ pub mod view;
 
 pub use search::SearchOptions;
 pub use state::{
-    find_next, focus, init, insert_math, insert_node, insert_plain, load, redo, replace_all,
-    set_on_change, stats, to_document, undo,
+    find_next, focus, init, insert_math, insert_node, insert_plain, load, park, redo, replace_all,
+    restore, set_on_change, stats, to_document, undo, Parked,
 };

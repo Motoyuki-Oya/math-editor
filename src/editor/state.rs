@@ -235,6 +235,31 @@ pub fn redo() {
     }
 }
 
+/// A whole document, kept aside while another tab is shown.
+pub struct Parked {
+    editor: Editor,
+}
+
+/// Takes the shown document out so that another one can take its place.
+pub fn park() -> Option<Parked> {
+    let session = session()?;
+    leave_math(&session);
+    let editor = std::mem::take(&mut session.borrow_mut().editor);
+    Some(Parked { editor })
+}
+
+/// Shows a parked document again, or an empty one.
+pub fn restore(parked: Option<Parked>) {
+    let Some(session) = session() else { return };
+    {
+        let mut borrowed = session.borrow_mut();
+        borrowed.active = None;
+        borrowed.preedit.clear();
+        borrowed.editor = parked.map(|parked| parked.editor).unwrap_or_default();
+    }
+    changed(&session);
+}
+
 pub fn load(text: &str) {
     let Some(session) = session() else { return };
     {

@@ -57,6 +57,7 @@ GitHub Actions の `build` ワークフローが `windows-latest` でインス�
 | 操作 | ショートカット |
 | --- | --- |
 | 新規 / 開く / 保存 / 名前を付けて保存 | `Ctrl+N` / `Ctrl+O` / `Ctrl+S` / `Ctrl+Shift+S` |
+| タブを増やす / 閉じる / 切り替え | `Ctrl+T` / `Ctrl+W` / `Ctrl+Tab`・`Ctrl+Shift+Tab`（タブ帯のクリックでも） |
 | 元に戻す / やり直し（本文と構造を通して） | `Ctrl+Z` / `Ctrl+Shift+Z`・`Ctrl+Y` |
 | 検索・置換 | `Ctrl+F`（`Aa` で大文字小文字を区別、`.*` で正規表現、置換は `$1` で後方参照） |
 | カーソルを追加 | `Alt+クリック` |
