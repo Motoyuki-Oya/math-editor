@@ -14,7 +14,10 @@ use crate::math::render;
 pub const LINE_CLASS: &str = "mn-line";
 pub const RUN_CLASS: &str = "mn-run";
 pub const FIELD_CLASS: &str = "mn-field";
+const TAB_CLASS: &str = "mn-tab";
 const PREEDIT_CLASS: &str = "mn-preedit";
+/// The gap left after the widest cell of a column.
+const COLUMN_GAP: f64 = 18.0;
 const LINE_ATTR: &str = "data-line";
 const COL_ATTR: &str = "data-col";
 
@@ -67,6 +70,7 @@ impl View {
                 append(&self.lines, &element);
             }
         }
+        self.align_columns(text);
         // While an IME is composing, the underlined text stands in for the caret.
         self.draw_carets(&doc, sels, focused && active.is_none() && preedit.is_none());
     }
@@ -98,6 +102,15 @@ impl View {
                         run_start = col;
                     }
                     run.push(*c);
+                }
+                Item::Tab => {
+                    if !run.is_empty() {
+                        append(&holder, &run_element(doc, &run, run_start)?);
+                        run.clear();
+                    }
+                    let tab = element(doc, "span", TAB_CLASS)?;
+                    tab.set_attribute(COL_ATTR, &col.to_string()).ok();
+                    append(&holder, &tab);
                 }
                 Item::Math { source } => {
                     if !run.is_empty() {
@@ -132,6 +145,49 @@ impl View {
             append(&holder, &run_element(doc, "", 0)?);
         }
         Some(holder)
+    }
+
+    /// Lines up the column separators of neighbouring lines. Only the drawing is
+    /// touched: the text keeps one separator per `$(t)`, wherever it sits.
+    fn align_columns(&self, text: &Text) {
+        let mut line = 0;
+        while line < text.line_count() {
+            if !has_tab(text.line(line)) {
+                line += 1;
+                continue;
+            }
+            let mut end = line;
+            while end < text.line_count() && has_tab(text.line(end)) {
+                end += 1;
+            }
+            self.align_block(line..end);
+            line = end;
+        }
+    }
+
+    fn align_block(&self, block: std::ops::Range<usize>) {
+        let tabs: Vec<Vec<Element>> = block
+            .map(|line| match self.line_element(line) {
+                Some(holder) => children_of_class(&holder, TAB_CLASS),
+                None => Vec::new(),
+            })
+            .collect();
+        let columns = tabs.iter().map(Vec::len).max().unwrap_or(0);
+        for column in 0..columns {
+            // One column at a time, because widening a column moves the ones
+            // after it, and the measurements have to follow.
+            let separators: Vec<&Element> =
+                tabs.iter().filter_map(|line| line.get(column)).collect();
+            let widest = separators
+                .iter()
+                .map(|tab| tab.get_bounding_client_rect().left())
+                .fold(f64::MIN, f64::max);
+            for tab in separators {
+                let left = tab.get_bounding_client_rect().left();
+                let width = (widest - left + COLUMN_GAP).max(1.0);
+                tab.set_attribute("style", &format!("width:{width}px")).ok();
+            }
+        }
     }
 
     fn draw_carets(&self, doc: &Document, sels: &[Sel], show_carets: bool) {
@@ -217,7 +273,7 @@ impl View {
                 .get_attribute(COL_ATTR)
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0);
-            if child.class_list().contains(FIELD_CLASS) {
+            if child.class_list().contains(FIELD_CLASS) || child.class_list().contains(TAB_CLASS) {
                 let rect = box_of(&child.get_bounding_client_rect());
                 if col == start {
                     return Some(rect);
@@ -346,6 +402,18 @@ fn set_box(element: &Element, rect: Box2, origin: &web_sys::DomRect) {
         rect.height
     );
     element.set_attribute("style", &style).ok();
+}
+
+fn has_tab(items: &[Item]) -> bool {
+    items.contains(&Item::Tab)
+}
+
+fn children_of_class(holder: &Element, class: &str) -> Vec<Element> {
+    let children = holder.children();
+    (0..children.length())
+        .filter_map(|i| children.item(i))
+        .filter(|child| child.class_list().contains(class))
+        .collect()
 }
 
 fn append(parent: &impl AsRef<web_sys::Node>, child: &Element) {

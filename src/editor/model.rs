@@ -10,6 +10,9 @@ use crate::doc::{self, Segment};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Item {
     Char(char),
+    /// A column separator, written `$(t)`. Separators on neighbouring lines line
+    /// up with each other; it carries no content of its own.
+    Tab,
     /// An island, kept as the notation between its `$(` and `)`.
     Math {
         source: String,
@@ -20,10 +23,13 @@ impl Item {
     pub fn as_char(&self) -> Option<char> {
         match self {
             Item::Char(c) => Some(*c),
-            Item::Math { .. } => None,
+            Item::Tab | Item::Math { .. } => None,
         }
     }
 }
+
+/// The island that means a column separator rather than a structure.
+pub const TAB_SOURCE: &str = "t";
 
 /// A place between two items. `col` counts items, not bytes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -95,6 +101,7 @@ impl Text {
                 line.into_iter()
                     .flat_map(|segment| match segment {
                         Segment::Text(text) => text.chars().map(Item::Char).collect::<Vec<_>>(),
+                        Segment::Island(source) if source.trim() == TAB_SOURCE => vec![Item::Tab],
                         Segment::Island(source) => vec![Item::Math { source }],
                     })
                     .collect()
@@ -117,15 +124,18 @@ impl Text {
                 let mut segments = doc::Line::new();
                 let mut text = String::new();
                 for item in items {
-                    match item {
-                        Item::Char(c) => text.push(*c),
-                        Item::Math { source } => {
-                            if !text.is_empty() {
-                                segments.push(Segment::Text(std::mem::take(&mut text)));
-                            }
-                            segments.push(Segment::Island(source.clone()));
+                    let source = match item {
+                        Item::Char(c) => {
+                            text.push(*c);
+                            continue;
                         }
+                        Item::Tab => TAB_SOURCE.to_string(),
+                        Item::Math { source } => source.clone(),
+                    };
+                    if !text.is_empty() {
+                        segments.push(Segment::Text(std::mem::take(&mut text)));
                     }
+                    segments.push(Segment::Island(source));
                 }
                 if !text.is_empty() {
                     segments.push(Segment::Text(text));
@@ -408,6 +418,10 @@ impl Editor {
         self.insert(vec![vec![Item::Math {
             source: source.to_string(),
         }]]);
+    }
+
+    pub fn insert_tab(&mut self) {
+        self.insert(vec![vec![Item::Tab]]);
     }
 
     pub fn split_line(&mut self) {
@@ -713,6 +727,22 @@ mod tests {
             Some(Item::Math { .. })
         ));
         assert_eq!(editor.to_document(), "a $(1/2) b");
+    }
+
+    #[test]
+    fn a_column_separator_is_one_item() {
+        let editor = editor("a $(t) b");
+        assert_eq!(editor.text().line_len(0), 5);
+        assert_eq!(editor.text().item_at(Pos::new(0, 2)), Some(&Item::Tab));
+        assert_eq!(editor.to_document(), "a $(t) b");
+    }
+
+    #[test]
+    fn a_separator_can_be_typed() {
+        let mut editor = editor("x= 1");
+        editor.set_caret(Pos::new(0, 1));
+        editor.insert_tab();
+        assert_eq!(editor.to_document(), "x$(t)= 1");
     }
 
     #[test]
