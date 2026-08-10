@@ -10,7 +10,6 @@ use web_sys::{HtmlElement, KeyboardEvent};
 use crate::editor;
 use crate::ipc;
 use crate::math::ast::{self, Between, MatrixKind, Node};
-use crate::math::commands;
 
 const UNTITLED: &str = "無題";
 
@@ -617,56 +616,22 @@ fn Tabs(shell: Shell, pane: Pane) -> impl IntoView {
 
 #[component]
 fn Palette() -> impl IntoView {
+    // Only what plain text cannot hold: everything else is typed as usual.
     let structures = [
-        ("½", "罫線とその上下  $(上/下)", Structure::Stack),
-        ("ⁿ", "罫線なしの上下  $(上 - 下)", Structure::Bare),
-        ("→", "矢印とその上下  $(上 → 下)", Structure::Arrow),
-        ("√", "ルート  $(√ x)", Structure::Sqrt),
-        ("ⁿ√", "n乗根  $(√[n] x)", Structure::NthRoot),
-        ("x²", "上付き  x$(^ 3)", Structure::Sup),
-        ("xₙ", "下付き  x$(_ i)", Structure::Sub),
-        ("∑", "記号の上下  $(↨ Σ, 上, 下)", Structure::Sum),
-        ("∏", "記号の上下  $(↨ ∏, 上, 下)", Structure::Prod),
-        ("∫", "記号の上下  $(↨ ∫, 上, 下)", Structure::Int),
-        ("lim", "記号の上下  $(↨ lim, 上, 下)", Structure::Lim),
-        (
-            "[⋮]",
-            "格子状の並び  $([a, b][c, d])  行追加は Alt+Enter",
-            Structure::Matrix,
-        ),
-        (
-            "{⋮",
-            "場合分け  $({[…][…])  行追加は Alt+Enter",
-            Structure::Cases,
-        ),
+        ("½", "分数", Structure::Stack),
+        ("ⁿ", "線のない上下", Structure::Bare),
+        ("→", "矢印の上下", Structure::Arrow),
+        ("√", "ルート", Structure::Sqrt),
+        ("ⁿ√", "n 乗根", Structure::NthRoot),
+        ("x²", "上付き", Structure::Sup),
+        ("xₙ", "下付き", Structure::Sub),
+        ("∑", "和（上下に範囲）", Structure::Sum),
+        ("∏", "積（上下に範囲）", Structure::Prod),
+        ("∫", "積分（上下に範囲）", Structure::Int),
+        ("lim", "極限（下に近づく先）", Structure::Lim),
+        ("[⋮]", "行列（行の追加は Alt+Enter）", Structure::Matrix),
+        ("{⋮", "場合分け（行の追加は Alt+Enter）", Structure::Cases),
     ];
-    let symbols = [
-        "times",
-        "div",
-        "cdot",
-        "pm",
-        "leq",
-        "geq",
-        "neq",
-        "approx",
-        "infty",
-        "partial",
-        "to",
-        "Rightarrow",
-        "in",
-        "subset",
-        "cup",
-        "cap",
-        "forall",
-        "exists",
-        "angle",
-        "degree",
-    ];
-    let greek = [
-        "alpha", "beta", "gamma", "delta", "theta", "lambda", "mu", "pi", "rho", "sigma", "phi",
-        "omega", "Gamma", "Delta", "Theta", "Sigma", "Phi", "Omega",
-    ];
-    let functions = ["sin", "cos", "tan", "log", "ln", "exp"];
 
     view! {
         <div class="palette">
@@ -682,41 +647,6 @@ fn Palette() -> impl IntoView {
                                 on:click=move |_| editor::insert_node(structure.node())
                             >
                                 {label}
-                            </button>
-                        }
-                    })
-                    .collect::<Vec<_>>()}
-            </div>
-            <div class="group">
-                {symbols
-                    .into_iter()
-                    .chain(greek)
-                    .map(|name| {
-                        let glyph = commands::glyph_for(name).unwrap_or(name);
-                        view! {
-                            <button
-                                class="pal"
-                                title=name
-                                on:mousedown=hold_focus
-                                on:click=move |_| editor::insert_plain(glyph)
-                            >
-                                {glyph}
-                            </button>
-                        }
-                    })
-                    .collect::<Vec<_>>()}
-            </div>
-            <div class="group">
-                {functions
-                    .into_iter()
-                    .map(|name| {
-                        view! {
-                            <button
-                                class="pal pal-word"
-                                on:mousedown=hold_focus
-                                on:click=move |_| editor::insert_plain(name)
-                            >
-                                {name}
                             </button>
                         }
                     })
