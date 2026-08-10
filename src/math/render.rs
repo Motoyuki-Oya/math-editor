@@ -175,21 +175,18 @@ impl<'a> Renderer<'a> {
             }
             Node::Func(name) => self.span("mn-atom mn-func", name),
             Node::Stack { between, .. } => {
-                let frac = self.el(
-                    "span",
-                    match between {
-                        Between::Rule => "mn-frac",
-                        _ => "mn-frac mn-frac-bare",
-                    },
-                );
+                let frac = self.el("span", "mn-frac");
                 let num = self.el("span", "mn-frac-num");
                 num.append_child(&self.child_row(node, 0, path, index)).ok();
                 let den = self.el("span", "mn-frac-den");
                 den.append_child(&self.child_row(node, 1, path, index)).ok();
                 frac.append_child(&num).ok();
-                if let Between::Arrow(arrow) = between {
-                    frac.append_child(&self.arrow(*arrow)).ok();
-                }
+                match between {
+                    // The rule is its own element so that it spans the wider row.
+                    Between::Rule => frac.append_child(&self.el("span", "mn-frac-rule")).ok(),
+                    Between::Arrow(arrow) => frac.append_child(&self.arrow(*arrow)).ok(),
+                    Between::Nothing => None,
+                };
                 frac.append_child(&den).ok();
                 frac
             }
