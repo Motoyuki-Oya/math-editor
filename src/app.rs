@@ -1,6 +1,7 @@
 //! Application shell: toolbar, structure palette, search bar and status bar.
 
 use leptos::prelude::*;
+use leptos::reactive::owner::LocalStorage;
 use leptos::task::spawn_local;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -13,76 +14,184 @@ use crate::math::commands;
 
 const UNTITLED: &str = "無題";
 
+/// One open file. The document itself lives in the editor while the tab is
+/// shown, and is parked here while another tab is.
 #[derive(Clone, Copy)]
-struct Shell {
+struct Tab {
     path: RwSignal<Option<String>>,
     dirty: RwSignal<bool>,
-    status: RwSignal<String>,
-    stats: RwSignal<(usize, usize)>,
-    searching: RwSignal<bool>,
+    parked: StoredValue<Option<editor::Parked>, LocalStorage>,
 }
 
-impl Shell {
-    fn file_name(&self) -> String {
+impl Tab {
+    fn new() -> Tab {
+        Tab {
+            path: RwSignal::new(None),
+            dirty: RwSignal::new(false),
+            parked: StoredValue::new_local(None),
+        }
+    }
+
+    fn name(&self) -> String {
         self.path
             .get()
             .as_deref()
             .and_then(|path| path.rsplit(['/', '\\']).next().map(str::to_string))
             .unwrap_or_else(|| format!("{UNTITLED}.txt"))
     }
+}
+
+#[derive(Clone, Copy)]
+struct Shell {
+    tabs: RwSignal<Vec<Tab>>,
+    current: RwSignal<usize>,
+    status: RwSignal<String>,
+    stats: RwSignal<(usize, usize)>,
+    searching: RwSignal<bool>,
+}
+
+impl Shell {
+    fn tab(&self) -> Tab {
+        let index = self.current.get();
+        self.tabs.with(|tabs| tabs[index.min(tabs.len() - 1)])
+    }
+
+    fn tab_untracked(&self) -> Tab {
+        let index = self.current.get_untracked();
+        self.tabs
+            .with_untracked(|tabs| tabs[index.min(tabs.len() - 1)])
+    }
+
+    fn file_name(&self) -> String {
+        self.tab().name()
+    }
 
     fn refresh(&self) {
         self.stats.set(editor::stats());
     }
 
+    /// Tells the native side whether closing the window would lose work.
+    fn sync_dirty(&self) {
+        let any = self
+            .tabs
+            .with_untracked(|tabs| tabs.iter().any(|tab| tab.dirty.get_untracked()));
+        spawn_local(ipc::set_dirty(any));
+    }
+
     fn mark_dirty(&self) {
-        if !self.dirty.get_untracked() {
-            self.dirty.set(true);
-            spawn_local(ipc::set_dirty(true));
+        let tab = self.tab_untracked();
+        if !tab.dirty.get_untracked() {
+            tab.dirty.set(true);
+            self.sync_dirty();
         }
         self.refresh();
     }
 
     fn mark_clean(&self) {
-        self.dirty.set(false);
-        spawn_local(ipc::set_dirty(false));
+        self.tab_untracked().dirty.set(false);
+        self.sync_dirty();
         self.refresh();
     }
 
-    fn new_document(&self) {
-        let shell = *self;
-        spawn_local(async move {
-            if !shell.may_discard().await {
-                return;
-            }
-            editor::load("");
-            shell.path.set(None);
-            shell.status.set(String::new());
-            shell.mark_clean();
-        });
+    /// Shows the tab at `index`, parking the one on screen.
+    fn switch(&self, index: usize) {
+        let current = self.current.get_untracked();
+        let Some(next) = self.tabs.with_untracked(|tabs| tabs.get(index).copied()) else {
+            return;
+        };
+        if index == current {
+            editor::focus();
+            return;
+        }
+        self.tab_untracked().parked.set_value(editor::park());
+        self.current.set(index);
+        self.show(next);
     }
 
-    /// Whether unsaved work may be thrown away.
-    async fn may_discard(&self) -> bool {
-        if !self.dirty.get_untracked() {
-            return true;
+    /// Puts a tab's document back on screen, keeping its unsaved mark.
+    fn show(&self, tab: Tab) {
+        let dirty = tab.dirty.get_untracked();
+        let parked = tab.parked.try_update_value(Option::take).flatten();
+        // Drawing the document counts as a change, so the mark is set back.
+        editor::restore(parked);
+        tab.dirty.set(dirty);
+        self.sync_dirty();
+        self.refresh();
+        editor::focus();
+    }
+
+    /// Opens an empty tab, or reuses the shown one when it is untouched.
+    fn add_tab(&self) -> Tab {
+        let shown = self.tab_untracked();
+        if shown.path.get_untracked().is_none() && !shown.dirty.get_untracked() {
+            return shown;
         }
-        ipc::confirm_discard("保存されていない変更があります。破棄しますか？").await
+        shown.parked.set_value(editor::park());
+        let tab = Tab::new();
+        self.tabs.update(|tabs| tabs.push(tab));
+        self.current
+            .set(self.tabs.with_untracked(|tabs| tabs.len() - 1));
+        self.show(tab);
+        tab
+    }
+
+    fn new_document(&self) {
+        self.add_tab();
+        self.status.set(String::new());
+    }
+
+    fn close(&self, index: usize) {
+        let shell = *self;
+        spawn_local(async move {
+            let Some(tab) = shell.tabs.with_untracked(|tabs| tabs.get(index).copied()) else {
+                return;
+            };
+            if tab.dirty.get_untracked()
+                && !ipc::confirm_discard("保存されていない変更があります。破棄しますか？").await
+            {
+                return;
+            }
+            let current = shell.current.get_untracked();
+            if shell.tabs.with_untracked(Vec::len) == 1 {
+                // The last tab stays, emptied, so there is always a document.
+                tab.path.set(None);
+                editor::restore(None);
+                tab.dirty.set(false);
+                shell.sync_dirty();
+                shell.refresh();
+                editor::focus();
+                return;
+            }
+            shell.tabs.update(|tabs| {
+                tabs.remove(index);
+            });
+            let last = shell.tabs.with_untracked(|tabs| tabs.len() - 1);
+            if index == current {
+                let next = index.min(last);
+                shell.current.set(next);
+                shell.show(shell.tabs.with_untracked(|tabs| tabs[next]));
+            } else {
+                shell.current.set(if index < current {
+                    current - 1
+                } else {
+                    current.min(last)
+                });
+                shell.sync_dirty();
+            }
+        });
     }
 
     fn open(&self) {
         let shell = *self;
         spawn_local(async move {
-            if !shell.may_discard().await {
-                return;
-            }
             let Some(path) = ipc::pick_open_path().await else {
                 return;
             };
             match ipc::read_document(&path).await {
                 Ok(text) => {
+                    let tab = shell.add_tab();
                     editor::load(&text);
-                    shell.path.set(Some(path));
+                    tab.path.set(Some(path));
                     shell.status.set("開きました".into());
                     shell.mark_clean();
                 }
@@ -93,8 +202,9 @@ impl Shell {
 
     fn save(&self, force_dialog: bool) {
         let shell = *self;
-        let current = self.path.get_untracked();
-        let default_name = self.file_name();
+        let tab = self.tab_untracked();
+        let current = tab.path.get_untracked();
+        let default_name = tab.name();
         spawn_local(async move {
             let path = match current {
                 Some(path) if !force_dialog => path,
@@ -106,7 +216,7 @@ impl Shell {
             let contents = editor::to_document();
             match ipc::write_document(&path, &contents).await {
                 Ok(()) => {
-                    shell.path.set(Some(path));
+                    tab.path.set(Some(path));
                     shell.status.set("保存しました".into());
                     shell.mark_clean();
                 }
@@ -119,8 +229,8 @@ impl Shell {
 #[component]
 pub fn App() -> impl IntoView {
     let shell = Shell {
-        path: RwSignal::new(None),
-        dirty: RwSignal::new(false),
+        tabs: RwSignal::new(vec![Tab::new()]),
+        current: RwSignal::new(0),
         status: RwSignal::new(String::new()),
         stats: RwSignal::new((0, 1)),
         searching: RwSignal::new(false),
@@ -153,7 +263,7 @@ pub fn App() -> impl IntoView {
     Effect::new(move |_| {
         let title = format!(
             "{}{} — MathNote",
-            if shell.dirty.get() { "*" } else { "" },
+            if shell.tab().dirty.get() { "*" } else { "" },
             shell.file_name()
         );
         if let Some(document) = web_sys::window().and_then(|w| w.document()) {
@@ -165,7 +275,7 @@ pub fn App() -> impl IntoView {
         <div class="app">
             <div class="toolbar">
                 <div class="group">
-                    <button class="tool" on:mousedown=hold_focus on:click=move |_| shell.new_document()>"新規"</button>
+                    <button class="tool" on:mousedown=hold_focus on:click=move |_| shell.new_document() title="新しいタブ (Ctrl+T)">"新規"</button>
                     <button class="tool" on:mousedown=hold_focus on:click=move |_| shell.open()>"開く"</button>
                     <button class="tool" on:mousedown=hold_focus on:click=move |_| shell.save(false)>"保存"</button>
                     <button class="tool" on:mousedown=hold_focus on:click=move |_| shell.save(true)>"名前を付けて"</button>
@@ -175,6 +285,8 @@ pub fn App() -> impl IntoView {
                     <button class="tool" on:mousedown=hold_focus on:click=move |_| shell.searching.update(|s| *s = !*s) title="検索と置換 (Ctrl+F)">"検索"</button>
                 </div>
             </div>
+
+            <Tabs shell=shell/>
 
             <Palette/>
 
@@ -226,7 +338,7 @@ pub fn App() -> impl IntoView {
 
             <div class="statusbar">
                 <span>{move || shell.file_name()}</span>
-                <span>{move || if shell.dirty.get() { "未保存" } else { "保存済み" }}</span>
+                <span>{move || if shell.tab().dirty.get() { "未保存" } else { "保存済み" }}</span>
                 <span>{move || {
                     let (characters, lines) = shell.stats.get();
                     format!("{characters} 文字 / {lines} 行")
@@ -240,6 +352,61 @@ pub fn App() -> impl IntoView {
 /// Keeps the caret inside the formula when a toolbar button is pressed.
 fn hold_focus(event: web_sys::MouseEvent) {
     event.prevent_default();
+}
+
+/// One button per open file, with the unsaved mark and a way to close it.
+#[component]
+fn Tabs(shell: Shell) -> impl IntoView {
+    view! {
+        <div class="tabbar">
+            {move || {
+                let current = shell.current.get();
+                shell
+                    .tabs
+                    .get()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, tab)| {
+                        view! {
+                            <span class=move || {
+                                if index == current { "tab tab-current" } else { "tab" }
+                            }>
+                                <button
+                                    class="tab-name"
+                                    on:mousedown=hold_focus
+                                    on:click=move |_| shell.switch(index)
+                                >
+                                    {move || {
+                                        format!(
+                                            "{}{}",
+                                            if tab.dirty.get() { "*" } else { "" },
+                                            tab.name(),
+                                        )
+                                    }}
+                                </button>
+                                <button
+                                    class="tab-close"
+                                    title="閉じる (Ctrl+W)"
+                                    on:mousedown=hold_focus
+                                    on:click=move |_| shell.close(index)
+                                >
+                                    "×"
+                                </button>
+                            </span>
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            }}
+            <button
+                class="tab-add"
+                title="新しいタブ (Ctrl+T)"
+                on:mousedown=hold_focus
+                on:click=move |_| shell.new_document()
+            >
+                "+"
+            </button>
+        </div>
+    }
 }
 
 #[component]
@@ -423,6 +590,25 @@ fn install_shortcuts(shell: Shell) {
             "f" => {
                 event.prevent_default();
                 shell.searching.set(true);
+            }
+            "t" => {
+                event.prevent_default();
+                shell.new_document();
+            }
+            "w" => {
+                event.prevent_default();
+                shell.close(shell.current.get_untracked());
+            }
+            "tab" => {
+                event.prevent_default();
+                let count = shell.tabs.with_untracked(Vec::len);
+                let current = shell.current.get_untracked();
+                let next = if shift {
+                    (current + count - 1) % count
+                } else {
+                    (current + 1) % count
+                };
+                shell.switch(next);
             }
             "m" => {
                 event.prevent_default();
