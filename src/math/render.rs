@@ -39,11 +39,22 @@ pub fn decode_position(encoded: &str) -> Option<Cursor> {
 pub struct Renderer<'a> {
     doc: &'a Document,
     cursor: Option<&'a Cursor>,
+    /// What an IME is composing, drawn at the caret in place of it.
+    preedit: Option<&'a str>,
 }
 
 impl<'a> Renderer<'a> {
     pub fn new(doc: &'a Document, cursor: Option<&'a Cursor>) -> Renderer<'a> {
-        Renderer { doc, cursor }
+        Renderer {
+            doc,
+            cursor,
+            preedit: None,
+        }
+    }
+
+    pub fn with_preedit(mut self, text: Option<&'a str>) -> Renderer<'a> {
+        self.preedit = text.filter(|text| !text.is_empty());
+        self
     }
 
     fn el(&self, tag: &str, class: &str) -> Element {
@@ -82,8 +93,12 @@ impl<'a> Renderer<'a> {
         svg
     }
 
+    /// The caret, or the text an IME is composing, which stands in for it.
     fn caret(&self) -> Element {
-        self.el("span", "mn-caret")
+        match self.preedit {
+            Some(text) => self.span("mn-preedit", text),
+            None => self.el("span", "mn-caret"),
+        }
     }
 
     /// Renders one row; `path` is the address of the row inside the formula.
@@ -135,8 +150,11 @@ impl<'a> Renderer<'a> {
             Node::Char(c) => {
                 let class = if c.is_ascii_digit() {
                     "mn-atom mn-num"
-                } else if c.is_alphabetic() {
+                } else if is_variable_letter(*c) {
                     "mn-atom mn-ident"
+                } else if c.is_alphabetic() {
+                    // Kana, kanji and the like are words, not variables.
+                    "mn-atom mn-word"
                 } else if matches!(c, '+' | '-' | '=' | '<' | '>' | '±') {
                     "mn-atom mn-bin"
                 } else {
@@ -349,12 +367,17 @@ impl<'a> Renderer<'a> {
 }
 
 /// Replaces the contents of `host` with a freshly rendered formula.
-pub fn render_into(host: &Element, row: &Row, cursor: Option<&Cursor>) {
+/// Letters set in italic, the way a variable is. Other scripts stay upright.
+fn is_variable_letter(c: char) -> bool {
+    c.is_ascii_alphabetic() || matches!(c, 'α'..='ω' | 'Α'..='Ω')
+}
+
+pub fn render_into(host: &Element, row: &Row, cursor: Option<&Cursor>, preedit: Option<&str>) {
     let Some(doc) = host.owner_document() else {
         return;
     };
     host.set_inner_html("");
-    let renderer = Renderer::new(&doc, cursor);
+    let renderer = Renderer::new(&doc, cursor).with_preedit(preedit);
     let rendered = renderer.row(row, &[]);
     host.append_child(&rendered).ok();
 }

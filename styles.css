@@ -255,6 +255,12 @@ body {
   padding: 0 0.02em;
 }
 
+/* Letters of other scripts (kana, kanji) read as words, so they stay upright. */
+.mn-word {
+  font-family: var(--font-text);
+  padding: 0 0.02em;
+}
+
 .mn-func {
   padding: 0 0.15em 0 0;
 }
