@@ -369,6 +369,23 @@ body {
   opacity: 0.5;
 }
 
+/* The empty slot the caret is in: the caret sits inside the box, and what an
+   IME is composing grows it instead of spilling out. */
+.mn-placeholder-here {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  min-width: 0.55em;
+  opacity: 1;
+  border-color: var(--accent);
+}
+
+.mn-selected {
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  border-radius: 2px;
+}
+
 .mn-caret {
   display: inline-block;
   width: 0;

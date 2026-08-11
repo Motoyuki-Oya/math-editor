@@ -183,17 +183,16 @@ impl Text {
         end
     }
 
-    pub fn set_math(&mut self, at: Pos, row: Row) -> bool {
+    /// The island at `at`, to be edited in place. Editing an island is editing
+    /// the document: there is no copy of it to write back.
+    pub fn math_at_mut(&mut self, at: Pos) -> Option<&mut Row> {
         match self
             .lines
             .get_mut(at.line)
             .and_then(|line| line.get_mut(at.col))
         {
-            Some(Item::Math(slot)) => {
-                *slot = row;
-                true
-            }
-            _ => false,
+            Some(Item::Math(row)) => Some(row),
+            _ => None,
         }
     }
 

@@ -6,19 +6,13 @@ use std::rc::Rc;
 use web_sys::{HtmlElement, HtmlTextAreaElement, InputEvent, KeyboardEvent, MouseEvent};
 
 use super::input;
-use super::model::{Editor, Item, Pos};
+use super::model::{Editor, Inside, Item, Pos};
 use super::search::{self, SearchOptions};
 use super::trigger;
 use crate::format::document;
-use crate::structure::ast::{Node, Row};
-use crate::structure::edit::{Escape, MathState};
+use crate::structure::ast::Node;
+use crate::structure::edit::{Editing, Escape};
 use crate::view::document::{ActiveMath, View};
-
-/// The formula the caret is inside, if any.
-pub struct Active {
-    pub at: Pos,
-    pub state: MathState,
-}
 
 pub struct Session {
     /// Names the pane this document is shown in.
@@ -26,7 +20,6 @@ pub struct Session {
     pub editor: Editor,
     pub view: View,
     pub textarea: HtmlTextAreaElement,
-    pub active: Option<Active>,
     pub focused: bool,
     pub composing: bool,
     /// What the IME is composing right now, drawn where it will be inserted.
@@ -82,7 +75,6 @@ pub fn init(root: &HtmlElement) -> Option<usize> {
         editor: Editor::default(),
         view,
         textarea,
-        active: None,
         focused: false,
         composing: false,
         preedit: String::new(),
@@ -143,15 +135,11 @@ pub fn changed(session: &Rc<RefCell<Session>>) {
 
 pub fn redraw(session: &Rc<RefCell<Session>>) {
     let session = session.borrow();
-    let active = session.active.as_ref().map(|active| ActiveMath {
-        at: active.at,
-        cursor: active.state.cursor(),
-    });
-    let caret = session
-        .active
-        .as_ref()
-        .map(|active| active.at)
-        .unwrap_or_else(|| session.editor.primary().head);
+    let caret = session.editor.primary().head;
+    let active = session
+        .editor
+        .inside()
+        .map(|cursor| ActiveMath { at: caret, cursor });
     let preedit = (!session.preedit.is_empty()).then_some((caret, session.preedit.as_str()));
     session.view.draw(
         session.editor.text(),
@@ -218,10 +206,20 @@ pub fn commit_composition(session: &Rc<RefCell<Session>>, text: &str) {
 }
 
 pub fn insert_text(session: &Rc<RefCell<Session>>, text: &str) {
-    if session.borrow().active.is_some() {
-        for c in text.chars() {
-            type_in_math(session, c);
+    if session.borrow().editor.inside().is_some() {
+        // Typing arrives one character at a time, so shortcuts still work; a
+        // paste arrives whole and goes in as it is.
+        let mut chars = text.chars();
+        match (chars.next(), chars.next()) {
+            (Some(c), None) => {
+                session.borrow_mut().editor.type_in_island(c);
+            }
+            _ => {
+                let nodes = document::read_row(text);
+                session.borrow_mut().editor.insert_row_in_island(nodes);
+            }
         }
+        changed(session);
         return;
     }
     // Single characters may start a formula; pasted text never does.
@@ -238,16 +236,7 @@ pub fn insert_text(session: &Rc<RefCell<Session>>, text: &str) {
 /// Puts an island at the caret and starts editing it.
 pub fn insert_math() {
     let Some(session) = session() else { return };
-    leave_math(&session);
-    {
-        let mut borrowed = session.borrow_mut();
-        borrowed.editor.insert_math(Row::new());
-        let at = super::model::before_pos(borrowed.editor.primary().head);
-        borrowed.active = Some(Active {
-            at,
-            state: MathState::from_row(Row::new()),
-        });
-    }
+    session.borrow_mut().editor.insert_island();
     focus();
     changed(&session);
 }
@@ -256,22 +245,18 @@ pub fn insert_math() {
 /// formula when the caret is in ordinary text.
 pub fn insert_node(node: Node) {
     let Some(session) = session() else { return };
-    if session.borrow().active.is_none() {
+    if session.borrow().editor.inside().is_none() {
         insert_math();
     }
     let Some(session) = self::session() else {
         return;
     };
-    if let Some(active) = session.borrow_mut().active.as_mut() {
-        active.state.insert(node);
-    }
-    write_back(&session);
+    session.borrow_mut().editor.insert_in_island(node);
     changed(&session);
 }
 
 pub fn undo() {
     let Some(session) = session() else { return };
-    leave_math(&session);
     if session.borrow_mut().editor.undo() {
         changed(&session);
     }
@@ -279,7 +264,6 @@ pub fn undo() {
 
 pub fn redo() {
     let Some(session) = session() else { return };
-    leave_math(&session);
     if session.borrow_mut().editor.redo() {
         changed(&session);
     }
@@ -293,7 +277,6 @@ pub struct Parked {
 /// Takes a pane's document out so that another one can take its place.
 pub fn park(pane: usize) -> Option<Parked> {
     let session = pane_session(pane)?;
-    leave_math(&session);
     let editor = std::mem::take(&mut session.borrow_mut().editor);
     Some(Parked { editor })
 }
@@ -305,7 +288,6 @@ pub fn restore(pane: usize, parked: Option<Parked>) {
     };
     {
         let mut borrowed = session.borrow_mut();
-        borrowed.active = None;
         borrowed.preedit.clear();
         borrowed.editor = parked.map(|parked| parked.editor).unwrap_or_default();
     }
@@ -314,20 +296,13 @@ pub fn restore(pane: usize, parked: Option<Parked>) {
 
 pub fn load(text: &str) {
     let Some(session) = session() else { return };
-    {
-        let mut borrowed = session.borrow_mut();
-        borrowed.active = None;
-        borrowed.editor.load(document::read(text));
-    }
+    session.borrow_mut().editor.load(document::read(text));
     changed(&session);
 }
 
 pub fn to_document() -> String {
     session()
-        .map(|session| {
-            write_back(&session);
-            document::write(session.borrow().editor.text())
-        })
+        .map(|session| document::write(session.borrow().editor.text()))
         .unwrap_or_default()
 }
 
@@ -339,6 +314,11 @@ pub fn stats() -> (usize, usize) {
 
 pub fn selected_text(session: &Rc<RefCell<Session>>) -> String {
     let borrowed = session.borrow();
+    // A selection inside a structure copies that piece of the structure; the
+    // clipboard is the same one either way.
+    if let Some(row) = borrowed.editor.island_selection() {
+        return document::write_row(&row);
+    }
     let sel = borrowed.editor.primary();
     if sel.is_caret() {
         return String::new();
@@ -347,67 +327,31 @@ pub fn selected_text(session: &Rc<RefCell<Session>>) -> String {
 }
 
 pub fn delete_selection(session: &Rc<RefCell<Session>>) {
+    if in_island(session, Inside::Change, |editing| {
+        editing.backspace();
+        None
+    }) {
+        return;
+    }
     session.borrow_mut().editor.backspace();
     changed(session);
 }
 
-/// Copies the formula being edited back into the document.
-pub fn write_back(session: &Rc<RefCell<Session>>) {
-    let mut borrowed = session.borrow_mut();
-    let Some(active) = borrowed.active.as_ref() else {
-        return;
-    };
-    let (at, row) = (active.at, active.state.root().clone());
-    borrowed.editor.set_math_at(at, row);
-}
-
-/// Stops editing a formula, leaving the caret next to it.
+/// Stops editing a formula, leaving the caret just after it.
 pub fn leave_math(session: &Rc<RefCell<Session>>) {
-    write_back(session);
-    let mut borrowed = session.borrow_mut();
-    if let Some(active) = borrowed.active.take() {
-        let after = Pos::new(active.at.line, active.at.col + 1);
-        borrowed.editor.set_caret(after);
-    }
+    session.borrow_mut().editor.leave_island();
 }
 
 /// Starts editing the formula at `at`, from either end.
 pub fn enter_math(session: &Rc<RefCell<Session>>, at: Pos, from_start: bool) -> bool {
-    leave_math(session);
-    let row = {
-        let borrowed = session.borrow();
-        match borrowed.editor.text().item_at(at) {
-            Some(Item::Math(row)) => row.clone(),
-            _ => return false,
-        }
-    };
-    let mut state = MathState::from_row(row);
-    if from_start {
-        state.move_to_start();
-    } else {
-        state.move_to_end();
-    }
-    let mut borrowed = session.borrow_mut();
-    borrowed.editor.set_caret(at);
-    // Everything typed inside the formula becomes one undo step.
-    borrowed.editor.begin_math_edit();
-    borrowed.active = Some(Active { at, state });
-    true
-}
-
-fn type_in_math(session: &Rc<RefCell<Session>>, c: char) {
-    if let Some(active) = session.borrow_mut().active.as_mut() {
-        active.state.insert_char(c);
-    }
-    write_back(session);
-    changed(session);
+    session.borrow_mut().editor.enter_island(at, from_start)
 }
 
 pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
     if session.borrow().composing {
         return;
     }
-    if session.borrow().active.is_some() {
+    if session.borrow().editor.inside().is_some() {
         keydown_in_math(session, event);
         return;
     }
@@ -489,132 +433,111 @@ fn move_h(session: &Rc<RefCell<Session>>, forward: bool, extend: bool) -> bool {
     act(session, |editor| editor.move_h(forward, extend))
 }
 
+/// The same keys as in the text, applied to the structure the caret is in.
+/// Walking out of it is the command's own answer, so there is no second place
+/// that decides where the caret ends up.
 fn keydown_in_math(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
     let key = event.key();
     let ctrl = event.ctrl_key() || event.meta_key();
-    let mut escape = None;
-    let mut edited = true;
-    {
-        let mut borrowed = session.borrow_mut();
-        let Some(active) = borrowed.active.as_mut() else {
-            return;
-        };
-        let state = &mut active.state;
-        // A grid grows by a row on Alt+Enter, wherever the caret is inside it.
-        if event.alt_key() && key == "Enter" {
-            state.grow_matrix(true);
-            drop(borrowed);
-            event.prevent_default();
-            write_back(session);
-            changed(session);
-            return;
-        }
-        match (ctrl, key.as_str()) {
-            (true, "z") if event.shift_key() => {
-                state.redo();
+    let shift = event.shift_key();
+    // A grid grows by a row on Alt+Enter, wherever the caret is inside it.
+    if (event.alt_key() || ctrl) && key == "Enter" {
+        in_island(session, Inside::Change, |editing| {
+            editing.grow_matrix(true);
+            None
+        });
+        event.prevent_default();
+        return;
+    }
+    if ctrl && key == "a" {
+        in_island(session, Inside::Extend, |editing| {
+            editing.select_row();
+            None
+        });
+        event.prevent_default();
+        return;
+    }
+    // Undo, redo and the clipboard belong to the document, the same as in text.
+    if ctrl {
+        return;
+    }
+    let handled = match key.as_str() {
+        // Shift selects, the same as it does in the text. A selection that
+        // outgrows the formula becomes a selection of the formula itself.
+        "ArrowLeft" if shift => in_island(session, Inside::Extend, |editing| editing.extend(false)),
+        "ArrowRight" if shift => in_island(session, Inside::Extend, |editing| editing.extend(true)),
+        "ArrowLeft" => in_island(session, Inside::Move, |editing| editing.move_left()),
+        "ArrowRight" => in_island(session, Inside::Move, |editing| editing.move_right()),
+        "ArrowUp" => in_island(session, Inside::Move, |editing| {
+            (!editing.move_up()).then_some(Escape::Done)
+        }),
+        "ArrowDown" => in_island(session, Inside::Move, |editing| {
+            (!editing.move_down()).then_some(Escape::Done)
+        }),
+        "Home" => in_island(session, Inside::Move, |editing| {
+            editing.move_home();
+            None
+        }),
+        "End" => in_island(session, Inside::Move, |editing| {
+            editing.move_end();
+            None
+        }),
+        "Backspace" => in_island(session, Inside::Change, |editing| editing.backspace()),
+        "Delete" => in_island(session, Inside::Change, |editing| {
+            editing.delete_forward();
+            None
+        }),
+        "Escape" | "Enter" => in_island(session, Inside::Move, |_| Some(Escape::Done)),
+        "Tab" => in_island(session, Inside::Move, |editing| {
+            if shift {
+                editing.move_left()
+            } else {
+                editing.move_right()
             }
-            (true, "z") => {
-                state.undo();
+        }),
+        "&" => in_island(session, Inside::Change, |editing| {
+            editing.grow_matrix(false);
+            None
+        }),
+        " " => in_island(session, Inside::Change, |editing| {
+            if !editing.commit_command() {
+                editing.insert_char(' ');
             }
-            (true, "y") => {
-                state.redo();
-            }
-            (true, "Enter") => {
-                state.grow_matrix(true);
-            }
-            (true, _) => return,
-            (false, "ArrowLeft") => {
-                escape = state.move_left();
-                edited = false;
-            }
-            (false, "ArrowRight") => {
-                escape = state.move_right();
-                edited = false;
-            }
-            (false, "ArrowUp") => {
-                if !state.move_up() {
-                    escape = Some(Escape::Done);
+            None
+        }),
+        other => {
+            let mut chars = other.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) if !event.alt_key() => {
+                    in_island(session, Inside::Type, move |editing| {
+                        editing.insert_char(c);
+                        None
+                    })
                 }
-                edited = false;
-            }
-            (false, "ArrowDown") => {
-                if !state.move_down() {
-                    escape = Some(Escape::Done);
-                }
-                edited = false;
-            }
-            (false, "Home") => {
-                state.move_home();
-                edited = false;
-            }
-            (false, "End") => {
-                state.move_end();
-                edited = false;
-            }
-            (false, "Backspace") => escape = state.backspace(),
-            (false, "Delete") => state.delete_forward(),
-            (false, "Escape") | (false, "Enter") => {
-                escape = Some(Escape::Done);
-                edited = false;
-            }
-            (false, "Tab") => {
-                escape = if event.shift_key() {
-                    state.move_left()
-                } else {
-                    state.move_right()
-                };
-                edited = false;
-            }
-            (false, "&") => {
-                state.grow_matrix(false);
-            }
-            (false, " ") => {
-                if !state.commit_command() {
-                    state.insert_char(' ');
-                }
-            }
-            (false, other) => {
-                let mut chars = other.chars();
-                match (chars.next(), chars.next()) {
-                    (Some(c), None) if !event.alt_key() => state.insert_char(c),
-                    _ => return,
-                }
+                _ => false,
             }
         }
-    }
-    event.prevent_default();
-    write_back(session);
-    if let Some(escape) = escape {
-        finish_math(session, escape);
-    }
-    if edited {
-        changed(session);
-    } else {
-        redraw(session);
+    };
+    if handled {
+        event.prevent_default();
     }
 }
 
-/// Leaves a formula the caret walked out of, deleting it when it is empty and
-/// backspace pushed the caret out of its front.
-fn finish_math(session: &Rc<RefCell<Session>>, escape: Escape) {
-    let Some(active) = session.borrow_mut().active.take() else {
-        return;
-    };
-    let at = active.at;
-    let mut borrowed = session.borrow_mut();
-    let empty = active.state.is_empty();
-    match escape {
-        Escape::Left if empty => {
-            borrowed.editor.set_caret(Pos::new(at.line, at.col + 1));
-            borrowed.editor.backspace();
-        }
-        Escape::Delete => {
-            borrowed.editor.set_caret(Pos::new(at.line, at.col + 1));
-            borrowed.editor.backspace();
-        }
-        Escape::Left => borrowed.editor.set_caret(at),
-        Escape::Right | Escape::Done => borrowed.editor.set_caret(Pos::new(at.line, at.col + 1)),
+/// Runs a command on the island the caret is in and redraws. Only a command
+/// that changed the structure makes the file dirty.
+fn in_island(
+    session: &Rc<RefCell<Session>>,
+    kind: Inside,
+    command: impl FnOnce(&mut Editing<'_>) -> Option<Escape>,
+) -> bool {
+    if !session.borrow_mut().editor.in_island(kind, command) {
+        return false;
     }
+    match kind {
+        Inside::Move | Inside::Extend => redraw(session),
+        Inside::Type | Inside::Change => changed(session),
+    }
+    true
 }
 
 pub fn on_mousedown(session: &Rc<RefCell<Session>>, event: MouseEvent) {
@@ -627,9 +550,13 @@ pub fn on_mousedown(session: &Rc<RefCell<Session>>, event: MouseEvent) {
     if let Some((at, element)) = field {
         if !input::adds_caret(&event) && enter_math(session, at, true) {
             if let Some(cursor) = crate::view::structure::position_at_point(&element, x, y) {
-                if let Some(active) = session.borrow_mut().active.as_mut() {
-                    active.state.set_cursor(cursor);
-                }
+                session
+                    .borrow_mut()
+                    .editor
+                    .in_island(Inside::Move, |editing| {
+                        editing.set_cursor(cursor);
+                        None
+                    });
             }
             focus();
             redraw(session);
@@ -673,7 +600,7 @@ pub fn on_mousemove(session: &Rc<RefCell<Session>>, event: MouseEvent) {
 }
 
 pub fn on_dblclick(session: &Rc<RefCell<Session>>, event: MouseEvent) {
-    if session.borrow().active.is_some() {
+    if session.borrow().editor.inside().is_some() {
         return;
     }
     let pos = {

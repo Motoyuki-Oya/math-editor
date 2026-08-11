@@ -195,10 +195,16 @@ impl Node {
 
 /// A position inside a formula: the chain of (node, slot) hops taken from the
 /// root row, plus the offset within the row that chain leads to.
+///
+/// It doubles as a selection, the same way a caret in text does: `anchor` is
+/// where selecting started. A selection stays inside the row it started in;
+/// reaching past either end selects the structure that row belongs to instead,
+/// which is how a whole structure gets picked up.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Cursor {
     pub path: Vec<(usize, usize)>,
     pub index: usize,
+    pub anchor: usize,
 }
 
 impl Cursor {
@@ -206,7 +212,20 @@ impl Cursor {
         Cursor {
             path: Vec::new(),
             index,
+            anchor: index,
         }
+    }
+
+    pub fn is_caret(&self) -> bool {
+        self.anchor == self.index
+    }
+
+    pub fn start(&self) -> usize {
+        self.anchor.min(self.index)
+    }
+
+    pub fn end(&self) -> usize {
+        self.anchor.max(self.index)
     }
 }
 
