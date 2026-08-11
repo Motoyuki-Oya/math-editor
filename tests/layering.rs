@@ -22,6 +22,7 @@ const RULES: &[Rule] = &[
     Rule {
         dir: "structure",
         forbidden: &[
+            "crate::format",
             "crate::view",
             "crate::editor",
             "web_sys",

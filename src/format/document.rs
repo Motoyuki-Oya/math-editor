@@ -30,11 +30,26 @@ pub fn write(text: &Text) -> String {
     islands::serialize(&lines)
 }
 
-/// The lines of a copied range, for the clipboard. Every island is written out
-/// so that pasting the text anywhere gives back the same structures.
+/// The lines of a copied range, for the clipboard.
+///
+/// Islands are written out, so a structure can be pasted somewhere else, but
+/// the characters around them are left as they are: pasting does not read the
+/// notation, so escaping a `$` here would paste it back doubled.
 pub fn write_items(lines: &[Vec<Item>]) -> String {
-    let lines: Vec<islands::Line> = lines.iter().map(line_segments).collect();
-    islands::serialize(&lines)
+    lines
+        .iter()
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| match item {
+                    Item::Char(c) => c.to_string(),
+                    Item::Tab => format!("$({TAB_SOURCE})"),
+                    Item::Math(row) => format!("$({})", island_text(row)),
+                })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn line_segments(items: &Vec<Item>) -> islands::Line {
@@ -106,5 +121,12 @@ mod tests {
         let copied = write_items(text.lines());
         assert_eq!(copied, "$(1/2)x");
         assert_eq!(read(&copied), text);
+    }
+
+    /// Pasting inserts the characters as they are, so copying must not escape
+    /// them: a copied `$` has to stay one `$`.
+    #[test]
+    fn a_copied_dollar_sign_stays_one_character() {
+        assert_eq!(write_items(read("100$$ です").lines()), "100$ です");
     }
 }
