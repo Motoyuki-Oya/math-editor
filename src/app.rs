@@ -9,7 +9,7 @@ use web_sys::{HtmlElement, KeyboardEvent};
 
 use crate::editor;
 use crate::ipc;
-use crate::math::ast::{self, Between, MatrixKind, Node};
+use crate::structure::ast::{self, Between, MatrixKind, Node};
 
 const UNTITLED: &str = "無題";
 

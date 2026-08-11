@@ -6,9 +6,9 @@
 
 use web_sys::{Document, Element, HtmlElement, Range};
 
-use super::model::{Item, Pos, Sel, Text};
-use crate::math::ast::Cursor;
-use crate::math::render;
+use crate::structure::ast::Cursor;
+use crate::structure::text::{Item, Pos, Sel, Text};
+use crate::view::structure as render;
 
 pub const LINE_CLASS: &str = "mn-line";
 pub const RUN_CLASS: &str = "mn-run";

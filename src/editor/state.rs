@@ -9,9 +9,10 @@ use super::input;
 use super::model::{Editor, Item, Pos};
 use super::search::{self, SearchOptions};
 use super::trigger;
-use super::view::{ActiveMath, View};
-use crate::math::ast::{Node, Row};
-use crate::math::edit::{Escape, MathState};
+use crate::format::document;
+use crate::structure::ast::{Node, Row};
+use crate::structure::edit::{Escape, MathState};
+use crate::view::document::{ActiveMath, View};
 
 /// The formula the caret is inside, if any.
 pub struct Active {
@@ -316,7 +317,7 @@ pub fn load(text: &str) {
     {
         let mut borrowed = session.borrow_mut();
         borrowed.active = None;
-        borrowed.editor.load(text);
+        borrowed.editor.load(document::read(text));
     }
     changed(&session);
 }
@@ -325,7 +326,7 @@ pub fn to_document() -> String {
     session()
         .map(|session| {
             write_back(&session);
-            session.borrow().editor.to_document()
+            document::write(session.borrow().editor.text())
         })
         .unwrap_or_default()
 }
@@ -625,7 +626,7 @@ pub fn on_mousedown(session: &Rc<RefCell<Session>>, event: MouseEvent) {
     let field = session.borrow().view.field_at_point(x, y);
     if let Some((at, element)) = field {
         if !input::adds_caret(&event) && enter_math(session, at, true) {
-            if let Some(cursor) = crate::math::render::position_at_point(&element, x, y) {
+            if let Some(cursor) = crate::view::structure::position_at_point(&element, x, y) {
                 if let Some(active) = session.borrow_mut().active.as_mut() {
                     active.state.set_cursor(cursor);
                 }

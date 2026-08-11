@@ -1,8 +1,7 @@
 //! Cursor movement and editing commands inside an island.
 
-use super::ast::{row_at, row_at_mut, Between, Cursor, Delim, Node, Row};
+use super::ast::{is_arrow, row_at, row_at_mut, Between, Cursor, Delim, Node, Row};
 use super::commands;
-use super::notation;
 
 const UNDO_LIMIT: usize = 200;
 
@@ -37,11 +36,6 @@ impl MathState {
         }
     }
 
-    #[cfg(test)]
-    pub fn from_notation(source: &str) -> MathState {
-        MathState::from_row(notation::parse_island(source))
-    }
-
     /// Takes over a structure the document already holds, so entering it costs
     /// no parsing.
     pub fn from_row(root: Row) -> MathState {
@@ -70,11 +64,6 @@ impl MathState {
 
     pub fn is_empty(&self) -> bool {
         self.root.is_empty()
-    }
-
-    #[cfg(test)]
-    pub fn to_notation(&self) -> String {
-        notation::island_text(&self.root)
     }
 
     fn snapshot(&mut self) {
@@ -182,7 +171,7 @@ impl MathState {
     pub fn insert_char(&mut self, c: char) {
         match c {
             '/' => self.insert_stack(Between::Rule),
-            c if notation::is_arrow(c) => self.insert_stack(Between::Arrow(c)),
+            c if is_arrow(c) => self.insert_stack(Between::Arrow(c)),
             '^' => self.insert(Node::Sup(Row::new())),
             '_' => self.insert(Node::Sub(Row::new())),
             '(' | '[' => self.insert(Node::Group {
@@ -506,6 +495,19 @@ fn command_start(row: &Row, index: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Only the fixtures here go through the notation; nothing outside a test
+    /// in this layer may know how a structure is written.
+    use crate::format::notation;
+
+    impl MathState {
+        fn from_notation(source: &str) -> MathState {
+            MathState::from_row(notation::parse_island(source))
+        }
+
+        fn to_notation(&self) -> String {
+            notation::island_text(&self.root)
+        }
+    }
 
     #[test]
     fn typing_builds_a_row() {

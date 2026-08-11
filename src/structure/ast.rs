@@ -6,6 +6,14 @@
 
 pub type Row = Vec<Node>;
 
+/// Arrows that can be drawn between the two rows of a stack, stretched to fit
+/// them, the way a rule is.
+const ARROWS: [char; 8] = ['→', '←', '↔', '⇒', '⇐', '⇔', '⇄', '↦'];
+
+pub fn is_arrow(c: char) -> bool {
+    ARROWS.contains(&c)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Delim {
     Paren,

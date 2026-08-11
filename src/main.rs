@@ -1,8 +1,9 @@
 mod app;
-mod doc;
 mod editor;
+mod format;
 mod ipc;
-mod math;
+mod structure;
+mod view;
 
 use leptos::prelude::*;
 
