@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "MathNote",
+  "productName": "Planetext",
   "version": "0.1.0",
-  "identifier": "com.mathnote.editor",
+  "identifier": "com.planetext.editor",
   "build": {
     "beforeDevCommand": "trunk serve",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "MathNote",
+        "title": "Planetext",
         "width": 1000,
         "height": 720
       }

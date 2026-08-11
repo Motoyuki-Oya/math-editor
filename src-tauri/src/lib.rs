@@ -68,12 +68,12 @@ fn set_dirty(state: State<'_, AppState>, dirty: bool) {
 }
 
 /// Reports the time from process start to the first frontend paint when
-/// `MATHNOTE_STARTUP_LOG` is set. Used to keep an eye on startup cost.
+/// `PLANETEXT_STARTUP_LOG` is set. Used to keep an eye on startup cost.
 #[tauri::command]
 fn frontend_ready(state: State<'_, AppState>) {
-    if std::env::var_os("MATHNOTE_STARTUP_LOG").is_some() {
+    if std::env::var_os("PLANETEXT_STARTUP_LOG").is_some() {
         eprintln!(
-            "mathnote startup: {} ms",
+            "planetext startup: {} ms",
             state.started.elapsed().as_millis()
         );
     }
@@ -86,7 +86,7 @@ async fn confirm_discard(app: tauri::AppHandle, message: String) -> bool {
     let (tx, rx) = std::sync::mpsc::channel();
     app.dialog()
         .message(message)
-        .title("MathNote")
+        .title("Planetext")
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::OkCancelCustom(
             "破棄する".into(),
@@ -112,7 +112,7 @@ fn confirm_discard_on_close(window: &tauri::Window) {
     window
         .dialog()
         .message("保存されていない変更があります。破棄して終了しますか？")
-        .title("MathNote")
+        .title("Planetext")
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::OkCancelCustom(
             "破棄して終了".into(),

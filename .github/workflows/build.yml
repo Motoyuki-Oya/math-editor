@@ -28,7 +28,7 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo clippy -p mathnote --all-targets -- -D warnings
+      - run: cargo clippy -p planetext --all-targets -- -D warnings
       - run: cargo test
 
   windows:
@@ -47,11 +47,11 @@ jobs:
       - uses: cargo-bins/cargo-binstall@main
       - name: Install build tools
         run: cargo binstall -y --locked --force trunk tauri-cli@^2
-      - name: Build MathNote
+      - name: Build Planetext
         run: cargo tauri build
       - uses: actions/upload-artifact@v4
         with:
-          name: mathnote-windows
+          name: planetext-windows
           path: |
             target/release/bundle/msi/*.msi
             target/release/bundle/nsis/*.exe
