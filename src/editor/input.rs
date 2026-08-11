@@ -17,6 +17,7 @@ use web_sys::{
 
 use super::model::{self, Item};
 use super::state::{self, Session};
+use crate::math::notation::island_text;
 
 pub fn build(doc: &Document, root: &HtmlElement) -> Option<HtmlTextAreaElement> {
     let textarea = doc
@@ -189,7 +190,7 @@ pub fn text_of(items: Vec<Vec<Item>>) -> String {
                 .map(|item| match item {
                     Item::Char(c) => c.to_string(),
                     Item::Tab => format!("$({})", model::TAB_SOURCE),
-                    Item::Math { source } => format!("$({source})"),
+                    Item::Math(row) => format!("$({})", island_text(&row)),
                 })
                 .collect::<String>()
         })

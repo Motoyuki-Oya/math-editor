@@ -8,7 +8,6 @@ use web_sys::{Document, Element, HtmlElement, Range};
 
 use super::model::{Item, Pos, Sel, Text};
 use crate::math::ast::Cursor;
-use crate::math::notation::parse_island;
 use crate::math::render;
 
 pub const LINE_CLASS: &str = "mn-line";
@@ -119,7 +118,7 @@ impl View {
                     tab.set_attribute(COL_ATTR, &col.to_string()).ok();
                     append(&holder, &tab);
                 }
-                Item::Math { source } => {
+                Item::Math(row) => {
                     if !run.is_empty() {
                         append(&holder, &run_element(doc, &run, run_start)?);
                         run.clear();
@@ -133,11 +132,10 @@ impl View {
                     if cursor.is_some() {
                         field.class_list().add_1("mn-field-active").ok();
                     }
-                    let row = parse_island(source);
                     if row.is_empty() {
                         field.class_list().add_1("mn-field-empty").ok();
                     }
-                    render::render_into(&field, &row, cursor, composing);
+                    render::render_into(&field, row, cursor, composing);
                     append(&holder, &field);
                 }
             }

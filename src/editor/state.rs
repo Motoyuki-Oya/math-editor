@@ -10,7 +10,7 @@ use super::model::{Editor, Item, Pos};
 use super::search::{self, SearchOptions};
 use super::trigger;
 use super::view::{ActiveMath, View};
-use crate::math::ast::Node;
+use crate::math::ast::{Node, Row};
 use crate::math::edit::{Escape, MathState};
 
 /// The formula the caret is inside, if any.
@@ -240,11 +240,11 @@ pub fn insert_math() {
     leave_math(&session);
     {
         let mut borrowed = session.borrow_mut();
-        borrowed.editor.insert_math("");
+        borrowed.editor.insert_math(Row::new());
         let at = super::model::before_pos(borrowed.editor.primary().head);
         borrowed.active = Some(Active {
             at,
-            state: MathState::from_notation(""),
+            state: MathState::from_row(Row::new()),
         });
     }
     focus();
@@ -356,8 +356,8 @@ pub fn write_back(session: &Rc<RefCell<Session>>) {
     let Some(active) = borrowed.active.as_ref() else {
         return;
     };
-    let (at, source) = (active.at, active.state.to_notation());
-    borrowed.editor.set_math_at(at, &source);
+    let (at, row) = (active.at, active.state.root().clone());
+    borrowed.editor.set_math_at(at, row);
 }
 
 /// Stops editing a formula, leaving the caret next to it.
@@ -373,14 +373,14 @@ pub fn leave_math(session: &Rc<RefCell<Session>>) {
 /// Starts editing the formula at `at`, from either end.
 pub fn enter_math(session: &Rc<RefCell<Session>>, at: Pos, from_start: bool) -> bool {
     leave_math(session);
-    let source = {
+    let row = {
         let borrowed = session.borrow();
         match borrowed.editor.text().item_at(at) {
-            Some(Item::Math { source }) => source.clone(),
+            Some(Item::Math(row)) => row.clone(),
             _ => return false,
         }
     };
-    let mut state = MathState::from_notation(&source);
+    let mut state = MathState::from_row(row);
     if from_start {
         state.move_to_start();
     } else {
@@ -476,7 +476,7 @@ fn move_h(session: &Rc<RefCell<Session>>, forward: bool, extend: bool) -> bool {
             if let Some(at) = at {
                 let is_math = matches!(
                     session.borrow().editor.text().item_at(at),
-                    Some(Item::Math { .. })
+                    Some(Item::Math(_))
                 );
                 if is_math && enter_math(session, at, forward) {
                     redraw(session);

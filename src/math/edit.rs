@@ -2,7 +2,7 @@
 
 use super::ast::{row_at, row_at_mut, Between, Cursor, Delim, Node, Row};
 use super::commands;
-use super::notation::{self, island_text, parse_island};
+use super::notation;
 
 const UNDO_LIMIT: usize = 200;
 
@@ -37,8 +37,14 @@ impl MathState {
         }
     }
 
+    #[cfg(test)]
     pub fn from_notation(source: &str) -> MathState {
-        let root = parse_island(source);
+        MathState::from_row(notation::parse_island(source))
+    }
+
+    /// Takes over a structure the document already holds, so entering it costs
+    /// no parsing.
+    pub fn from_row(root: Row) -> MathState {
         let index = root.len();
         MathState {
             root,
@@ -46,6 +52,10 @@ impl MathState {
             undo: Vec::new(),
             redo: Vec::new(),
         }
+    }
+
+    pub fn root(&self) -> &Row {
+        &self.root
     }
 
     pub fn cursor(&self) -> &Cursor {
@@ -62,8 +72,9 @@ impl MathState {
         self.root.is_empty()
     }
 
+    #[cfg(test)]
     pub fn to_notation(&self) -> String {
-        island_text(&self.root)
+        notation::island_text(&self.root)
     }
 
     fn snapshot(&mut self) {
