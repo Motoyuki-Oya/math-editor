@@ -406,7 +406,7 @@ pub fn App() -> impl IntoView {
 
     Effect::new(move |_| {
         let title = format!(
-            "{}{} — MathNote",
+            "{}{} — Planetext",
             if shell.tab().dirty.get() { "*" } else { "" },
             shell.file_name()
         );

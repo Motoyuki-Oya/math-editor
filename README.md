@@ -1,4 +1,4 @@
-# MathNote
+# Planetext
 
 普通のテキストエディタに、テキストのままでは表せない**二次元の配置**だけを書き足せるようにした
 メモ帳です。罫線とその上下・ルートなどはキー操作／パレットで入れられ、記法を手で覚える必要は
@@ -18,7 +18,7 @@
 
 GitHub Actions の `build` ワークフローが `windows-latest` でインストーラを生成します。
 
-- 各コミットのビルド: Actions → 対象の実行 → Artifacts の `mathnote-windows`（`.msi` と `.exe`）
+- 各コミットのビルド: Actions → 対象の実行 → Artifacts の `planetext-windows`（`.msi` と `.exe`）
 - リリース: `v` から始まるタグ（例 `v0.1.0`）を push すると、同じ成果物が Release に添付されます
 
 ## 構造の書き方
@@ -82,7 +82,7 @@ cargo test           # 記法とエディタのテスト
 cargo tauri build    # インストーラの生成
 ```
 
-起動時間を測る場合は `MATHNOTE_STARTUP_LOG=1` を設定して起動すると、最初の描画までの ms が
+起動時間を測る場合は `PLANETEXT_STARTUP_LOG=1` を設定して起動すると、最初の描画までの ms が
 標準エラーに出力されます。
 
 ## 制限
