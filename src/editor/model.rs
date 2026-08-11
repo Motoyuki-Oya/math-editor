@@ -6,6 +6,8 @@
 //! as a single step, the way multiple cursors are expected to behave.
 
 use crate::doc::{self, Segment};
+use crate::math::ast::Row;
+use crate::math::notation::{island_text, parse_island};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Item {
@@ -13,17 +15,16 @@ pub enum Item {
     /// A column separator, written `$(t)`. Separators on neighbouring lines line
     /// up with each other; it carries no content of its own.
     Tab,
-    /// An island, kept as the notation between its `$(` and `)`.
-    Math {
-        source: String,
-    },
+    /// An island, held as the structure itself. The notation exists only in the
+    /// saved file, so editing never parses or rewrites it.
+    Math(Row),
 }
 
 impl Item {
     pub fn as_char(&self) -> Option<char> {
         match self {
             Item::Char(c) => Some(*c),
-            Item::Tab | Item::Math { .. } => None,
+            Item::Tab | Item::Math(_) => None,
         }
     }
 }
@@ -102,7 +103,7 @@ impl Text {
                     .flat_map(|segment| match segment {
                         Segment::Text(text) => text.chars().map(Item::Char).collect::<Vec<_>>(),
                         Segment::Island(source) if source.trim() == TAB_SOURCE => vec![Item::Tab],
-                        Segment::Island(source) => vec![Item::Math { source }],
+                        Segment::Island(source) => vec![Item::Math(parse_island(&source))],
                     })
                     .collect()
             })
@@ -130,7 +131,7 @@ impl Text {
                             continue;
                         }
                         Item::Tab => TAB_SOURCE.to_string(),
-                        Item::Math { source } => source.clone(),
+                        Item::Math(row) => island_text(row),
                     };
                     if !text.is_empty() {
                         segments.push(Segment::Text(std::mem::take(&mut text)));
@@ -227,14 +228,14 @@ impl Text {
         end
     }
 
-    pub fn set_math(&mut self, at: Pos, source: String) -> bool {
+    pub fn set_math(&mut self, at: Pos, row: Row) -> bool {
         match self
             .lines
             .get_mut(at.line)
             .and_then(|line| line.get_mut(at.col))
         {
-            Some(Item::Math { source: slot }) => {
-                *slot = source;
+            Some(Item::Math(slot)) => {
+                *slot = row;
                 true
             }
             _ => false,
@@ -414,10 +415,8 @@ impl Editor {
         self.insert(items_of(text));
     }
 
-    pub fn insert_math(&mut self, source: &str) {
-        self.insert(vec![vec![Item::Math {
-            source: source.to_string(),
-        }]]);
+    pub fn insert_math(&mut self, row: Row) {
+        self.insert(vec![vec![Item::Math(row)]]);
     }
 
     pub fn insert_tab(&mut self) {
@@ -462,8 +461,8 @@ impl Editor {
         self.record(Step::Other);
     }
 
-    pub fn set_math_at(&mut self, at: Pos, source: &str) {
-        self.text.set_math(at, source.to_string());
+    pub fn set_math_at(&mut self, at: Pos, row: Row) {
+        self.text.set_math(at, row);
     }
 
     pub fn move_h(&mut self, forward: bool, extend: bool) {
@@ -696,6 +695,7 @@ fn find_after(text: &Text, needle: &[Item], from: Pos, taken: &[Pos]) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::math::ast::Node;
 
     fn editor(source: &str) -> Editor {
         let mut editor = Editor::default();
@@ -724,9 +724,33 @@ mod tests {
         assert_eq!(editor.text().line_len(0), 5);
         assert!(matches!(
             editor.text().item_at(Pos::new(0, 2)),
-            Some(Item::Math { .. })
+            Some(Item::Math(_))
         ));
         assert_eq!(editor.to_document(), "a $(1/2) b");
+    }
+
+    #[test]
+    fn an_island_holds_the_structure_itself() {
+        let editor = editor("$(1/2)");
+        let Some(Item::Math(row)) = editor.text().item_at(Pos::new(0, 0)) else {
+            panic!("an island");
+        };
+        assert!(matches!(row.as_slice(), [Node::Stack { .. }]));
+    }
+
+    #[test]
+    fn documents_survive_a_load_and_save() {
+        for source in [
+            "a $(1/2) b",
+            "$(√[3] x)",
+            "x$(^ 3)$(_ i)",
+            "$(↨ Σ, n, x=1)",
+            "$([a, b][c, d])",
+            "$(a → b)",
+            "$(√ x$(^ 3))",
+        ] {
+            assert_eq!(editor(source).to_document(), source);
+        }
     }
 
     #[test]
