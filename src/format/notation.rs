@@ -3,20 +3,12 @@
 //! Everything inside `$(` … `)` is read here and written back out here, so the
 //! saved file stays plain text and no other format is involved.
 
-use super::ast::{Between, Delim, MatrixKind, Node, Row};
-use super::symbols;
+use crate::structure::ast::{is_arrow, Between, Delim, MatrixKind, Node, Row};
+use crate::structure::symbols;
 
 pub const LIMITS_MARK: char = '↨';
 pub const ROOT_MARK: char = '√';
 pub const ROOT_WORD: &str = "sqrt";
-
-/// Arrows that can be drawn between the two rows of a stack, stretched to fit
-/// them, the way a rule is.
-const ARROWS: [char; 8] = ['→', '←', '↔', '⇒', '⇐', '⇔', '⇄', '↦'];
-
-pub fn is_arrow(c: char) -> bool {
-    ARROWS.contains(&c)
-}
 
 /// Characters that mean something structurally, so writing one as an ordinary
 /// character means writing it twice.

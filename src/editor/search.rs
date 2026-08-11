@@ -221,7 +221,13 @@ mod tests {
 
     #[test]
     fn islands_break_up_the_searched_text() {
-        let text = Text::from_document("ab$(x)cd");
+        let text = Text::from_lines(vec![vec![
+            Item::Char('a'),
+            Item::Char('b'),
+            Item::Math(vec![crate::structure::ast::Node::Char('x')]),
+            Item::Char('c'),
+            Item::Char('d'),
+        ]]);
         let runs = runs(text.line(0));
         assert_eq!(runs, vec![(0, "ab".to_string()), (3, "cd".to_string())]);
     }

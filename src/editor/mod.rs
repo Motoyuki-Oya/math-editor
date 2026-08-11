@@ -7,7 +7,6 @@ pub mod model;
 pub mod search;
 mod state;
 mod trigger;
-pub mod view;
 
 pub use search::SearchOptions;
 pub use state::{

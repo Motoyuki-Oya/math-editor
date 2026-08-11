@@ -1,252 +1,13 @@
-//! The document the editor owns, kept independent of the DOM.
+//! Editing a document: the selections, the commands they apply, and the undo
+//! history.
 //!
-//! A line is a sequence of [`Item`]s, so an island counts as one item and the
-//! caret can never land inside it by accident. Editing goes through [`Editor`],
-//! which holds one or more selections and applies every command to all of them
-//! as a single step, the way multiple cursors are expected to behave.
+//! Every command applies to all of the selections as a single step, the way
+//! multiple cursors are expected to behave. The document itself is
+//! [`crate::structure::text`], which knows nothing about the notation or the
+//! screen.
 
-use crate::doc::{self, Segment};
-use crate::math::ast::Row;
-use crate::math::notation::{island_text, parse_island};
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Item {
-    Char(char),
-    /// A column separator, written `$(t)`. Separators on neighbouring lines line
-    /// up with each other; it carries no content of its own.
-    Tab,
-    /// An island, held as the structure itself. The notation exists only in the
-    /// saved file, so editing never parses or rewrites it.
-    Math(Row),
-}
-
-impl Item {
-    pub fn as_char(&self) -> Option<char> {
-        match self {
-            Item::Char(c) => Some(*c),
-            Item::Tab | Item::Math(_) => None,
-        }
-    }
-}
-
-/// The island that means a column separator rather than a structure.
-pub const TAB_SOURCE: &str = "t";
-
-/// A place between two items. `col` counts items, not bytes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Pos {
-    pub line: usize,
-    pub col: usize,
-}
-
-impl Pos {
-    pub fn new(line: usize, col: usize) -> Self {
-        Self { line, col }
-    }
-}
-
-/// A caret (`anchor == head`) or a selected range, growing from `anchor`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Sel {
-    pub anchor: Pos,
-    pub head: Pos,
-}
-
-impl Sel {
-    pub fn caret(at: Pos) -> Self {
-        Self {
-            anchor: at,
-            head: at,
-        }
-    }
-
-    pub fn range(from: Pos, to: Pos) -> Self {
-        Self {
-            anchor: from,
-            head: to,
-        }
-    }
-
-    pub fn start(&self) -> Pos {
-        self.anchor.min(self.head)
-    }
-
-    pub fn end(&self) -> Pos {
-        self.anchor.max(self.head)
-    }
-
-    pub fn is_caret(&self) -> bool {
-        self.anchor == self.head
-    }
-}
-
-/// The lines of the document. There is always at least one line.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Text {
-    lines: Vec<Vec<Item>>,
-}
-
-impl Default for Text {
-    fn default() -> Self {
-        Self {
-            lines: vec![Vec::new()],
-        }
-    }
-}
-
-impl Text {
-    pub fn from_document(source: &str) -> Self {
-        let lines = doc::parse(source)
-            .into_iter()
-            .map(|line| {
-                line.into_iter()
-                    .flat_map(|segment| match segment {
-                        Segment::Text(text) => text.chars().map(Item::Char).collect::<Vec<_>>(),
-                        Segment::Island(source) if source.trim() == TAB_SOURCE => vec![Item::Tab],
-                        Segment::Island(source) => vec![Item::Math(parse_island(&source))],
-                    })
-                    .collect()
-            })
-            .collect::<Vec<Vec<Item>>>();
-        Self {
-            lines: if lines.is_empty() {
-                vec![Vec::new()]
-            } else {
-                lines
-            },
-        }
-    }
-
-    pub fn to_document(&self) -> String {
-        let lines: Vec<doc::Line> = self
-            .lines
-            .iter()
-            .map(|items| {
-                let mut segments = doc::Line::new();
-                let mut text = String::new();
-                for item in items {
-                    let source = match item {
-                        Item::Char(c) => {
-                            text.push(*c);
-                            continue;
-                        }
-                        Item::Tab => TAB_SOURCE.to_string(),
-                        Item::Math(row) => island_text(row),
-                    };
-                    if !text.is_empty() {
-                        segments.push(Segment::Text(std::mem::take(&mut text)));
-                    }
-                    segments.push(Segment::Island(source));
-                }
-                if !text.is_empty() {
-                    segments.push(Segment::Text(text));
-                }
-                segments
-            })
-            .collect();
-        doc::serialize(&lines)
-    }
-
-    pub fn line_count(&self) -> usize {
-        self.lines.len()
-    }
-
-    pub fn line(&self, line: usize) -> &[Item] {
-        self.lines.get(line).map(Vec::as_slice).unwrap_or(&[])
-    }
-
-    pub fn line_len(&self, line: usize) -> usize {
-        self.line(line).len()
-    }
-
-    pub fn item_at(&self, at: Pos) -> Option<&Item> {
-        self.line(at.line).get(at.col)
-    }
-
-    pub fn end(&self) -> Pos {
-        let line = self.line_count() - 1;
-        Pos::new(line, self.line_len(line))
-    }
-
-    pub fn clamp(&self, at: Pos) -> Pos {
-        let line = at.line.min(self.line_count() - 1);
-        Pos::new(line, at.col.min(self.line_len(line)))
-    }
-
-    pub fn slice(&self, from: Pos, to: Pos) -> Vec<Vec<Item>> {
-        let (from, to) = (self.clamp(from), self.clamp(to));
-        if from.line == to.line {
-            return vec![self.line(from.line)[from.col..to.col].to_vec()];
-        }
-        let mut out = vec![self.line(from.line)[from.col..].to_vec()];
-        for line in from.line + 1..to.line {
-            out.push(self.line(line).to_vec());
-        }
-        out.push(self.line(to.line)[..to.col].to_vec());
-        out
-    }
-
-    /// Removes everything between the two places and returns where they joined.
-    pub fn remove(&mut self, from: Pos, to: Pos) -> Pos {
-        let (from, to) = (self.clamp(from), self.clamp(to));
-        if from == to {
-            return from;
-        }
-        let tail = self.lines[to.line][to.col..].to_vec();
-        self.lines[from.line].truncate(from.col);
-        self.lines[from.line].extend(tail);
-        self.lines.drain(from.line + 1..=to.line);
-        from
-    }
-
-    /// Inserts lines of items and returns the place just after them.
-    pub fn insert(&mut self, at: Pos, mut what: Vec<Vec<Item>>) -> Pos {
-        let at = self.clamp(at);
-        if what.is_empty() {
-            return at;
-        }
-        let tail = self.lines[at.line][at.col..].to_vec();
-        self.lines[at.line].truncate(at.col);
-        if what.len() == 1 {
-            let only = what.remove(0);
-            let col = at.col + only.len();
-            self.lines[at.line].extend(only);
-            self.lines[at.line].extend(tail);
-            return Pos::new(at.line, col);
-        }
-        let last = what.pop().expect("more than one line");
-        let first = what.remove(0);
-        self.lines[at.line].extend(first);
-        let end = Pos::new(at.line + what.len() + 1, last.len());
-        let mut rest: Vec<Vec<Item>> = what;
-        let mut last_line = last;
-        last_line.extend(tail);
-        rest.push(last_line);
-        for (offset, line) in rest.into_iter().enumerate() {
-            self.lines.insert(at.line + 1 + offset, line);
-        }
-        end
-    }
-
-    pub fn set_math(&mut self, at: Pos, row: Row) -> bool {
-        match self
-            .lines
-            .get_mut(at.line)
-            .and_then(|line| line.get_mut(at.col))
-        {
-            Some(Item::Math(slot)) => {
-                *slot = row;
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// Characters and lines, for the status bar. A formula counts as one.
-    pub fn stats(&self) -> (usize, usize) {
-        (self.lines.iter().map(Vec::len).sum(), self.line_count())
-    }
-}
+use crate::structure::ast::Row;
+pub use crate::structure::text::{before_col, before_pos, items_of, Item, Pos, Sel, Text};
 
 /// Where `pos` ends up once the text up to `to` has been replaced by text that
 /// now ends at `end`.
@@ -261,22 +22,6 @@ fn shifted(pos: Pos, to: Pos, end: Pos) -> Pos {
     } else {
         Pos::new(line, pos.col)
     }
-}
-
-/// The place one item to the left on the same line, if there is one.
-pub fn before_col(at: Pos) -> Option<Pos> {
-    (at.col > 0).then(|| Pos::new(at.line, at.col - 1))
-}
-
-/// The place one item to the left, used after inserting an item to point at it.
-pub fn before_pos(at: Pos) -> Pos {
-    before_col(at).unwrap_or(at)
-}
-
-pub fn items_of(text: &str) -> Vec<Vec<Item>> {
-    text.split('\n')
-        .map(|line| line.chars().map(Item::Char).collect())
-        .collect()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -328,16 +73,13 @@ impl Editor {
         *self.sels.last().expect("at least one selection")
     }
 
-    pub fn load(&mut self, source: &str) {
-        self.text = Text::from_document(source);
+    /// Shows a document that was just read from a file, dropping the history.
+    pub fn load(&mut self, text: Text) {
+        self.text = text;
         self.sels = vec![Sel::caret(Pos::default())];
         self.past.clear();
         self.future.clear();
         self.last = Step::Other;
-    }
-
-    pub fn to_document(&self) -> String {
-        self.text.to_document()
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -695,11 +437,16 @@ fn find_after(text: &Text, needle: &[Item], from: Pos, taken: &[Pos]) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::math::ast::Node;
 
+    /// Nothing here goes through the notation: the model is only ever handed
+    /// items, so these tests cannot start depending on the file format.
     fn editor(source: &str) -> Editor {
+        with_items(items_of(source))
+    }
+
+    fn with_items(lines: Vec<Vec<Item>>) -> Editor {
         let mut editor = Editor::default();
-        editor.load(source);
+        editor.load(Text::from_lines(lines));
         editor
     }
 
@@ -719,54 +466,12 @@ mod tests {
     }
 
     #[test]
-    fn islands_are_one_item() {
-        let editor = editor("a $(1/2) b");
-        assert_eq!(editor.text().line_len(0), 5);
-        assert!(matches!(
-            editor.text().item_at(Pos::new(0, 2)),
-            Some(Item::Math(_))
-        ));
-        assert_eq!(editor.to_document(), "a $(1/2) b");
-    }
-
-    #[test]
-    fn an_island_holds_the_structure_itself() {
-        let editor = editor("$(1/2)");
-        let Some(Item::Math(row)) = editor.text().item_at(Pos::new(0, 0)) else {
-            panic!("an island");
-        };
-        assert!(matches!(row.as_slice(), [Node::Stack { .. }]));
-    }
-
-    #[test]
-    fn documents_survive_a_load_and_save() {
-        for source in [
-            "a $(1/2) b",
-            "$(√[3] x)",
-            "x$(^ 3)$(_ i)",
-            "$(↨ Σ, n, x=1)",
-            "$([a, b][c, d])",
-            "$(a → b)",
-            "$(√ x$(^ 3))",
-        ] {
-            assert_eq!(editor(source).to_document(), source);
-        }
-    }
-
-    #[test]
-    fn a_column_separator_is_one_item() {
-        let editor = editor("a $(t) b");
-        assert_eq!(editor.text().line_len(0), 5);
-        assert_eq!(editor.text().item_at(Pos::new(0, 2)), Some(&Item::Tab));
-        assert_eq!(editor.to_document(), "a $(t) b");
-    }
-
-    #[test]
-    fn a_separator_can_be_typed() {
+    fn a_separator_is_one_item() {
         let mut editor = editor("x= 1");
         editor.set_caret(Pos::new(0, 1));
         editor.insert_tab();
-        assert_eq!(editor.to_document(), "x$(t)= 1");
+        assert_eq!(editor.text().item_at(Pos::new(0, 1)), Some(&Item::Tab));
+        assert_eq!(editor.text().line_len(0), 5);
     }
 
     #[test]
@@ -819,13 +524,14 @@ mod tests {
 
     #[test]
     fn backspace_joins_lines_and_deletes_an_island_whole() {
-        let mut editor = editor("a$(x)\nb");
+        let island = Item::Math(vec![crate::structure::ast::Node::Char('x')]);
+        let mut editor = with_items(vec![vec![Item::Char('a'), island], vec![Item::Char('b')]]);
         editor.set_caret(Pos::new(1, 0));
         editor.backspace();
         assert_eq!(plain(&editor), "a\u{fffc}b");
         editor.set_caret(Pos::new(0, 2));
         editor.backspace();
-        assert_eq!(editor.to_document(), "ab");
+        assert_eq!(plain(&editor), "ab");
     }
 
     #[test]
@@ -875,11 +581,5 @@ mod tests {
         editor.extend_to(Pos::new(0, 5));
         editor.insert_text("bye");
         assert_eq!(plain(&editor), "bye");
-    }
-
-    #[test]
-    fn the_notation_round_trips_through_the_model() {
-        let source = "text a$(^ 2) more\n$(1/2)\nend";
-        assert_eq!(editor(source).to_document(), source);
     }
 }

@@ -1,7 +1,7 @@
 //! The file format: ordinary text, with the parts that need a two dimensional
 //! layout written as islands `$( ... )`. A plain dollar sign is written `$$`.
 
-use crate::math::notation;
+use super::notation;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Segment {

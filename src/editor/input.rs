@@ -15,9 +15,9 @@ use web_sys::{
     MouseEvent,
 };
 
-use super::model::{self, Item};
+use super::model::Item;
 use super::state::{self, Session};
-use crate::math::notation::island_text;
+use crate::format::document;
 
 pub fn build(doc: &Document, root: &HtmlElement) -> Option<HtmlTextAreaElement> {
     let textarea = doc
@@ -181,19 +181,8 @@ pub fn adds_caret(event: &MouseEvent) -> bool {
     event.alt_key()
 }
 
-/// The text a selection covers, joined with newlines, islands as `$( ... )`.
+/// The text a selection covers, for the clipboard. Writing it is the file
+/// format's job, so that pasting it back gives the same document.
 pub fn text_of(items: Vec<Vec<Item>>) -> String {
-    items
-        .into_iter()
-        .map(|line| {
-            line.into_iter()
-                .map(|item| match item {
-                    Item::Char(c) => c.to_string(),
-                    Item::Tab => format!("$({})", model::TAB_SOURCE),
-                    Item::Math(row) => format!("$({})", island_text(&row)),
-                })
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    document::write_items(&items)
 }

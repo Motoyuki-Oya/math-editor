@@ -4,8 +4,8 @@
 use wasm_bindgen::JsCast;
 use web_sys::{Document, Element};
 
-use super::ast::{Between, Cursor, Delim, MatrixKind, Node, Row};
-use super::symbols::{self, Class};
+use crate::structure::ast::{Between, Cursor, Delim, MatrixKind, Node, Row};
+use crate::structure::symbols::{self, Class};
 
 const SVG_NS: &str = "http://www.w3.org/2000/svg";
 
