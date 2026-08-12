@@ -27,10 +27,16 @@ pub struct View {
     overlay: Element,
 }
 
-/// Where a formula is being edited, so it can be drawn with its own caret.
-pub struct ActiveMath<'a> {
+/// Where the caret is, which is all the drawing needs to know about it: a place
+/// in the text, how deep into the structure there it reaches, and what an IME is
+/// composing at it. There is no mode: the same caret describes both cases.
+#[derive(Default)]
+pub struct Caret<'a> {
     pub at: Pos,
-    pub cursor: &'a Cursor,
+    /// Set when the caret is inside the structure at `at`.
+    pub inside: Option<&'a Cursor>,
+    /// Text an IME has not committed yet, drawn where it will land.
+    pub composing: Option<&'a str>,
 }
 
 impl View {
@@ -51,27 +57,21 @@ impl View {
         })
     }
 
-    pub fn draw(
-        &self,
-        text: &Text,
-        sels: &[Sel],
-        active: Option<ActiveMath<'_>>,
-        focused: bool,
-        preedit: Option<(Pos, &str)>,
-    ) {
+    pub fn draw(&self, text: &Text, sels: &[Sel], caret: &Caret<'_>, focused: bool) {
         let Some(doc) = self.lines.owner_document() else {
             return;
         };
         self.lines.set_inner_html("");
         for line in 0..text.line_count() {
-            let composing = preedit.filter(|(at, _)| at.line == line);
-            if let Some(element) = self.draw_line(&doc, text, line, active.as_ref(), composing) {
+            if let Some(element) = self.draw_line(&doc, text, line, caret) {
                 append(&self.lines, &element);
             }
         }
         self.align_columns(text);
-        // While an IME is composing, the underlined text stands in for the caret.
-        self.draw_carets(&doc, sels, focused && active.is_none() && preedit.is_none());
+        // The caret inside a structure is drawn there, and while an IME is
+        // composing the underlined text stands in for the caret.
+        let overlay = focused && caret.inside.is_none() && caret.composing.is_none();
+        self.draw_carets(&doc, sels, overlay);
     }
 
     fn draw_line(
@@ -79,23 +79,20 @@ impl View {
         doc: &Document,
         text: &Text,
         line: usize,
-        active: Option<&ActiveMath<'_>>,
-        preedit: Option<(Pos, &str)>,
+        caret: &Caret<'_>,
     ) -> Option<Element> {
         let holder = element(doc, "div", LINE_CLASS)?;
         holder.set_attribute(LINE_ATTR, &line.to_string()).ok();
         let mut run = String::new();
         let mut run_start = 0usize;
         let items = text.line(line);
-        // Text an IME is composing while a structure is being edited belongs at
-        // the caret inside that structure, not beside it.
-        let editing = active.map(|active| active.at);
-        let in_structure = preedit
-            .filter(|(at, _)| Some(*at) == editing)
-            .map(|(_, composing)| composing);
-        let inline = preedit.filter(|(at, _)| Some(*at) != editing);
+        // Text an IME is composing belongs at the caret, which for a caret
+        // inside a structure means inside that structure and not beside it.
+        let inline = caret
+            .composing
+            .filter(|_| caret.inside.is_none() && caret.at.line == line);
         for (col, item) in items.iter().enumerate() {
-            if let Some((_, composing)) = inline.filter(|(at, _)| at.col == col) {
+            if let Some(composing) = inline.filter(|_| caret.at.col == col) {
                 if !run.is_empty() {
                     append(&holder, &run_element(doc, &run, run_start)?);
                     run.clear();
@@ -123,10 +120,9 @@ impl View {
                         append(&holder, &run_element(doc, &run, run_start)?);
                         run.clear();
                     }
-                    let cursor = active
-                        .filter(|active| active.at == Pos::new(line, col))
-                        .map(|active| active.cursor);
-                    let composing = cursor.and(in_structure);
+                    let here = caret.at == Pos::new(line, col);
+                    let cursor = caret.inside.filter(|_| here);
+                    let composing = cursor.and(caret.composing);
                     let field = element(doc, "span", FIELD_CLASS)?;
                     field.set_attribute(COL_ATTR, &col.to_string()).ok();
                     if cursor.is_some() {
@@ -143,7 +139,7 @@ impl View {
         if !run.is_empty() {
             append(&holder, &run_element(doc, &run, run_start)?);
         }
-        if let Some((_, composing)) = inline.filter(|(at, _)| at.col >= items.len()) {
+        if let Some(composing) = inline.filter(|_| caret.at.col >= items.len()) {
             append(&holder, &preedit_element(doc, composing)?);
         }
         if items.is_empty() {
@@ -347,10 +343,26 @@ impl View {
         Some((Pos::new(line, col), field))
     }
 
+    /// Where the caret is drawn, be that a place in the text or a place inside
+    /// the structure standing there.
+    fn caret_box(&self, caret: &Caret<'_>) -> Option<Box2> {
+        if caret.inside.is_some() {
+            let drawn = self
+                .lines
+                .query_selector(".mn-field-active .mn-caret, .mn-field-active .mn-preedit")
+                .ok()
+                .flatten();
+            if let Some(drawn) = drawn {
+                return Some(box_of(&drawn.get_bounding_client_rect()));
+            }
+        }
+        self.caret_rect(caret.at)
+    }
+
     /// Scrolls so the caret stays in sight, and reports where it is on screen so
     /// the input element can follow it (which is where IME candidates appear).
-    pub fn reveal(&self, at: Pos) -> Option<Box2> {
-        let rect = self.caret_rect(at)?;
+    pub fn reveal(&self, caret: &Caret<'_>) -> Option<Box2> {
+        let rect = self.caret_box(caret)?;
         let view = box_of(&self.root.get_bounding_client_rect());
         let top = rect.top - view.top + self.root.scroll_top() as f64;
         let left = rect.left - view.left + self.root.scroll_left() as f64;

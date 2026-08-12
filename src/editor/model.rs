@@ -6,6 +6,7 @@
 //! [`crate::structure::text`], which knows nothing about the notation or the
 //! screen.
 
+use crate::format::document::read_row;
 use crate::structure::ast::{row_at, Cursor, Node, Row};
 use crate::structure::edit::{Editing, Escape};
 pub use crate::structure::text::{before_col, before_pos, items_of, Item, Pos, Sel, Text};
@@ -30,6 +31,28 @@ enum Step {
     /// Typed characters, which join with the step before them.
     Typing,
     Other,
+}
+
+/// What a command did, which is all the caller needs in order to react: there
+/// is no mode to ask about, only whether anything moved or changed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Did {
+    /// The key means nothing here, so it belongs to whoever else wants it.
+    Nothing,
+    /// The caret or the selection moved.
+    Moved,
+    /// The document changed.
+    Changed,
+}
+
+impl Did {
+    fn moved(happened: bool) -> Did {
+        if happened {
+            Did::Moved
+        } else {
+            Did::Nothing
+        }
+    }
 }
 
 /// What a command inside an island does to the document, which decides both
@@ -63,6 +86,10 @@ pub struct Editor {
     past: Vec<Snapshot>,
     future: Vec<Snapshot>,
     last: Step,
+    /// Set while several edits are being made as one step of the history.
+    grouping: bool,
+    /// Set once that step has been written, so the rest join it.
+    grouped: bool,
 }
 
 const HISTORY_LIMIT: usize = 500;
@@ -76,6 +103,8 @@ impl Default for Editor {
             past: Vec::new(),
             future: Vec::new(),
             last: Step::Other,
+            grouping: false,
+            grouped: false,
         }
     }
 }
@@ -112,13 +141,28 @@ impl Editor {
         }
     }
 
+    /// Makes everything `edits` does one step of the history. Turning typed
+    /// text into a structure takes several edits, and undoing it has to give
+    /// back what was typed rather than the half-built structure in between.
+    pub fn one_step(&mut self, edits: impl FnOnce(&mut Editor)) {
+        let was_grouping = self.grouping;
+        self.grouping = true;
+        edits(self);
+        self.grouping = was_grouping;
+        if !was_grouping {
+            self.grouped = false;
+        }
+        self.last = Step::Other;
+    }
+
     fn record(&mut self, step: Step) {
-        let join = step == Step::Typing && self.last == Step::Typing;
+        let join = self.grouped || (step == Step::Typing && self.last == Step::Typing);
         self.last = step;
         self.future.clear();
         if join {
             return;
         }
+        self.grouped = self.grouping;
         self.past.push(self.snapshot());
         if self.past.len() > HISTORY_LIMIT {
             self.past.remove(0);
@@ -179,23 +223,67 @@ impl Editor {
         self.edit_each(step, move |_, sel| (sel.start(), sel.end(), what.clone()));
     }
 
-    pub fn insert_text(&mut self, text: &str) {
+    /// Puts text in at the caret, wherever the caret is. A single character is
+    /// typed, so the shortcuts inside a structure still run; anything longer is
+    /// a paste and goes in as it is.
+    pub fn insert_text(&mut self, text: &str) -> Did {
+        if self.inside.is_some() {
+            let mut chars = text.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => self.type_in_island(c),
+                _ => self.insert_row_in_island(read_row(text)),
+            };
+            return Did::Changed;
+        }
         self.insert(items_of(text));
+        Did::Changed
     }
 
     pub fn insert_math(&mut self, row: Row) {
         self.insert(vec![vec![Item::Math(row)]]);
     }
 
-    pub fn insert_tab(&mut self) {
+    /// Tab: a column separator in the text, and a step to the next slot inside
+    /// a structure, which is what Tab means in every formula editor.
+    pub fn tab(&mut self, back: bool) -> Did {
+        if self.inside.is_some() {
+            self.in_island(Inside::Move, |editing| {
+                if back {
+                    editing.move_left()
+                } else {
+                    editing.move_right()
+                }
+            });
+            return Did::Moved;
+        }
         self.insert(vec![vec![Item::Tab]]);
+        Did::Changed
     }
 
-    pub fn split_line(&mut self) {
+    /// Enter: a new line in the text, and the end of the formula inside one.
+    pub fn split_line(&mut self) -> Did {
+        if self.leave_island() {
+            return Did::Moved;
+        }
         self.insert(vec![Vec::new(), Vec::new()]);
+        Did::Changed
     }
 
-    pub fn backspace(&mut self) {
+    /// Escape: leaves the formula, or drops the extra cursors.
+    pub fn escape(&mut self) -> Did {
+        Did::moved(self.leave_island() || self.collapse_sels())
+    }
+
+    pub fn backspace(&mut self) -> Did {
+        if self.inside.is_some() {
+            self.in_island(Inside::Change, |editing| editing.backspace());
+            return Did::Changed;
+        }
+        self.backspace_in_text();
+        Did::Changed
+    }
+
+    fn backspace_in_text(&mut self) {
         self.edit_each(Step::Other, |text, sel| {
             if sel.is_caret() {
                 (before(text, sel.head), sel.head, Vec::new())
@@ -205,7 +293,14 @@ impl Editor {
         });
     }
 
-    pub fn delete_forward(&mut self) {
+    pub fn delete_forward(&mut self) -> Did {
+        if self.inside.is_some() {
+            self.in_island(Inside::Change, |editing| {
+                editing.delete_forward();
+                None
+            });
+            return Did::Changed;
+        }
         self.edit_each(Step::Other, |text, sel| {
             if sel.is_caret() {
                 (sel.head, after(text, sel.head), Vec::new())
@@ -213,6 +308,20 @@ impl Editor {
                 (sel.start(), sel.end(), Vec::new())
             }
         });
+        Did::Changed
+    }
+
+    /// Grows the grid the caret is in by a row, which only means anything inside
+    /// a structure.
+    pub fn grow_matrix(&mut self) -> Did {
+        if self.inside.is_none() {
+            return Did::Nothing;
+        }
+        self.in_island(Inside::Change, |editing| {
+            editing.grow_matrix(true);
+            None
+        });
+        Did::Changed
     }
 
     /// Replaces one range, used by search and replace.
@@ -253,6 +362,18 @@ impl Editor {
             } else {
                 editing.move_to_end();
             }
+            None
+        })
+    }
+
+    /// Steps into the island at `at`, with the caret where a click landed.
+    pub fn enter_island_at(&mut self, at: Pos, cursor: &Cursor) -> bool {
+        if !self.enter_island(at, true) {
+            return false;
+        }
+        let to = cursor.clone();
+        self.in_island(Inside::Move, move |editing| {
+            editing.set_cursor(to);
             None
         })
     }
@@ -307,6 +428,51 @@ impl Editor {
         }
     }
 
+    /// Shows a stretch of a row inside the island at `at`, which is how a match
+    /// found in a structure is selected.
+    pub fn select_in_island(&mut self, at: Pos, cursor: Cursor) -> bool {
+        if !matches!(self.text.item_at(at), Some(Item::Math(_))) {
+            return false;
+        }
+        self.last = Step::Other;
+        self.sels = vec![Sel::caret(at)];
+        self.inside = Some(cursor);
+        true
+    }
+
+    /// Replaces a stretch of a row inside the island at `at`. The replacement
+    /// goes in as plain characters, so replacing never builds a structure by
+    /// accident.
+    pub fn replace_in_island(&mut self, at: Pos, cursor: Cursor, with: &str) -> bool {
+        if !self.select_in_island(at, cursor) {
+            return false;
+        }
+        let nodes: Row = with.chars().map(Node::Char).collect();
+        self.insert_row_in_island(nodes)
+    }
+
+    /// Selects the island the caret is inside as one item of the text, which is
+    /// what a selection that outgrew the structure means.
+    pub fn select_island(&mut self) -> bool {
+        if self.inside.take().is_none() {
+            return false;
+        }
+        let at = self.primary().head;
+        self.last = Step::Other;
+        let after = self.text.clamp(Pos::new(at.line, at.col + 1));
+        self.sels = vec![Sel::range(at, after)];
+        true
+    }
+
+    /// Drags the selection inside a formula out to `cursor`, keeping the anchor.
+    pub fn extend_in_island(&mut self, cursor: &Cursor) -> bool {
+        let to = cursor.clone();
+        self.in_island(Inside::Extend, move |editing| {
+            editing.extend_to(&to);
+            None
+        })
+    }
+
     /// The structures the selection inside a formula covers, for a copy.
     pub fn island_selection(&self) -> Option<Row> {
         let cursor = self.inside.as_ref()?;
@@ -334,8 +500,13 @@ impl Editor {
         })
     }
 
-    pub fn type_in_island(&mut self, c: char) -> bool {
+    fn type_in_island(&mut self, c: char) -> bool {
         self.in_island(Inside::Type, |editing| {
+            // A space finishes a name that was typed as a command; the shortcuts
+            // belong to the structure, not to the keyboard handler.
+            if c == ' ' && editing.commit_command() {
+                return None;
+            }
             editing.insert_char(c);
             None
         })
@@ -362,7 +533,25 @@ impl Editor {
         true
     }
 
-    pub fn move_h(&mut self, forward: bool, extend: bool) {
+    /// Left and right, one place at a time. A formula is a place the caret goes
+    /// into rather than over, and inside one the places are the structure's own.
+    pub fn move_h(&mut self, forward: bool, extend: bool) -> Did {
+        if self.inside.is_some() {
+            let kind = if extend { Inside::Extend } else { Inside::Move };
+            self.in_island(kind, |editing| {
+                if extend {
+                    editing.extend(forward)
+                } else if forward {
+                    editing.move_right()
+                } else {
+                    editing.move_left()
+                }
+            });
+            return Did::Moved;
+        }
+        if !extend && self.enter_island_beside(forward) {
+            return Did::Moved;
+        }
         self.map_sels(extend, |text, head| {
             if forward {
                 after(text, head)
@@ -370,9 +559,38 @@ impl Editor {
                 before(text, head)
             }
         });
+        Did::Moved
     }
 
-    pub fn move_v(&mut self, down: bool, extend: bool) {
+    /// Steps into the formula the caret is about to move across, if there is one.
+    fn enter_island_beside(&mut self, forward: bool) -> bool {
+        let sel = self.primary();
+        if !sel.is_caret() || self.sels.len() != 1 {
+            return false;
+        }
+        let at = if forward {
+            Some(sel.head)
+        } else {
+            before_col(sel.head)
+        };
+        at.is_some_and(|at| self.enter_island(at, forward))
+    }
+
+    /// Up and down: between the lines of the text, and between the slots of the
+    /// structure the caret is in. Leaving the top or the bottom of a formula
+    /// puts the caret back in the text.
+    pub fn move_v(&mut self, down: bool, extend: bool) -> Did {
+        if self.inside.is_some() {
+            self.in_island(Inside::Move, |editing| {
+                let moved = if down {
+                    editing.move_down()
+                } else {
+                    editing.move_up()
+                };
+                (!moved).then_some(Escape::Done)
+            });
+            return Did::Moved;
+        }
         self.map_sels(extend, |text, head| {
             let line = if down {
                 head.line + 1
@@ -381,15 +599,29 @@ impl Editor {
             };
             text.clamp(Pos::new(line.min(text.line_count() - 1), head.col))
         });
+        Did::Moved
     }
 
-    pub fn move_line_edge(&mut self, end: bool, extend: bool) {
+    pub fn move_line_edge(&mut self, end: bool, extend: bool) -> Did {
+        if self.inside.is_some() {
+            self.in_island(Inside::Move, |editing| {
+                if end {
+                    editing.move_end();
+                } else {
+                    editing.move_home();
+                }
+                None
+            });
+            return Did::Moved;
+        }
         self.map_sels(extend, |text, head| {
             Pos::new(head.line, if end { text.line_len(head.line) } else { 0 })
         });
+        Did::Moved
     }
 
-    pub fn move_document_edge(&mut self, end: bool, extend: bool) {
+    pub fn move_document_edge(&mut self, end: bool, extend: bool) -> Did {
+        self.leave_island();
         self.map_sels(
             extend,
             |text, _| {
@@ -400,6 +632,7 @@ impl Editor {
                 }
             },
         );
+        Did::Moved
     }
 
     fn map_sels(&mut self, extend: bool, step: impl Fn(&Text, Pos) -> Pos) {
@@ -445,10 +678,19 @@ impl Editor {
         self.merge_sels();
     }
 
-    pub fn select_all(&mut self) {
+    /// Selects everything there is to select where the caret is: the row of the
+    /// structure it is in, or the whole document.
+    pub fn select_all(&mut self) -> Did {
+        if self.inside.is_some() {
+            self.in_island(Inside::Extend, |editing| {
+                editing.select_row();
+                None
+            });
+            return Did::Moved;
+        }
         self.last = Step::Other;
-        self.inside = None;
         self.sels = vec![Sel::range(Pos::default(), self.text.end())];
+        Did::Moved
     }
 
     pub fn set_sels(&mut self, sels: Vec<Sel>) {
@@ -473,6 +715,10 @@ impl Editor {
     /// `Ctrl+D`: selects the word at the caret, then each further press adds the
     /// next place where the same text appears.
     pub fn add_next_occurrence(&mut self) -> bool {
+        // A structure holds one caret, so there is nothing to add there.
+        if self.inside.is_some() {
+            return false;
+        }
         self.last = Step::Other;
         let primary = self.primary();
         if primary.is_caret() {
@@ -630,7 +876,7 @@ mod tests {
     fn a_separator_is_one_item() {
         let mut editor = editor("x= 1");
         editor.set_caret(Pos::new(0, 1));
-        editor.insert_tab();
+        editor.tab(false);
         assert_eq!(editor.text().item_at(Pos::new(0, 1)), Some(&Item::Tab));
         assert_eq!(editor.text().line_len(0), 5);
     }
@@ -878,5 +1124,175 @@ mod tests {
         let mut editor = started_in_an_island();
         editor.move_h(false, false);
         assert!(editor.inside().is_none());
+    }
+
+    /// Moving right across a formula steps into it rather than over it, so the
+    /// same key does the same thing all the way through.
+    #[test]
+    fn moving_across_a_formula_steps_inside_it() {
+        let mut editor = started_in_an_island();
+        editor.type_in_island('x');
+        assert!(editor.leave_island());
+        editor.set_caret(Pos::new(0, 1));
+        editor.move_h(true, false);
+        assert_eq!(editor.inside().expect("inside the formula").index, 0);
+        editor.move_h(true, false);
+        assert_eq!(editor.inside().expect("inside the formula").index, 1);
+        // One more step takes the caret out the far side.
+        editor.move_h(true, false);
+        assert!(editor.inside().is_none());
+        assert_eq!(editor.primary().head, Pos::new(0, 2));
+    }
+
+    /// Typing goes through one command wherever the caret is.
+    #[test]
+    fn typing_reaches_whichever_place_the_caret_is_in() {
+        let mut editor = started_in_an_island();
+        editor.insert_text("1");
+        editor.insert_text("/");
+        editor.insert_text("2");
+        assert!(matches!(island(&editor).as_slice(), [Node::Stack { .. }]));
+        editor.leave_island();
+        editor.insert_text("b");
+        assert_eq!(plain(&editor), "a\u{fffc}b");
+    }
+
+    /// A paste inside a formula is text, not typing: `a/b` stays three
+    /// characters instead of becoming a fraction.
+    #[test]
+    fn a_paste_inside_a_formula_stays_plain() {
+        let mut editor = started_in_an_island();
+        editor.insert_text("a/b");
+        assert_eq!(
+            island(&editor),
+            vec![Node::Char('a'), Node::Char('/'), Node::Char('b')]
+        );
+    }
+
+    /// Tab is the column separator in the text and the next slot in a formula.
+    #[test]
+    fn tab_steps_to_the_next_slot_inside_a_formula() {
+        let mut editor = started_in_an_island();
+        editor.insert_text("1");
+        editor.insert_text("/");
+        // In the lower row of the fraction; Tab leaves it for the row that holds
+        // the fraction rather than putting a separator in.
+        editor.tab(false);
+        assert!(island(&editor)
+            .iter()
+            .all(|node| !matches!(node, Node::Char('\t'))));
+        assert_eq!(
+            editor.inside().expect("inside the formula").path,
+            Vec::new()
+        );
+    }
+
+    /// Enter and Escape end the formula instead of splitting the line.
+    #[test]
+    fn enter_and_escape_leave_a_formula() {
+        let mut editor = started_in_an_island();
+        editor.insert_text("x");
+        editor.split_line();
+        assert!(editor.inside().is_none());
+        assert_eq!(plain(&editor), "a\u{fffc}");
+        editor.enter_island(Pos::new(0, 1), true);
+        editor.escape();
+        assert!(editor.inside().is_none());
+    }
+
+    /// A match found inside a structure is replaced where it was found, and the
+    /// replacement stays plain characters.
+    #[test]
+    fn a_replacement_reaches_inside_a_formula() {
+        let mut editor = started_in_an_island();
+        for c in "ab".chars() {
+            editor.type_in_island(c);
+        }
+        editor.leave_island();
+        let at = Pos::new(0, 1);
+        let found = Cursor {
+            path: Vec::new(),
+            anchor: 0,
+            index: 1,
+        };
+        assert!(editor.replace_in_island(at, found, "x/y"));
+        editor.set_caret(at);
+        assert_eq!(
+            island(&editor),
+            vec![
+                Node::Char('x'),
+                Node::Char('/'),
+                Node::Char('y'),
+                Node::Char('b'),
+            ]
+        );
+        assert!(editor.undo());
+        assert_eq!(island(&editor), vec![Node::Char('a'), Node::Char('b')]);
+    }
+
+    /// Inside a structure there is one caret, so Ctrl+D does nothing rather
+    /// than selecting a word of the text the caret is standing on.
+    #[test]
+    fn ctrl_d_does_nothing_inside_a_formula() {
+        let mut editor = started_in_an_island();
+        editor.insert_text("a");
+        editor.insert_text("b");
+        assert!(!editor.add_next_occurrence());
+        assert_eq!(editor.sels().len(), 1);
+        assert!(editor.inside().is_some());
+        // Typing still goes into the structure.
+        editor.insert_text("c");
+        assert_eq!(
+            island(&editor),
+            vec![Node::Char('a'), Node::Char('b'), Node::Char('c')]
+        );
+    }
+
+    /// Turning typed text into a structure is one step of the history: undo
+    /// gives back the characters, not the formula they went into.
+    #[test]
+    fn a_shortcut_that_builds_a_structure_is_one_undo() {
+        let mut editor = editor("x1");
+        editor.set_caret(Pos::new(0, 2));
+        editor.one_step(|editor| {
+            editor.replace_range(Pos::new(0, 0), Pos::new(0, 2), "");
+            editor.insert_island();
+            for c in "x1/".chars() {
+                editor.insert_text(&c.to_string());
+            }
+        });
+        assert!(matches!(island(&editor).as_slice(), [Node::Stack { .. }]));
+        assert!(editor.undo());
+        assert_eq!(plain(&editor), "x1");
+        // Nothing in between: the half-built formula was never a step.
+        assert!(!editor.undo());
+        assert!(editor.redo());
+        assert!(matches!(island(&editor).as_slice(), [Node::Stack { .. }]));
+    }
+
+    /// A selection inside a formula can be dragged, which is the same selection
+    /// the keyboard makes.
+    #[test]
+    fn dragging_inside_a_formula_selects_the_same_way() {
+        let mut editor = started_in_an_island();
+        for c in "abc".chars() {
+            editor.type_in_island(c);
+        }
+        editor.in_island(Inside::Move, |editing| {
+            editing.move_to_start();
+            None
+        });
+        assert!(editor.extend_in_island(&Cursor {
+            path: Vec::new(),
+            anchor: 0,
+            index: 2,
+        }));
+        assert_eq!(
+            editor.island_selection(),
+            Some(vec![Node::Char('a'), Node::Char('b')])
+        );
+        // Dragging out of the formula takes it whole.
+        assert!(editor.select_island());
+        assert_eq!(editor.primary(), Sel::range(Pos::new(0, 1), Pos::new(0, 2)));
     }
 }

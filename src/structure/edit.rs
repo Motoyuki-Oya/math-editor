@@ -80,6 +80,16 @@ impl<'a> Editing<'a> {
         }
     }
 
+    /// Moves the head of the selection to `to`, which is how dragging selects.
+    /// A place in another row is not part of the same selection, so it is left
+    /// alone rather than guessed at.
+    pub fn extend_to(&mut self, to: &Cursor) {
+        if to.path != self.cursor.path {
+            return;
+        }
+        self.cursor.index = to.index.min(self.current_row().len());
+    }
+
     /// Selects the structure the caret is inside, in the row that holds it.
     /// Selecting therefore keeps widening: character, the structure around it,
     /// the structure around that one, and finally the whole formula, which is
@@ -206,6 +216,13 @@ impl<'a> Editing<'a> {
                 body: Row::new(),
             }),
             ')' | ']' => self.leave_group(),
+            // A grid grows by a column where the caret is; anywhere else `&` is
+            // just a character.
+            '&' => {
+                if !self.grow_matrix(false) {
+                    self.insert(Node::Char('&'));
+                }
+            }
             _ => self.insert(Node::Char(c)),
         }
     }

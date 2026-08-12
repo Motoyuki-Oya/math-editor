@@ -28,6 +28,11 @@ pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
     if !sel.is_caret() || session.borrow().editor.sels().len() > 1 {
         return false;
     }
+    // Inside a formula the structure has shortcuts of its own; these only turn
+    // ordinary text into a formula.
+    if session.borrow().editor.inside().is_some() {
+        return false;
+    }
     let before = text_before(session, sel.head);
     let Some((consume, seed)) = seed_for(c, &before) else {
         return false;
@@ -45,26 +50,31 @@ pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
         seed => {
             {
                 let mut borrowed = session.borrow_mut();
-                borrowed.editor.replace_range(from, sel.head, "");
-            }
-            state::insert_math();
-            let Some(session) = state::session() else {
-                return true;
-            };
-            match seed {
-                Seed::Empty | Seed::Text(_) => {}
-                Seed::Typed(run, trigger) => {
-                    let mut borrowed = session.borrow_mut();
-                    for c in run.chars() {
-                        borrowed.editor.type_in_island(c);
+                // Taking the typed text and making a structure of it is one step
+                // of the history: undoing `1/` gives back the characters, not the
+                // empty formula they went into.
+                borrowed.editor.one_step(|editor| {
+                    editor.replace_range(from, sel.head, "");
+                    editor.insert_island();
+                    match seed {
+                        Seed::Empty | Seed::Text(_) => {}
+                        Seed::Typed(run, trigger) => {
+                            // One character at a time, through the same door
+                            // typing uses, so `1/` builds the structure it would
+                            // have built by hand.
+                            let mut buffer = [0u8; 4];
+                            for c in run.chars().chain(std::iter::once(trigger)) {
+                                editor.insert_text(c.encode_utf8(&mut buffer));
+                            }
+                        }
+                        Seed::Node(node) => {
+                            editor.insert_in_island(node);
+                        }
                     }
-                    borrowed.editor.type_in_island(trigger);
-                }
-                Seed::Node(node) => {
-                    session.borrow_mut().editor.insert_in_island(node);
-                }
+                });
             }
-            state::redraw(&session);
+            state::focus();
+            state::changed(session);
             true
         }
     }

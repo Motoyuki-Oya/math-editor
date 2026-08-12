@@ -1,14 +1,59 @@
 //! Search and replace over the model, with an optional regular expression.
 //!
 //! The browser's own regular expressions do the matching, so a bad pattern can
-//! only fail to compile, never break the editor. Formulas are not searched: a
-//! match can never start or end inside one.
+//! only fail to compile, never break the editor. Structures are searched as
+//! well, row by row: a match is a stretch of characters that sit next to each
+//! other, wherever in the document they are. A match never spans a structure's
+//! edge, the same way it never spans a line's.
 
 use js_sys::RegExp;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
 use super::model::{Item, Pos, Sel, Text};
+use crate::structure::ast::{Cursor, Node, Row};
+
+/// Where a match is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Place {
+    /// A stretch of ordinary text.
+    Text(Sel),
+    /// A stretch of one row inside the structure standing at `at`.
+    Inside { at: Pos, cursor: Cursor },
+}
+
+/// A match: where it is, and the groups it captured.
+#[derive(Clone, Debug)]
+pub struct Found {
+    pub place: Place,
+    pub groups: Vec<String>,
+}
+
+/// A place in reading order, which is how "find next" carries on from the last
+/// match: the item in the text, then how deep into the structure there it goes.
+pub type Key = (Pos, Option<(Vec<(usize, usize)>, usize)>);
+
+impl Place {
+    pub fn start(&self) -> Key {
+        match self {
+            Place::Text(sel) => (sel.start(), None),
+            Place::Inside { at, cursor } => (*at, Some((cursor.path.clone(), cursor.start()))),
+        }
+    }
+
+    pub fn end(&self) -> Key {
+        match self {
+            Place::Text(sel) => (sel.end(), None),
+            Place::Inside { at, cursor } => (*at, Some((cursor.path.clone(), cursor.end()))),
+        }
+    }
+}
+
+/// Where searching starts when nothing has been found yet: the caret, be it in
+/// the text or inside a structure.
+pub fn key_at(at: Pos, inside: Option<&Cursor>) -> Key {
+    (at, inside.map(|cursor| (cursor.path.clone(), cursor.end())))
+}
 
 #[derive(Clone, Copy, Default)]
 pub struct SearchOptions {
@@ -16,62 +61,117 @@ pub struct SearchOptions {
     pub case_sensitive: bool,
 }
 
-/// A match: where it is, and the groups it captured.
-pub type Match = (Sel, Vec<String>);
-
-pub fn find_next(text: &Text, query: &str, options: SearchOptions, from: Pos) -> Option<Sel> {
+pub fn find_next(text: &Text, query: &str, options: SearchOptions, from: Key) -> Option<Found> {
     let all = find_all(text, query, options);
     all.iter()
-        .find(|(sel, _)| sel.start() >= from)
+        .find(|found| found.place.start() >= from)
         .or_else(|| all.first())
-        .map(|(sel, _)| *sel)
+        .cloned()
 }
 
-pub fn find_all(text: &Text, query: &str, options: SearchOptions) -> Vec<Match> {
+pub fn find_all(text: &Text, query: &str, options: SearchOptions) -> Vec<Found> {
     let Some(regex) = compile(query, options) else {
         return Vec::new();
     };
     let mut found = Vec::new();
     for line in 0..text.line_count() {
-        for (start, run) in runs(text.line(line)) {
-            regex.set_last_index(0);
-            let units: Vec<usize> = char_starts(&run);
-            loop {
-                let Some(result) = regex.exec(&run) else {
-                    break;
-                };
-                let Some(whole) = result.get(0).as_string() else {
-                    break;
-                };
-                let Some(at) = match_index(&result) else {
-                    break;
-                };
-                let end = at + whole.encode_utf16().count();
-                if whole.is_empty() {
-                    // An empty match would loop for ever.
-                    regex.set_last_index(regex.last_index() + 1);
-                    if regex.last_index() as usize > run.encode_utf16().count() {
-                        break;
-                    }
-                    continue;
-                }
-                let (Some(from), Some(to)) = (char_of(&units, at), char_of(&units, end)) else {
-                    break;
-                };
-                let groups = (0..result.length())
-                    .map(|i| result.get(i).as_string().unwrap_or_default())
-                    .collect();
-                found.push((
-                    Sel::range(Pos::new(line, start + from), Pos::new(line, start + to)),
+        let items = text.line(line);
+        for (start, run) in runs(items) {
+            for (from, to, groups) in matches(&regex, &run) {
+                found.push(Found {
+                    place: Place::Text(Sel::range(
+                        Pos::new(line, start + from),
+                        Pos::new(line, start + to),
+                    )),
                     groups,
-                ));
-                if !regex.global() {
-                    break;
-                }
+                });
             }
         }
+        // The rows inside a structure are searched too, so a name buried in a
+        // fraction is found like any other.
+        for (col, item) in items.iter().enumerate() {
+            let Item::Math(root) = item else { continue };
+            let at = Pos::new(line, col);
+            search_row(&regex, root, &mut Vec::new(), &mut |cursor, groups| {
+                found.push(Found {
+                    place: Place::Inside { at, cursor },
+                    groups,
+                })
+            });
+        }
     }
-    found.sort_by_key(|(sel, _)| sel.start());
+    found.sort_by_key(|found| found.place.start());
+    found
+}
+
+/// Searches one row and every row nested inside it, reporting each match as a
+/// selection of that row.
+fn search_row(
+    regex: &RegExp,
+    row: &Row,
+    path: &mut Vec<(usize, usize)>,
+    report: &mut impl FnMut(Cursor, Vec<String>),
+) {
+    for (start, run) in node_runs(row) {
+        for (from, to, groups) in matches(regex, &run) {
+            report(
+                Cursor {
+                    path: path.clone(),
+                    anchor: start + from,
+                    index: start + to,
+                },
+                groups,
+            );
+        }
+    }
+    for (index, node) in row.iter().enumerate() {
+        for slot in 0..node.slot_count() {
+            let Some(nested) = node.slot(slot) else {
+                continue;
+            };
+            path.push((index, slot));
+            search_row(regex, nested, path, report);
+            path.pop();
+        }
+    }
+}
+
+/// Every match in `run`, as the range of characters it covers and the groups it
+/// captured.
+fn matches(regex: &RegExp, run: &str) -> Vec<(usize, usize, Vec<String>)> {
+    let mut found = Vec::new();
+    regex.set_last_index(0);
+    let units: Vec<usize> = char_starts(run);
+    loop {
+        let Some(result) = regex.exec(run) else {
+            break;
+        };
+        let Some(whole) = result.get(0).as_string() else {
+            break;
+        };
+        let Some(at) = match_index(&result) else {
+            break;
+        };
+        let end = at + whole.encode_utf16().count();
+        if whole.is_empty() {
+            // An empty match would loop for ever.
+            regex.set_last_index(regex.last_index() + 1);
+            if regex.last_index() as usize > run.encode_utf16().count() {
+                break;
+            }
+            continue;
+        }
+        let (Some(from), Some(to)) = (char_of(&units, at), char_of(&units, end)) else {
+            break;
+        };
+        let groups = (0..result.length())
+            .map(|i| result.get(i).as_string().unwrap_or_default())
+            .collect();
+        found.push((from, to, groups));
+        if !regex.global() {
+            break;
+        }
+    }
     found
 }
 
@@ -126,6 +226,33 @@ fn runs(items: &[Item]) -> Vec<(usize, String)> {
                 run.push(c);
             }
             None => {
+                if !run.is_empty() {
+                    runs.push((start, std::mem::take(&mut run)));
+                }
+            }
+        }
+    }
+    if !run.is_empty() {
+        runs.push((start, run));
+    }
+    runs
+}
+
+/// The same as `runs`, for a row of a structure: only plain characters can be
+/// matched, so anything with a shape of its own breaks the run.
+fn node_runs(row: &Row) -> Vec<(usize, String)> {
+    let mut runs = Vec::new();
+    let mut run = String::new();
+    let mut start = 0;
+    for (index, node) in row.iter().enumerate() {
+        match node {
+            Node::Char(c) => {
+                if run.is_empty() {
+                    start = index;
+                }
+                run.push(*c);
+            }
+            _ => {
                 if !run.is_empty() {
                     runs.push((start, std::mem::take(&mut run)));
                 }
@@ -230,6 +357,44 @@ mod tests {
         ]]);
         let runs = runs(text.line(0));
         assert_eq!(runs, vec![(0, "ab".to_string()), (3, "cd".to_string())]);
+    }
+
+    /// Only plain characters can be matched inside a structure, so a shape of
+    /// its own breaks the run the same way a formula breaks a line.
+    #[test]
+    fn a_row_of_a_structure_is_searched_as_its_characters() {
+        let row = vec![
+            Node::Char('a'),
+            Node::Char('b'),
+            crate::structure::ast::sqrt(),
+            Node::Char('c'),
+        ];
+        assert_eq!(
+            node_runs(&row),
+            vec![(0, "ab".to_string()), (3, "c".to_string())]
+        );
+    }
+
+    /// Reading order: the text before a structure, then what is inside it, then
+    /// the deeper rows, so finding the next match walks the document once.
+    #[test]
+    fn matches_are_ordered_by_where_they_are() {
+        let text = Place::Text(Sel::range(Pos::new(0, 0), Pos::new(0, 1)));
+        let shallow = Place::Inside {
+            at: Pos::new(0, 1),
+            cursor: Cursor::root(0),
+        };
+        let deep = Place::Inside {
+            at: Pos::new(0, 1),
+            cursor: Cursor {
+                path: vec![(0, 0)],
+                anchor: 0,
+                index: 1,
+            },
+        };
+        let mut places = vec![deep.clone(), text.clone(), shallow.clone()];
+        places.sort_by_key(|place| place.start());
+        assert_eq!(places, vec![text, shallow, deep]);
     }
 
     #[test]

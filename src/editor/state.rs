@@ -6,13 +6,12 @@ use std::rc::Rc;
 use web_sys::{HtmlElement, HtmlTextAreaElement, InputEvent, KeyboardEvent, MouseEvent};
 
 use super::input;
-use super::model::{Editor, Inside, Item, Pos};
-use super::search::{self, SearchOptions};
+use super::model::{Did, Editor};
+use super::search::{self, Place, SearchOptions};
 use super::trigger;
 use crate::format::document;
 use crate::structure::ast::Node;
-use crate::structure::edit::{Editing, Escape};
-use crate::view::document::{ActiveMath, View};
+use crate::view::document::{Caret, View};
 
 pub struct Session {
     /// Names the pane this document is shown in.
@@ -25,7 +24,8 @@ pub struct Session {
     /// What the IME is composing right now, drawn where it will be inserted.
     pub preedit: String,
     pub dragging: bool,
-    pub search_from: Option<Pos>,
+    /// Where the next search carries on from, which may be inside a structure.
+    pub search_from: Option<search::Key>,
 }
 
 /// Called with the pane whose document changed.
@@ -135,20 +135,19 @@ pub fn changed(session: &Rc<RefCell<Session>>) {
 
 pub fn redraw(session: &Rc<RefCell<Session>>) {
     let session = session.borrow();
-    let caret = session.editor.primary().head;
-    let active = session
-        .editor
-        .inside()
-        .map(|cursor| ActiveMath { at: caret, cursor });
-    let preedit = (!session.preedit.is_empty()).then_some((caret, session.preedit.as_str()));
+    // One caret describes both cases, so the drawing has no mode to pick.
+    let caret = Caret {
+        at: session.editor.primary().head,
+        inside: session.editor.inside(),
+        composing: (!session.preedit.is_empty()).then_some(session.preedit.as_str()),
+    };
     session.view.draw(
         session.editor.text(),
         session.editor.sels(),
-        active,
+        &caret,
         session.focused,
-        preedit,
     );
-    if let Some(rect) = session.view.reveal(caret) {
+    if let Some(rect) = session.view.reveal(&caret) {
         let style = format!(
             "left:{}px;top:{}px;height:{}px",
             rect.left,
@@ -206,22 +205,6 @@ pub fn commit_composition(session: &Rc<RefCell<Session>>, text: &str) {
 }
 
 pub fn insert_text(session: &Rc<RefCell<Session>>, text: &str) {
-    if session.borrow().editor.inside().is_some() {
-        // Typing arrives one character at a time, so shortcuts still work; a
-        // paste arrives whole and goes in as it is.
-        let mut chars = text.chars();
-        match (chars.next(), chars.next()) {
-            (Some(c), None) => {
-                session.borrow_mut().editor.type_in_island(c);
-            }
-            _ => {
-                let nodes = document::read_row(text);
-                session.borrow_mut().editor.insert_row_in_island(nodes);
-            }
-        }
-        changed(session);
-        return;
-    }
     // Single characters may start a formula; pasted text never does.
     let mut chars = text.chars();
     if let (Some(c), None) = (chars.next(), chars.next()) {
@@ -245,13 +228,18 @@ pub fn insert_math() {
 /// formula when the caret is in ordinary text.
 pub fn insert_node(node: Node) {
     let Some(session) = session() else { return };
-    if session.borrow().editor.inside().is_none() {
-        insert_math();
+    {
+        // Starting a formula and putting the structure in it is one step, so one
+        // undo takes the whole thing back.
+        let mut borrowed = session.borrow_mut();
+        borrowed.editor.one_step(|editor| {
+            if editor.inside().is_none() {
+                editor.insert_island();
+            }
+            editor.insert_in_island(node);
+        });
     }
-    let Some(session) = self::session() else {
-        return;
-    };
-    session.borrow_mut().editor.insert_in_island(node);
+    focus();
     changed(&session);
 }
 
@@ -327,12 +315,6 @@ pub fn selected_text(session: &Rc<RefCell<Session>>) -> String {
 }
 
 pub fn delete_selection(session: &Rc<RefCell<Session>>) {
-    if in_island(session, Inside::Change, |editing| {
-        editing.backspace();
-        None
-    }) {
-        return;
-    }
     session.borrow_mut().editor.backspace();
     changed(session);
 }
@@ -342,202 +324,80 @@ pub fn leave_math(session: &Rc<RefCell<Session>>) {
     session.borrow_mut().editor.leave_island();
 }
 
-/// Starts editing the formula at `at`, from either end.
-pub fn enter_math(session: &Rc<RefCell<Session>>, at: Pos, from_start: bool) -> bool {
-    session.borrow_mut().editor.enter_island(at, from_start)
-}
-
+/// Turns keys into commands. There is one table: what a key means inside a
+/// structure is the model's business, not the keyboard's, so the caret being in
+/// one changes nothing here.
 pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
     if session.borrow().composing {
         return;
     }
-    if session.borrow().editor.inside().is_some() {
-        keydown_in_math(session, event);
-        return;
-    }
     let key = event.key();
     let ctrl = event.ctrl_key() || event.meta_key();
     let shift = event.shift_key();
-    let handled = match (ctrl, key.as_str()) {
-        (_, "ArrowLeft") => move_h(session, false, shift),
-        (_, "ArrowRight") => move_h(session, true, shift),
-        (false, "ArrowUp") => act(session, |editor| editor.move_v(false, shift)),
-        (false, "ArrowDown") => act(session, |editor| editor.move_v(true, shift)),
-        // Alt+Up/Down would move lines; Ctrl adds a caret above or below.
-        (true, "ArrowUp") | (true, "ArrowDown") => false,
-        (false, "Home") => act(session, |editor| editor.move_line_edge(false, shift)),
-        (false, "End") => act(session, |editor| editor.move_line_edge(true, shift)),
-        (true, "Home") => act(session, |editor| editor.move_document_edge(false, shift)),
-        (true, "End") => act(session, |editor| editor.move_document_edge(true, shift)),
-        (false, "Backspace") => edit(session, Editor::backspace),
-        (false, "Delete") => edit(session, Editor::delete_forward),
-        (false, "Enter") => edit(session, Editor::split_line),
-        (false, "Escape") => act(session, |editor| {
-            editor.collapse_sels();
-        }),
-        (true, "a") => act(session, Editor::select_all),
-        (true, "d") => act(session, |editor| {
-            editor.add_next_occurrence();
-        }),
-        // Undo and redo are handled once, by the window shortcuts.
-        (true, _) => false,
-        // Tab is the column separator, which lines up with the neighbouring lines.
-        (false, "Tab") => edit(session, Editor::insert_tab),
-        (false, other) => {
+    let did = {
+        let mut borrowed = session.borrow_mut();
+        let editor = &mut borrowed.editor;
+        match (ctrl, key.as_str()) {
+            (_, "ArrowLeft") => editor.move_h(false, shift),
+            (_, "ArrowRight") => editor.move_h(true, shift),
+            (false, "ArrowUp") => editor.move_v(false, shift),
+            (false, "ArrowDown") => editor.move_v(true, shift),
+            // Alt+Up/Down would move lines; Ctrl adds a caret above or below.
+            (true, "ArrowUp") | (true, "ArrowDown") => Did::Nothing,
+            (false, "Home") => editor.move_line_edge(false, shift),
+            (false, "End") => editor.move_line_edge(true, shift),
+            (true, "Home") => editor.move_document_edge(false, shift),
+            (true, "End") => editor.move_document_edge(true, shift),
+            (false, "Backspace") => editor.backspace(),
+            (false, "Delete") => editor.delete_forward(),
+            // A grid grows by a row on Alt+Enter or Ctrl+Enter.
+            (_, "Enter") if event.alt_key() || ctrl => editor.grow_matrix(),
+            (false, "Enter") => editor.split_line(),
+            (false, "Escape") => editor.escape(),
+            (true, "a") => editor.select_all(),
+            (true, "d") => {
+                if editor.add_next_occurrence() {
+                    Did::Moved
+                } else {
+                    Did::Nothing
+                }
+            }
+            // Undo, redo and the clipboard are handled once, by the window
+            // shortcuts, in the text and in a structure alike.
+            (true, _) => Did::Nothing,
+            // Tab is the column separator in the text and the next slot inside
+            // a structure.
+            (false, "Tab") => editor.tab(shift),
             // Printable keys arrive as input events, which also covers the IME.
-            let _ = other;
-            false
+            (false, _) => Did::Nothing,
         }
     };
-    if handled {
-        event.prevent_default();
+    match did {
+        Did::Nothing => return,
+        Did::Moved => redraw(session),
+        Did::Changed => changed(session),
     }
+    event.prevent_default();
 }
 
-/// Runs a model command and redraws, without marking the file dirty.
-fn act(session: &Rc<RefCell<Session>>, command: impl FnOnce(&mut Editor)) -> bool {
-    command(&mut session.borrow_mut().editor);
-    redraw(session);
-    true
-}
-
-/// Runs a model command that changes the text, so the file becomes dirty.
-fn edit(session: &Rc<RefCell<Session>>, command: impl FnOnce(&mut Editor)) -> bool {
-    command(&mut session.borrow_mut().editor);
-    changed(session);
-    true
-}
-
-/// Moving across a formula steps into it instead of over it.
-fn move_h(session: &Rc<RefCell<Session>>, forward: bool, extend: bool) -> bool {
+/// Puts the caret, or the far end of the selection, where a click landed inside
+/// a formula. Returns whether the click was in one.
+fn click_in_math(session: &Rc<RefCell<Session>>, x: f64, y: f64, extend: bool) -> bool {
+    let Some((at, element)) = session.borrow().view.field_at_point(x, y) else {
+        return false;
+    };
+    let Some(cursor) = crate::view::structure::position_at_point(&element, x, y) else {
+        return false;
+    };
+    let mut borrowed = session.borrow_mut();
     if !extend {
-        let sel = session.borrow().editor.primary();
-        if sel.is_caret() && session.borrow().editor.sels().len() == 1 {
-            let at = if forward {
-                Some(sel.head)
-            } else {
-                super::model::before_col(sel.head)
-            };
-            if let Some(at) = at {
-                let is_math = matches!(
-                    session.borrow().editor.text().item_at(at),
-                    Some(Item::Math(_))
-                );
-                if is_math && enter_math(session, at, forward) {
-                    redraw(session);
-                    return true;
-                }
-            }
-        }
+        return borrowed.editor.enter_island_at(at, &cursor);
     }
-    act(session, |editor| editor.move_h(forward, extend))
-}
-
-/// The same keys as in the text, applied to the structure the caret is in.
-/// Walking out of it is the command's own answer, so there is no second place
-/// that decides where the caret ends up.
-fn keydown_in_math(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
-    let key = event.key();
-    let ctrl = event.ctrl_key() || event.meta_key();
-    let shift = event.shift_key();
-    // A grid grows by a row on Alt+Enter, wherever the caret is inside it.
-    if (event.alt_key() || ctrl) && key == "Enter" {
-        in_island(session, Inside::Change, |editing| {
-            editing.grow_matrix(true);
-            None
-        });
-        event.prevent_default();
-        return;
-    }
-    if ctrl && key == "a" {
-        in_island(session, Inside::Extend, |editing| {
-            editing.select_row();
-            None
-        });
-        event.prevent_default();
-        return;
-    }
-    // Undo, redo and the clipboard belong to the document, the same as in text.
-    if ctrl {
-        return;
-    }
-    let handled = match key.as_str() {
-        // Shift selects, the same as it does in the text. A selection that
-        // outgrows the formula becomes a selection of the formula itself.
-        "ArrowLeft" if shift => in_island(session, Inside::Extend, |editing| editing.extend(false)),
-        "ArrowRight" if shift => in_island(session, Inside::Extend, |editing| editing.extend(true)),
-        "ArrowLeft" => in_island(session, Inside::Move, |editing| editing.move_left()),
-        "ArrowRight" => in_island(session, Inside::Move, |editing| editing.move_right()),
-        "ArrowUp" => in_island(session, Inside::Move, |editing| {
-            (!editing.move_up()).then_some(Escape::Done)
-        }),
-        "ArrowDown" => in_island(session, Inside::Move, |editing| {
-            (!editing.move_down()).then_some(Escape::Done)
-        }),
-        "Home" => in_island(session, Inside::Move, |editing| {
-            editing.move_home();
-            None
-        }),
-        "End" => in_island(session, Inside::Move, |editing| {
-            editing.move_end();
-            None
-        }),
-        "Backspace" => in_island(session, Inside::Change, |editing| editing.backspace()),
-        "Delete" => in_island(session, Inside::Change, |editing| {
-            editing.delete_forward();
-            None
-        }),
-        "Escape" | "Enter" => in_island(session, Inside::Move, |_| Some(Escape::Done)),
-        "Tab" => in_island(session, Inside::Move, |editing| {
-            if shift {
-                editing.move_left()
-            } else {
-                editing.move_right()
-            }
-        }),
-        "&" => in_island(session, Inside::Change, |editing| {
-            editing.grow_matrix(false);
-            None
-        }),
-        " " => in_island(session, Inside::Change, |editing| {
-            if !editing.commit_command() {
-                editing.insert_char(' ');
-            }
-            None
-        }),
-        other => {
-            let mut chars = other.chars();
-            match (chars.next(), chars.next()) {
-                (Some(c), None) if !event.alt_key() => {
-                    in_island(session, Inside::Type, move |editing| {
-                        editing.insert_char(c);
-                        None
-                    })
-                }
-                _ => false,
-            }
-        }
-    };
-    if handled {
-        event.prevent_default();
-    }
-}
-
-/// Runs a command on the island the caret is in and redraws. Only a command
-/// that changed the structure makes the file dirty.
-fn in_island(
-    session: &Rc<RefCell<Session>>,
-    kind: Inside,
-    command: impl FnOnce(&mut Editing<'_>) -> Option<Escape>,
-) -> bool {
-    if !session.borrow_mut().editor.in_island(kind, command) {
+    // Widening a selection only stays inside the formula it started in.
+    if borrowed.editor.inside().is_none() || borrowed.editor.primary().head != at {
         return false;
     }
-    match kind {
-        Inside::Move | Inside::Extend => redraw(session),
-        Inside::Type | Inside::Change => changed(session),
-    }
-    true
+    borrowed.editor.extend_in_island(&cursor)
 }
 
 pub fn on_mousedown(session: &Rc<RefCell<Session>>, event: MouseEvent) {
@@ -546,22 +406,11 @@ pub fn on_mousedown(session: &Rc<RefCell<Session>>, event: MouseEvent) {
     }
     event.prevent_default();
     let (x, y) = (event.client_x() as f64, event.client_y() as f64);
-    let field = session.borrow().view.field_at_point(x, y);
-    if let Some((at, element)) = field {
-        if !input::adds_caret(&event) && enter_math(session, at, true) {
-            if let Some(cursor) = crate::view::structure::position_at_point(&element, x, y) {
-                session
-                    .borrow_mut()
-                    .editor
-                    .in_island(Inside::Move, |editing| {
-                        editing.set_cursor(cursor);
-                        None
-                    });
-            }
-            focus();
-            redraw(session);
-            return;
-        }
+    if !input::adds_caret(&event) && click_in_math(session, x, y, event.shift_key()) {
+        session.borrow_mut().dragging = true;
+        focus();
+        redraw(session);
+        return;
     }
     leave_math(session);
     let pos = {
@@ -587,6 +436,16 @@ pub fn on_mousemove(session: &Rc<RefCell<Session>>, event: MouseEvent) {
     if !session.borrow().dragging {
         return;
     }
+    let (x, y) = (event.client_x() as f64, event.client_y() as f64);
+    if session.borrow().editor.inside().is_some() {
+        // Dragging inside a formula selects inside it; dragging out of it takes
+        // the formula as a whole, which is one item of the text.
+        if !click_in_math(session, x, y, true) {
+            session.borrow_mut().editor.select_island();
+        }
+        redraw(session);
+        return;
+    }
     let pos = {
         let borrowed = session.borrow();
         borrowed.view.pos_at_point(
@@ -600,7 +459,10 @@ pub fn on_mousemove(session: &Rc<RefCell<Session>>, event: MouseEvent) {
 }
 
 pub fn on_dblclick(session: &Rc<RefCell<Session>>, event: MouseEvent) {
+    // Inside a formula there are no words to take, so the row is the unit.
     if session.borrow().editor.inside().is_some() {
+        session.borrow_mut().editor.select_all();
+        redraw(session);
         return;
     }
     let pos = {
@@ -623,21 +485,27 @@ pub fn find_next(query: &str, options: SearchOptions) -> bool {
     let Some(session) = session() else {
         return false;
     };
-    leave_math(&session);
     let found = {
         let borrowed = session.borrow();
-        let from = borrowed
-            .search_from
-            .unwrap_or_else(|| borrowed.editor.primary().end());
+        let from = borrowed.search_from.clone().unwrap_or_else(|| {
+            search::key_at(borrowed.editor.primary().end(), borrowed.editor.inside())
+        });
         search::find_next(borrowed.editor.text(), query, options, from)
     };
-    let Some(sel) = found else {
+    let Some(found) = found else {
         return false;
     };
     {
         let mut borrowed = session.borrow_mut();
-        borrowed.editor.set_sels(vec![sel]);
-        borrowed.search_from = Some(sel.end());
+        borrowed.search_from = Some(found.place.end());
+        match found.place {
+            // A match in a structure is shown inside it, so what is found is
+            // what is selected either way.
+            Place::Text(sel) => borrowed.editor.set_sels(vec![sel]),
+            Place::Inside { at, cursor } => {
+                borrowed.editor.select_in_island(at, cursor);
+            }
+        }
     }
     focus();
     redraw(&session);
@@ -657,10 +525,18 @@ pub fn replace_all(query: &str, replacement: &str, options: SearchOptions) -> us
     {
         let mut borrowed = session.borrow_mut();
         // Replacing back to front keeps the earlier places valid.
-        for (sel, with) in matches.iter().rev() {
-            let text = search::expand(with, replacement, options);
-            borrowed.editor.replace_range(sel.start(), sel.end(), &text);
+        for found in matches.iter().rev() {
+            let text = search::expand(&found.groups, replacement, options);
+            match &found.place {
+                Place::Text(sel) => borrowed.editor.replace_range(sel.start(), sel.end(), &text),
+                Place::Inside { at, cursor } => {
+                    borrowed
+                        .editor
+                        .replace_in_island(*at, cursor.clone(), &text);
+                }
+            }
         }
+        borrowed.editor.leave_island();
     }
     changed(&session);
     matches.len()
