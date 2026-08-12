@@ -132,6 +132,29 @@ fn the_layers_do_not_reach_into_each_other() {
     }
 }
 
+/// The format turns whole documents into files and back, and nothing else.
+///
+/// Copying used to go through it, which put the notation on the clipboard: a
+/// fraction came out as `$(a/b)`, in another program and in this one. Keeping
+/// the entry points to `read` and `write` is what stops that from coming back —
+/// there is nothing here for anything but a file to call.
+#[test]
+fn the_format_only_converts_whole_documents() {
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/format/document.rs");
+    let source = fs::read_to_string(&file).expect("the document format");
+    let names: Vec<&str> = without_tests(&source)
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("pub fn "))
+        .filter_map(|rest| rest.split('(').next())
+        .collect();
+    assert_eq!(
+        names,
+        ["read", "write"],
+        "{} hands out more than a file needs",
+        file.display(),
+    );
+}
+
 /// The format is the only place the notation `$( … )` is written or read.
 #[test]
 fn only_the_format_knows_the_notation() {

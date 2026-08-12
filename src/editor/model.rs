@@ -6,7 +6,7 @@
 //! [`crate::structure::text`], which knows nothing about the notation or the
 //! screen.
 
-use crate::format::document::read_row;
+use super::clipboard::Clip;
 use crate::structure::ast::{row_at, Cursor, Node, Row};
 use crate::structure::edit::{Editing, Escape};
 pub use crate::structure::text::{before_col, before_pos, items_of, Item, Pos, Sel, Text};
@@ -231,11 +231,31 @@ impl Editor {
             let mut chars = text.chars();
             match (chars.next(), chars.next()) {
                 (Some(c), None) => self.type_in_island(c),
-                _ => self.insert_row_in_island(read_row(text)),
+                // Characters stay characters: a paste never re-runs the
+                // shortcuts that typing them would. A structure holds one row,
+                // so a line break has nothing to mean inside it.
+                _ => self.insert_row_in_island(
+                    text.chars()
+                        .filter(|c| *c != '\n')
+                        .map(Node::Char)
+                        .collect(),
+                ),
             };
             return Did::Changed;
         }
         self.insert(items_of(text));
+        Did::Changed
+    }
+
+    /// Puts a piece that was copied out of a document back in, with the shape it
+    /// had. Text from anywhere else arrives through [`Self::insert_text`] as the
+    /// characters it is.
+    pub fn insert_clip(&mut self, clip: &Clip) -> Did {
+        if self.inside.is_some() {
+            self.insert_row_in_island(clip.row());
+        } else {
+            self.insert(clip.items());
+        }
         Did::Changed
     }
 
@@ -1227,6 +1247,52 @@ mod tests {
             ]
         );
         assert!(editor.undo());
+        assert_eq!(island(&editor), vec![Node::Char('a'), Node::Char('b')]);
+    }
+
+    /// A structure copied out of the text goes back in as a structure, not as
+    /// the characters it reads as.
+    #[test]
+    fn a_copied_structure_pastes_back_as_itself() {
+        let fraction = vec![Node::Stack {
+            above: vec![Node::Char('a')],
+            below: vec![Node::Char('b')],
+            between: crate::structure::ast::Between::Rule,
+        }];
+        let mut editor = with_items(vec![vec![Item::Math(fraction.clone())]]);
+        editor.set_caret(Pos::new(0, 1));
+        let clip = Clip::Text(vec![vec![Item::Math(fraction.clone())]]);
+        editor.insert_clip(&clip);
+        assert_eq!(
+            editor.text().line(0),
+            &[Item::Math(fraction.clone()), Item::Math(fraction.clone()),]
+        );
+    }
+
+    /// A structure is one row, so a pasted line break is dropped rather than
+    /// put in as a character the file could not hold.
+    #[test]
+    fn pasting_lines_inside_a_structure_keeps_one_row() {
+        let mut editor = started_in_an_island();
+        editor.insert_text("ab\ncd");
+        assert_eq!(
+            island(&editor),
+            vec![
+                Node::Char('a'),
+                Node::Char('b'),
+                Node::Char('c'),
+                Node::Char('d')
+            ]
+        );
+    }
+
+    /// Pasting into a structure puts the copied pieces in that row, so a
+    /// fraction pasted into a denominator is a fraction there too.
+    #[test]
+    fn a_copied_piece_pastes_inside_a_structure() {
+        let mut editor = started_in_an_island();
+        let piece: Row = vec![Node::Char('a'), Node::Char('b')];
+        editor.insert_clip(&Clip::Row(piece));
         assert_eq!(island(&editor), vec![Node::Char('a'), Node::Char('b')]);
     }
 

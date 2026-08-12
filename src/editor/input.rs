@@ -15,9 +15,7 @@ use web_sys::{
     MouseEvent,
 };
 
-use super::model::Item;
 use super::state::{self, Session};
-use crate::format::document;
 
 pub fn build(doc: &Document, root: &HtmlElement) -> Option<HtmlTextAreaElement> {
     let textarea = doc
@@ -144,10 +142,11 @@ pub fn install(session: &Rc<RefCell<Session>>) {
 }
 
 fn copy_selection(session: &Rc<RefCell<Session>>, event: &web_sys::ClipboardEvent, remove: bool) {
-    let text = state::selected_text(session);
-    if text.is_empty() {
+    // Whether there is anything to copy is a question about the selection, not
+    // about the text it reads as: an empty structure reads as nothing.
+    let Some(text) = state::selected_text(session) else {
         return;
-    }
+    };
     event.prevent_default();
     if let Some(data) = event.clipboard_data() {
         data.set_data("text/plain", &text).ok();
@@ -179,10 +178,4 @@ fn on<E, T>(
 /// Whether a mouse event asks for another caret rather than moving the only one.
 pub fn adds_caret(event: &MouseEvent) -> bool {
     event.alt_key()
-}
-
-/// The text a selection covers, for the clipboard. Writing it is the file
-/// format's job, so that pasting it back gives the same document.
-pub fn text_of(items: Vec<Vec<Item>>) -> String {
-    document::write_items(&items)
 }

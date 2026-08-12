@@ -10,5 +10,6 @@
 pub mod ast;
 pub mod commands;
 pub mod edit;
+pub mod plain;
 pub mod symbols;
 pub mod text;
