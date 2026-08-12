@@ -3,8 +3,6 @@
 use super::ast::{is_arrow, row_at, row_at_mut, Between, Cursor, Delim, Node, Row};
 use super::commands;
 
-const UNDO_LIMIT: usize = 200;
-
 /// Result of an edit that the cursor could not absorb, so the surrounding text
 /// editor has to react instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,118 +17,148 @@ pub enum Escape {
     Done,
 }
 
-pub struct MathState {
-    root: Row,
-    cursor: Cursor,
-    undo: Vec<(Row, Cursor)>,
-    redo: Vec<(Row, Cursor)>,
+/// An island being edited: the structure itself, borrowed from the document,
+/// and the cursor walking through it.
+///
+/// Nothing is copied and no history is kept here. The island belongs to the
+/// document, so an edit inside one is an edit of the document, undone by the
+/// same history as any other.
+pub struct Editing<'a> {
+    pub root: &'a mut Row,
+    pub cursor: &'a mut Cursor,
 }
 
-impl MathState {
-    pub fn new() -> MathState {
-        MathState {
-            root: Row::new(),
-            cursor: Cursor::default(),
-            undo: Vec::new(),
-            redo: Vec::new(),
-        }
-    }
-
-    /// Takes over a structure the document already holds, so entering it costs
-    /// no parsing.
-    pub fn from_row(root: Row) -> MathState {
-        let index = root.len();
-        MathState {
-            root,
-            cursor: Cursor::root(index),
-            undo: Vec::new(),
-            redo: Vec::new(),
-        }
-    }
-
-    pub fn root(&self) -> &Row {
-        &self.root
-    }
-
-    pub fn cursor(&self) -> &Cursor {
-        &self.cursor
+impl<'a> Editing<'a> {
+    pub fn new(root: &'a mut Row, cursor: &'a mut Cursor) -> Editing<'a> {
+        Editing { root, cursor }
     }
 
     pub fn set_cursor(&mut self, cursor: Cursor) {
-        if row_at(&self.root, &cursor.path).is_some_and(|r| cursor.index <= r.len()) {
-            self.cursor = cursor;
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.root.is_empty()
-    }
-
-    fn snapshot(&mut self) {
-        self.undo.push((self.root.clone(), self.cursor.clone()));
-        if self.undo.len() > UNDO_LIMIT {
-            self.undo.remove(0);
-        }
-        self.redo.clear();
-    }
-
-    pub fn undo(&mut self) -> bool {
-        match self.undo.pop() {
-            Some((root, cursor)) => {
-                self.redo
-                    .push((std::mem::replace(&mut self.root, root), self.cursor.clone()));
-                self.cursor = cursor;
-                true
-            }
-            None => false,
-        }
-    }
-
-    pub fn redo(&mut self) -> bool {
-        match self.redo.pop() {
-            Some((root, cursor)) => {
-                self.undo
-                    .push((std::mem::replace(&mut self.root, root), self.cursor.clone()));
-                self.cursor = cursor;
-                true
-            }
-            None => false,
+        if row_at(self.root, &cursor.path).is_some_and(|r| cursor.index <= r.len()) {
+            *self.cursor = cursor;
         }
     }
 
     fn current_row(&self) -> &Row {
-        row_at(&self.root, &self.cursor.path).unwrap_or(&self.root)
+        row_at(self.root, &self.cursor.path).unwrap_or(self.root)
     }
 
     fn current_row_mut(&mut self) -> &mut Row {
         let path = self.cursor.path.clone();
-        if row_at_mut(&mut self.root, &path).is_none() {
-            self.cursor = Cursor::default();
-            return &mut self.root;
+        if row_at_mut(self.root, &path).is_none() {
+            *self.cursor = Cursor::default();
+            return self.root;
         }
-        row_at_mut(&mut self.root, &path).expect("row checked above")
+        row_at_mut(self.root, &path).expect("row checked above")
     }
 
     fn node_at(&self, path: &[(usize, usize)], index: usize) -> Option<&Node> {
-        row_at(&self.root, path)?.get(index)
+        row_at(self.root, path)?.get(index)
     }
 
     /// Inserts a node at the caret; when the node has slots the caret moves
     /// into the first one, which is what makes palette buttons feel natural.
     pub fn insert(&mut self, node: Node) {
-        self.snapshot();
         self.place(node);
     }
 
+    /// Grows the selection by one place, or takes the whole structure the
+    /// selection sits in once it reaches the end of its row.
+    pub fn extend(&mut self, forward: bool) -> Option<Escape> {
+        let index = self.cursor.index;
+        let target = if forward {
+            (index < self.current_row().len()).then_some(index + 1)
+        } else {
+            index.checked_sub(1)
+        };
+        match target {
+            Some(index) => {
+                self.cursor.index = index;
+                None
+            }
+            None => self.select_around(forward),
+        }
+    }
+
+    /// Selects the structure the caret is inside, in the row that holds it.
+    /// Selecting therefore keeps widening: character, the structure around it,
+    /// the structure around that one, and finally the whole formula, which is
+    /// where the surrounding text takes over.
+    fn select_around(&mut self, forward: bool) -> Option<Escape> {
+        let Some((node, _)) = self.cursor.path.pop() else {
+            return Some(if forward { Escape::Right } else { Escape::Left });
+        };
+        let (anchor, index) = if forward {
+            (node, node + 1)
+        } else {
+            (node + 1, node)
+        };
+        self.cursor.anchor = anchor;
+        self.cursor.index = index;
+        None
+    }
+
+    /// Selects the whole row the caret is in, for Select All.
+    pub fn select_row(&mut self) {
+        self.cursor.anchor = 0;
+        self.cursor.index = self.current_row().len();
+    }
+
+    /// Puts a plain caret at `index`. Everything except selecting ends this
+    /// way, so a selection never outlives the command that made it.
+    fn caret_at(&mut self, index: usize) {
+        self.cursor.index = index;
+        self.cursor.anchor = index;
+    }
+
+    /// A selection collapses when the caret moves, the way it does in text: to
+    /// the side the move goes towards.
+    fn collapse(&mut self, forward: bool) -> bool {
+        if self.cursor.is_caret() {
+            return false;
+        }
+        let index = if forward {
+            self.cursor.end()
+        } else {
+            self.cursor.start()
+        };
+        self.caret_at(index);
+        true
+    }
+
+    /// Drops the selected structures, so typing over a selection replaces it.
+    fn take_selection(&mut self) -> bool {
+        if self.cursor.is_caret() {
+            return false;
+        }
+        let (start, end) = (self.cursor.start(), self.cursor.end());
+        self.current_row_mut().drain(start..end);
+        self.caret_at(start);
+        true
+    }
+
+    /// Puts a whole row of structures in at the caret, for a paste.
+    pub fn insert_row(&mut self, nodes: Row) {
+        self.take_selection();
+        let index = self.cursor.index;
+        let count = nodes.len();
+        let row = self.current_row_mut();
+        for (offset, node) in nodes.into_iter().enumerate() {
+            row.insert(index + offset, node);
+        }
+        self.caret_at(index + count);
+    }
+
     fn place(&mut self, node: Node) {
+        self.take_selection();
         let enter = node.slot_count() > 0;
         let index = self.cursor.index;
         self.current_row_mut().insert(index, node);
         if enter {
             self.cursor.path.push((index, 0));
-            self.cursor.index = 0;
+            self.caret_at(0);
         } else {
-            self.cursor.index += 1;
+            self.caret_at(self.cursor.index + 1);
         }
     }
 
@@ -161,9 +189,8 @@ impl MathState {
                 _ => return false,
             },
         };
-        self.snapshot();
         self.current_row_mut().drain(start..index);
-        self.cursor.index = start;
+        self.caret_at(start);
         self.place(node);
         true
     }
@@ -186,7 +213,7 @@ impl MathState {
     /// Typing `/` (or an arrow) puts whatever was just typed above it, the way
     /// a person would write it on paper.
     pub fn insert_stack(&mut self, between: Between) {
-        self.snapshot();
+        self.take_selection();
         let index = self.cursor.index;
         let start = {
             let row = self.current_row();
@@ -200,7 +227,7 @@ impl MathState {
         };
         self.current_row_mut().insert(start, node);
         self.cursor.path.push((start, 1));
-        self.cursor.index = 0;
+        self.caret_at(0);
     }
 
     /// Closing a delimiter moves the caret just past the group it closes.
@@ -216,13 +243,15 @@ impl MathState {
             .is_some_and(|node| matches!(node, Node::Group { .. }));
         if closes_group {
             let (node, _) = self.cursor.path.pop().unwrap();
-            self.cursor.index = node + 1;
+            self.caret_at(node + 1);
         }
     }
 
     pub fn backspace(&mut self) -> Option<Escape> {
+        if self.take_selection() {
+            return None;
+        }
         if self.cursor.index > 0 {
-            self.snapshot();
             let index = self.cursor.index - 1;
             let row = self.current_row_mut();
             let node = row[index].clone();
@@ -231,7 +260,7 @@ impl MathState {
                 // peeled away instead of the user's work being thrown out.
                 0 => {
                     row.remove(index);
-                    self.cursor.index = index;
+                    self.caret_at(index);
                 }
                 _ => {
                     let mut kept: Row = Vec::new();
@@ -245,7 +274,7 @@ impl MathState {
                     for (offset, inner) in kept.into_iter().enumerate() {
                         row.insert(index + offset, inner);
                     }
-                    self.cursor.index = index + count;
+                    self.caret_at(index + count);
                 }
             }
             return None;
@@ -253,7 +282,7 @@ impl MathState {
         // At the start of a slot: step out of the container to its left edge.
         match self.cursor.path.pop() {
             Some((node, _)) => {
-                self.cursor.index = node;
+                self.caret_at(node);
                 None
             }
             None => {
@@ -267,15 +296,21 @@ impl MathState {
     }
 
     pub fn delete_forward(&mut self) {
+        if self.take_selection() {
+            return;
+        }
         let len = self.current_row().len();
         if self.cursor.index < len {
-            self.snapshot();
             let index = self.cursor.index;
             self.current_row_mut().remove(index);
         }
     }
 
     pub fn move_left(&mut self) -> Option<Escape> {
+        // Moving off a selection just puts the caret at its edge.
+        if self.collapse(false) {
+            return None;
+        }
         if self.cursor.index > 0 {
             let index = self.cursor.index - 1;
             let node = self.current_row()[index].clone();
@@ -283,9 +318,9 @@ impl MathState {
                 let slot = node.exit_slot();
                 let len = node.slot(slot).map(|r| r.len()).unwrap_or(0);
                 self.cursor.path.push((index, slot));
-                self.cursor.index = len;
+                self.caret_at(len);
             } else {
-                self.cursor.index = index;
+                self.caret_at(index);
             }
             return None;
         }
@@ -299,9 +334,9 @@ impl MathState {
                         .map(|r| r.len())
                         .unwrap_or(0);
                     self.cursor.path.push((node, slot - 1));
-                    self.cursor.index = len;
+                    self.caret_at(len);
                 } else {
-                    self.cursor.index = node;
+                    self.caret_at(node);
                 }
                 None
             }
@@ -310,15 +345,18 @@ impl MathState {
     }
 
     pub fn move_right(&mut self) -> Option<Escape> {
+        if self.collapse(true) {
+            return None;
+        }
         let len = self.current_row().len();
         if self.cursor.index < len {
             let index = self.cursor.index;
             let node = self.current_row()[index].clone();
             if node.slot_count() > 0 {
                 self.cursor.path.push((index, node.entry_slot()));
-                self.cursor.index = 0;
+                self.caret_at(0);
             } else {
-                self.cursor.index = index + 1;
+                self.caret_at(index + 1);
             }
             return None;
         }
@@ -331,9 +369,9 @@ impl MathState {
                     .unwrap_or(0);
                 if slot + 1 < slots {
                     self.cursor.path.push((node, slot + 1));
-                    self.cursor.index = 0;
+                    self.caret_at(0);
                 } else {
-                    self.cursor.index = node + 1;
+                    self.caret_at(node + 1);
                 }
                 None
             }
@@ -353,6 +391,7 @@ impl MathState {
     /// the current one: numerator vs denominator, upper vs lower limit, or the
     /// neighbouring row of a matrix.
     fn move_vertically(&mut self, up: bool) -> bool {
+        self.collapse(!up);
         for depth in (0..self.cursor.path.len()).rev() {
             let (node_index, slot) = self.cursor.path[depth];
             let parent_path = self.cursor.path[..depth].to_vec();
@@ -386,10 +425,11 @@ impl MathState {
             if let Some(target) = target {
                 self.cursor.path.truncate(depth);
                 self.cursor.path.push((node_index, target));
-                self.cursor.index = node
+                let index = node
                     .slot(target)
                     .map(|r| r.len().min(self.cursor.index))
                     .unwrap_or(0);
+                self.caret_at(index);
                 return true;
             }
         }
@@ -397,21 +437,21 @@ impl MathState {
     }
 
     pub fn move_home(&mut self) {
-        self.cursor.index = 0;
+        self.caret_at(0);
     }
 
     pub fn move_end(&mut self) {
-        self.cursor.index = self.current_row().len();
+        self.caret_at(self.current_row().len());
     }
 
     /// Places the caret at the very end of the formula, used when the caret
     /// enters the field from the surrounding text on the right.
     pub fn move_to_end(&mut self) {
-        self.cursor = Cursor::root(self.root.len());
+        *self.cursor = Cursor::root(self.root.len());
     }
 
     pub fn move_to_start(&mut self) {
-        self.cursor = Cursor::root(0);
+        *self.cursor = Cursor::root(0);
     }
 
     /// Adds a row (or column) to the matrix the caret is currently inside.
@@ -425,8 +465,7 @@ impl MathState {
             if !is_matrix {
                 continue;
             }
-            self.snapshot();
-            let Some(row) = row_at_mut(&mut self.root, &parent_path) else {
+            let Some(row) = row_at_mut(self.root, &parent_path) else {
                 return false;
             };
             let Some(Node::Matrix { cells, .. }) = row.get_mut(node_index) else {
@@ -445,16 +484,10 @@ impl MathState {
             };
             self.cursor.path.truncate(depth);
             self.cursor.path.push((node_index, target));
-            self.cursor.index = 0;
+            self.caret_at(0);
             return true;
         }
         false
-    }
-}
-
-impl Default for MathState {
-    fn default() -> Self {
-        MathState::new()
     }
 }
 
@@ -499,9 +532,34 @@ mod tests {
     /// in this layer may know how a structure is written.
     use crate::format::notation;
 
-    impl MathState {
-        fn from_notation(source: &str) -> MathState {
-            MathState::from_row(notation::parse_island(source))
+    /// An island on its own, standing in for the document that would hold it.
+    struct Island {
+        root: Row,
+        cursor: Cursor,
+    }
+
+    impl Island {
+        fn new() -> Island {
+            Island {
+                root: Row::new(),
+                cursor: Cursor::default(),
+            }
+        }
+
+        fn from_notation(source: &str) -> Island {
+            let root = notation::parse_island(source);
+            let cursor = Cursor::root(root.len());
+            Island { root, cursor }
+        }
+
+        fn edit(&mut self) -> Editing<'_> {
+            Editing::new(&mut self.root, &mut self.cursor)
+        }
+
+        fn type_in(&mut self, text: &str) {
+            for c in text.chars() {
+                self.edit().insert_char(c);
+            }
         }
 
         fn to_notation(&self) -> String {
@@ -511,135 +569,156 @@ mod tests {
 
     #[test]
     fn typing_builds_a_row() {
-        let mut state = MathState::new();
-        for c in "x+1".chars() {
-            state.insert_char(c);
-        }
-        assert_eq!(state.to_notation(), "x+1");
+        let mut island = Island::new();
+        island.type_in("x+1");
+        assert_eq!(island.to_notation(), "x+1");
     }
 
     #[test]
     fn backslash_shortcut_expands_into_a_structure() {
-        let mut state = MathState::new();
-        for c in "\\sqrt".chars() {
-            state.insert_char(c);
-        }
-        assert!(state.commit_command());
-        state.insert_char('2');
-        assert_eq!(state.to_notation(), "√ 2");
+        let mut island = Island::new();
+        island.type_in("\\sqrt");
+        assert!(island.edit().commit_command());
+        island.type_in("2");
+        assert_eq!(island.to_notation(), "√ 2");
     }
 
     #[test]
     fn typed_glyph_expands_like_its_command() {
-        let mut state = MathState::new();
-        state.insert_char('√');
-        assert!(state.commit_command());
-        state.insert_char('2');
-        assert_eq!(state.to_notation(), "√ 2");
+        let mut island = Island::new();
+        island.type_in("√");
+        assert!(island.edit().commit_command());
+        island.type_in("2");
+        assert_eq!(island.to_notation(), "√ 2");
     }
 
     #[test]
     fn unknown_backslash_shortcut_is_left_alone() {
-        let mut state = MathState::new();
-        for c in "\\nope".chars() {
-            state.insert_char(c);
-        }
-        assert!(!state.commit_command());
+        let mut island = Island::new();
+        island.type_in("\\nope");
+        assert!(!island.edit().commit_command());
     }
 
     #[test]
     fn slash_takes_the_preceding_run_as_the_upper_row() {
-        let mut state = MathState::new();
-        for c in "1+ab/".chars() {
-            state.insert_char(c);
-        }
-        for c in "2c".chars() {
-            state.insert_char(c);
-        }
-        assert_eq!(state.to_notation(), "1+$(ab/2c)");
+        let mut island = Island::new();
+        island.type_in("1+ab/");
+        island.type_in("2c");
+        assert_eq!(island.to_notation(), "1+$(ab/2c)");
     }
 
     #[test]
     fn caret_enters_and_leaves_a_stack() {
-        let mut state = MathState::from_notation("a/b");
-        state.move_to_start();
-        assert_eq!(state.move_right(), None);
-        assert_eq!(state.cursor().path, vec![(0, 0)]);
-        state.move_right();
-        state.move_right();
-        assert_eq!(state.cursor().path, vec![(0, 1)]);
+        let mut island = Island::from_notation("a/b");
+        island.edit().move_to_start();
+        assert_eq!(island.edit().move_right(), None);
+        assert_eq!(island.cursor.path, vec![(0, 0)]);
+        island.edit().move_right();
+        island.edit().move_right();
+        assert_eq!(island.cursor.path, vec![(0, 1)]);
     }
 
     #[test]
     fn up_and_down_switch_between_the_upper_and_lower_row() {
-        let mut state = MathState::from_notation("a/b");
-        state.move_to_start();
-        state.move_right();
-        assert!(state.move_down());
-        assert_eq!(state.cursor().path, vec![(0, 1)]);
-        assert!(state.move_up());
-        assert_eq!(state.cursor().path, vec![(0, 0)]);
+        let mut island = Island::from_notation("a/b");
+        island.edit().move_to_start();
+        island.edit().move_right();
+        assert!(island.edit().move_down());
+        assert_eq!(island.cursor.path, vec![(0, 1)]);
+        assert!(island.edit().move_up());
+        assert_eq!(island.cursor.path, vec![(0, 0)]);
     }
 
     #[test]
     fn backspace_keeps_the_content_of_a_deleted_structure() {
-        let mut state = MathState::from_notation("ab/c");
-        state.move_to_end();
-        assert_eq!(state.backspace(), None);
-        assert_eq!(state.to_notation(), "abc");
+        let mut island = Island::from_notation("ab/c");
+        island.edit().move_to_end();
+        assert_eq!(island.edit().backspace(), None);
+        assert_eq!(island.to_notation(), "abc");
     }
 
     #[test]
     fn backspace_reports_escape_on_an_empty_formula() {
-        let mut state = MathState::new();
-        assert_eq!(state.backspace(), Some(Escape::Delete));
+        let mut island = Island::new();
+        assert_eq!(island.edit().backspace(), Some(Escape::Delete));
     }
 
     #[test]
     fn arrow_past_the_edge_reports_escape() {
-        let mut state = MathState::from_notation("x");
-        state.move_to_end();
-        assert_eq!(state.move_right(), Some(Escape::Right));
-        state.move_to_start();
-        assert_eq!(state.move_left(), Some(Escape::Left));
-    }
-
-    #[test]
-    fn undo_restores_the_previous_formula() {
-        let mut state = MathState::new();
-        state.insert_char('a');
-        state.insert_char('b');
-        assert!(state.undo());
-        assert_eq!(state.to_notation(), "a");
-        assert!(state.redo());
-        assert_eq!(state.to_notation(), "ab");
+        let mut island = Island::from_notation("x");
+        island.edit().move_to_end();
+        assert_eq!(island.edit().move_right(), Some(Escape::Right));
+        island.edit().move_to_start();
+        assert_eq!(island.edit().move_left(), Some(Escape::Left));
     }
 
     #[test]
     fn closing_paren_steps_out_of_the_group() {
-        let mut state = MathState::new();
-        state.insert_char('(');
-        state.insert_char('x');
-        state.insert_char(')');
-        state.insert_char('+');
-        assert_eq!(state.to_notation(), "(x)+");
+        let mut island = Island::new();
+        island.type_in("(x)+");
+        assert_eq!(island.to_notation(), "(x)+");
+    }
+
+    #[test]
+    fn selecting_reaches_the_whole_row_then_the_structure_around_it() {
+        let mut island = Island::from_notation("1/2");
+        island.edit().move_to_end();
+        island.edit().move_left();
+        // Moving into the fraction from the right lands in its lower row.
+        assert_eq!(island.cursor.path, vec![(0, 1)]);
+        assert_eq!(island.edit().extend(false), None);
+        assert_eq!((island.cursor.start(), island.cursor.end()), (0, 1));
+        // Reaching past the row selects the fraction, in the row above it.
+        assert_eq!(island.edit().extend(false), None);
+        assert_eq!(island.cursor.path, Vec::new());
+        assert_eq!((island.cursor.start(), island.cursor.end()), (0, 1));
+        // And past the outermost row, the selection leaves the formula.
+        assert_eq!(island.edit().extend(false), Some(Escape::Left));
+    }
+
+    #[test]
+    fn select_row_takes_everything_in_the_row() {
+        let mut island = Island::from_notation("ab");
+        island.edit().select_row();
+        assert_eq!((island.cursor.start(), island.cursor.end()), (0, 2));
+        island.edit().backspace();
+        assert_eq!(island.to_notation(), "");
+        assert!(island.cursor.is_caret());
+    }
+
+    /// A paste puts structures in as they are: no shortcut runs again.
+    #[test]
+    fn a_pasted_row_goes_in_at_the_caret() {
+        let mut island = Island::from_notation("x");
+        island.edit().insert_row(notation::parse_island("1/2"));
+        assert_eq!(island.to_notation(), "x$(1/2)");
+        assert!(island.cursor.is_caret());
+        assert_eq!(island.cursor.index, 2);
+    }
+
+    #[test]
+    fn a_paste_replaces_the_selection() {
+        let mut island = Island::from_notation("ab");
+        island.edit().select_row();
+        island.edit().insert_row(notation::parse_island("c"));
+        assert_eq!(island.to_notation(), "c");
     }
 
     #[test]
     fn matrix_grows_by_row_and_column() {
-        let mut state = MathState::new();
-        state.insert(super::super::ast::matrix(
+        let mut island = Island::new();
+        island.edit().insert(super::super::ast::matrix(
             super::super::ast::MatrixKind::Grid,
             1,
             2,
         ));
-        assert!(state.grow_matrix(true));
-        match &state.root[0] {
+        assert!(island.edit().grow_matrix(true));
+        match &island.root[0] {
             Node::Matrix { cells, .. } => assert_eq!(cells.len(), 2),
             other => panic!("expected a matrix, got {other:?}"),
         }
-        assert!(state.grow_matrix(false));
-        match &state.root[0] {
+        assert!(island.edit().grow_matrix(false));
+        match &island.root[0] {
             Node::Matrix { cells, .. } => assert_eq!(cells[0].len(), 3),
             other => panic!("expected a matrix, got {other:?}"),
         }

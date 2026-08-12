@@ -30,9 +30,11 @@ pub fn decode_position(encoded: &str) -> Option<Cursor> {
             Some((node.parse().ok()?, slot.parse().ok()?))
         })
         .collect::<Option<Vec<_>>>()?;
+    let index = index.parse().ok()?;
     Some(Cursor {
         path,
-        index: index.parse().ok()?,
+        index,
+        anchor: index,
     })
 }
 
@@ -104,16 +106,21 @@ impl<'a> Renderer<'a> {
     /// Renders one row; `path` is the address of the row inside the formula.
     pub fn row(&self, row: &Row, path: &[(usize, usize)]) -> Element {
         let container = self.el("span", "mn-row");
-        let caret_here = self
-            .cursor
-            .filter(|cursor| cursor.path == path)
-            .map(|cursor| cursor.index);
+        let here = self.cursor.filter(|cursor| cursor.path == path);
+        let caret_here = here.filter(|cursor| cursor.is_caret()).map(|c| c.index);
+        let selected = here.filter(|cursor| !cursor.is_caret());
         if row.is_empty() {
-            // Keep empty slots visible and clickable.
+            // Keep empty slots visible and clickable, and put the caret inside
+            // the slot rather than beside it: the caret belongs where the next
+            // character will go.
             let placeholder = self.el("span", "mn-placeholder");
             placeholder
                 .set_attribute("data-pos", &encode_position(path, 0))
                 .ok();
+            if caret_here == Some(0) {
+                placeholder.set_class_name("mn-placeholder mn-placeholder-here");
+                placeholder.append_child(&self.caret()).ok();
+            }
             container.append_child(&placeholder).ok();
         }
         for (index, node) in row.iter().enumerate() {
@@ -124,6 +131,9 @@ impl<'a> Renderer<'a> {
             element
                 .set_attribute("data-pos", &encode_position(path, index))
                 .ok();
+            if selected.is_some_and(|sel| (sel.start()..sel.end()).contains(&index)) {
+                element.class_list().add_1("mn-selected").ok();
+            }
             container.append_child(&element).ok();
         }
         if caret_here == Some(row.len()) {
@@ -441,6 +451,7 @@ mod tests {
         let cursor = Cursor {
             path: vec![(0, 1), (2, 0)],
             index: 3,
+            anchor: 3,
         };
         let encoded = encode_position(&cursor.path, cursor.index);
         assert_eq!(decode_position(&encoded), Some(cursor));

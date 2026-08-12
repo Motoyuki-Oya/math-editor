@@ -54,20 +54,16 @@ pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
             match seed {
                 Seed::Empty | Seed::Text(_) => {}
                 Seed::Typed(run, trigger) => {
-                    if let Some(active) = session.borrow_mut().active.as_mut() {
-                        for c in run.chars() {
-                            active.state.insert_char(c);
-                        }
-                        active.state.insert_char(trigger);
+                    let mut borrowed = session.borrow_mut();
+                    for c in run.chars() {
+                        borrowed.editor.type_in_island(c);
                     }
+                    borrowed.editor.type_in_island(trigger);
                 }
                 Seed::Node(node) => {
-                    if let Some(active) = session.borrow_mut().active.as_mut() {
-                        active.state.insert(node);
-                    }
+                    session.borrow_mut().editor.insert_in_island(node);
                 }
             }
-            state::write_back(&session);
             state::redraw(&session);
             true
         }

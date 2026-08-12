@@ -4,6 +4,7 @@
 
 use super::islands::{self, Segment};
 use super::notation::{island_text, parse_island};
+use crate::structure::ast::{Node, Row};
 use crate::structure::text::{Item, Text};
 
 /// The island that means a column separator rather than a structure.
@@ -52,6 +53,38 @@ pub fn write_items(lines: &[Vec<Item>]) -> String {
         .join("\n")
 }
 
+/// A piece copied out of a structure. Plain characters come out as themselves,
+/// so taking a word out of a formula gives that word; anything with a shape
+/// comes out as a structure, which can be pasted back as one.
+pub fn write_row(row: &Row) -> String {
+    let plain: Option<String> = row
+        .iter()
+        .map(|node| match node {
+            Node::Char(c) => Some(*c),
+            _ => None,
+        })
+        .collect();
+    match plain {
+        Some(text) => text,
+        None => format!("$({})", island_text(row)),
+    }
+}
+
+/// Reads copied text as the pieces of a structure, so anything copied out of
+/// the document can be pasted inside one. Characters stay characters: pasting
+/// never re-runs the shortcuts that typing them would.
+pub fn read_row(text: &str) -> Row {
+    islands::parse(text)
+        .into_iter()
+        .flatten()
+        .flat_map(|segment| match segment {
+            Segment::Text(text) => text.chars().map(Node::Char).collect::<Row>(),
+            Segment::Island(source) if source.trim() == TAB_SOURCE => Row::new(),
+            Segment::Island(source) => parse_island(&source),
+        })
+        .collect()
+}
+
 fn line_segments(items: &Vec<Item>) -> islands::Line {
     let mut segments = islands::Line::new();
     let mut text = String::new();
@@ -78,7 +111,6 @@ fn line_segments(items: &Vec<Item>) -> islands::Line {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::structure::ast::Node;
     use crate::structure::text::Pos;
 
     #[test]
@@ -128,5 +160,31 @@ mod tests {
     #[test]
     fn a_copied_dollar_sign_stays_one_character() {
         assert_eq!(write_items(read("100$$ です").lines()), "100$ です");
+    }
+
+    #[test]
+    fn a_piece_of_a_structure_without_a_shape_is_copied_as_plain_text() {
+        let text = read("$(ab)");
+        let Some(Item::Math(row)) = text.item_at(Pos::new(0, 0)) else {
+            panic!("an island");
+        };
+        assert_eq!(write_row(row), "ab");
+    }
+
+    #[test]
+    fn a_piece_of_a_structure_survives_a_copy_and_paste() {
+        for source in ["$(1/2)", "$(√ x)", "$(a/b)$(c/d)"] {
+            let row = read_row(source);
+            assert_ne!(row, Row::new());
+            assert_eq!(read_row(&write_row(&row)), row);
+        }
+    }
+
+    /// Text pasted inside a structure keeps its characters: a `/` does not turn
+    /// into a fraction the way typing one would.
+    #[test]
+    fn pasted_characters_stay_characters() {
+        let expected: Row = "a/b".chars().map(Node::Char).collect();
+        assert_eq!(read_row("a/b"), expected);
     }
 }
