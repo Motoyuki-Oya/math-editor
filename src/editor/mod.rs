@@ -2,6 +2,7 @@
 //! the browser edit a `contenteditable` element. Keyboard and IME input arrive
 //! through a hidden textarea, which is what makes several cursors possible.
 
+pub mod clipboard;
 mod input;
 pub mod model;
 pub mod search;

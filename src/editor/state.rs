@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use web_sys::{HtmlElement, HtmlTextAreaElement, InputEvent, KeyboardEvent, MouseEvent};
 
+use super::clipboard::{self, Clip};
 use super::input;
 use super::model::{Did, Editor};
 use super::search::{self, Place, SearchOptions};
@@ -212,7 +213,12 @@ pub fn insert_text(session: &Rc<RefCell<Session>>, text: &str) {
             return;
         }
     }
-    session.borrow_mut().editor.insert_text(text);
+    // A piece copied out of a document goes back in with the shape it had;
+    // text from anywhere else is the characters it is.
+    match clipboard::pasted(text) {
+        Some(clip) => session.borrow_mut().editor.insert_clip(&clip),
+        None => session.borrow_mut().editor.insert_text(text),
+    };
     changed(session);
 }
 
@@ -300,18 +306,22 @@ pub fn stats() -> (usize, usize) {
         .unwrap_or((0, 1))
 }
 
+/// The text a selection puts on the clipboard, which is ordinary text: the
+/// piece itself is kept aside, so pasting it back into the editor keeps its
+/// shape without the notation ever leaving the file.
 pub fn selected_text(session: &Rc<RefCell<Session>>) -> String {
     let borrowed = session.borrow();
     // A selection inside a structure copies that piece of the structure; the
     // clipboard is the same one either way.
     if let Some(row) = borrowed.editor.island_selection() {
-        return document::write_row(&row);
+        return clipboard::keep(Clip::Row(row));
     }
     let sel = borrowed.editor.primary();
     if sel.is_caret() {
         return String::new();
     }
-    input::text_of(borrowed.editor.text().slice(sel.start(), sel.end()))
+    let lines = borrowed.editor.text().slice(sel.start(), sel.end());
+    clipboard::keep(Clip::Text(lines))
 }
 
 pub fn delete_selection(session: &Rc<RefCell<Session>>) {
