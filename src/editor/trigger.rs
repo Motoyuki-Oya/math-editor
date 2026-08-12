@@ -28,6 +28,11 @@ pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
     if !sel.is_caret() || session.borrow().editor.sels().len() > 1 {
         return false;
     }
+    // Inside a formula the structure has shortcuts of its own; these only turn
+    // ordinary text into a formula.
+    if session.borrow().editor.inside().is_some() {
+        return false;
+    }
     let before = text_before(session, sel.head);
     let Some((consume, seed)) = seed_for(c, &before) else {
         return false;
@@ -54,11 +59,13 @@ pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
             match seed {
                 Seed::Empty | Seed::Text(_) => {}
                 Seed::Typed(run, trigger) => {
+                    // One character at a time, through the same door typing uses,
+                    // so `1/` builds the same structure as it would by hand.
                     let mut borrowed = session.borrow_mut();
-                    for c in run.chars() {
-                        borrowed.editor.type_in_island(c);
+                    let mut buffer = [0u8; 4];
+                    for c in run.chars().chain(std::iter::once(trigger)) {
+                        borrowed.editor.insert_text(c.encode_utf8(&mut buffer));
                     }
-                    borrowed.editor.type_in_island(trigger);
                 }
                 Seed::Node(node) => {
                     session.borrow_mut().editor.insert_in_island(node);
