@@ -232,8 +232,14 @@ impl Editor {
             match (chars.next(), chars.next()) {
                 (Some(c), None) => self.type_in_island(c),
                 // Characters stay characters: a paste never re-runs the
-                // shortcuts that typing them would.
-                _ => self.insert_row_in_island(text.chars().map(Node::Char).collect()),
+                // shortcuts that typing them would. A structure holds one row,
+                // so a line break has nothing to mean inside it.
+                _ => self.insert_row_in_island(
+                    text.chars()
+                        .filter(|c| *c != '\n')
+                        .map(Node::Char)
+                        .collect(),
+                ),
             };
             return Did::Changed;
         }
@@ -1260,6 +1266,23 @@ mod tests {
         assert_eq!(
             editor.text().line(0),
             &[Item::Math(fraction.clone()), Item::Math(fraction.clone()),]
+        );
+    }
+
+    /// A structure is one row, so a pasted line break is dropped rather than
+    /// put in as a character the file could not hold.
+    #[test]
+    fn pasting_lines_inside_a_structure_keeps_one_row() {
+        let mut editor = started_in_an_island();
+        editor.insert_text("ab\ncd");
+        assert_eq!(
+            island(&editor),
+            vec![
+                Node::Char('a'),
+                Node::Char('b'),
+                Node::Char('c'),
+                Node::Char('d')
+            ]
         );
     }
 

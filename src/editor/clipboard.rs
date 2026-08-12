@@ -121,6 +121,13 @@ mod tests {
         assert!(pasted("x/y").is_none());
     }
 
+    /// An empty structure reads as nothing, so whether there is something to
+    /// copy cannot be decided by the text: that is the selection's business.
+    #[test]
+    fn an_empty_structure_reads_as_nothing() {
+        assert_eq!(Clip::Text(vec![vec![Item::Math(Vec::new())]]).text(), "");
+    }
+
     /// Plain characters copied out of a structure are plain characters.
     #[test]
     fn a_row_of_characters_pastes_as_characters() {

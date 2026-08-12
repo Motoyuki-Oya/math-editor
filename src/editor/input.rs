@@ -142,10 +142,11 @@ pub fn install(session: &Rc<RefCell<Session>>) {
 }
 
 fn copy_selection(session: &Rc<RefCell<Session>>, event: &web_sys::ClipboardEvent, remove: bool) {
-    let text = state::selected_text(session);
-    if text.is_empty() {
+    // Whether there is anything to copy is a question about the selection, not
+    // about the text it reads as: an empty structure reads as nothing.
+    let Some(text) = state::selected_text(session) else {
         return;
-    }
+    };
     event.prevent_default();
     if let Some(data) = event.clipboard_data() {
         data.set_data("text/plain", &text).ok();
