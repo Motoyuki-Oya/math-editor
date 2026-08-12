@@ -228,13 +228,18 @@ pub fn insert_math() {
 /// formula when the caret is in ordinary text.
 pub fn insert_node(node: Node) {
     let Some(session) = session() else { return };
-    if session.borrow().editor.inside().is_none() {
-        insert_math();
+    {
+        // Starting a formula and putting the structure in it is one step, so one
+        // undo takes the whole thing back.
+        let mut borrowed = session.borrow_mut();
+        borrowed.editor.one_step(|editor| {
+            if editor.inside().is_none() {
+                editor.insert_island();
+            }
+            editor.insert_in_island(node);
+        });
     }
-    let Some(session) = self::session() else {
-        return;
-    };
-    session.borrow_mut().editor.insert_in_island(node);
+    focus();
     changed(&session);
 }
 

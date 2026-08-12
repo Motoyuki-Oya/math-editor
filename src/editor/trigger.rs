@@ -50,28 +50,31 @@ pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
         seed => {
             {
                 let mut borrowed = session.borrow_mut();
-                borrowed.editor.replace_range(from, sel.head, "");
-            }
-            state::insert_math();
-            let Some(session) = state::session() else {
-                return true;
-            };
-            match seed {
-                Seed::Empty | Seed::Text(_) => {}
-                Seed::Typed(run, trigger) => {
-                    // One character at a time, through the same door typing uses,
-                    // so `1/` builds the same structure as it would by hand.
-                    let mut borrowed = session.borrow_mut();
-                    let mut buffer = [0u8; 4];
-                    for c in run.chars().chain(std::iter::once(trigger)) {
-                        borrowed.editor.insert_text(c.encode_utf8(&mut buffer));
+                // Taking the typed text and making a structure of it is one step
+                // of the history: undoing `1/` gives back the characters, not the
+                // empty formula they went into.
+                borrowed.editor.one_step(|editor| {
+                    editor.replace_range(from, sel.head, "");
+                    editor.insert_island();
+                    match seed {
+                        Seed::Empty | Seed::Text(_) => {}
+                        Seed::Typed(run, trigger) => {
+                            // One character at a time, through the same door
+                            // typing uses, so `1/` builds the structure it would
+                            // have built by hand.
+                            let mut buffer = [0u8; 4];
+                            for c in run.chars().chain(std::iter::once(trigger)) {
+                                editor.insert_text(c.encode_utf8(&mut buffer));
+                            }
+                        }
+                        Seed::Node(node) => {
+                            editor.insert_in_island(node);
+                        }
                     }
-                }
-                Seed::Node(node) => {
-                    session.borrow_mut().editor.insert_in_island(node);
-                }
+                });
             }
-            state::redraw(&session);
+            state::focus();
+            state::changed(session);
             true
         }
     }

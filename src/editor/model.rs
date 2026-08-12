@@ -86,6 +86,10 @@ pub struct Editor {
     past: Vec<Snapshot>,
     future: Vec<Snapshot>,
     last: Step,
+    /// Set while several edits are being made as one step of the history.
+    grouping: bool,
+    /// Set once that step has been written, so the rest join it.
+    grouped: bool,
 }
 
 const HISTORY_LIMIT: usize = 500;
@@ -99,6 +103,8 @@ impl Default for Editor {
             past: Vec::new(),
             future: Vec::new(),
             last: Step::Other,
+            grouping: false,
+            grouped: false,
         }
     }
 }
@@ -135,13 +141,28 @@ impl Editor {
         }
     }
 
+    /// Makes everything `edits` does one step of the history. Turning typed
+    /// text into a structure takes several edits, and undoing it has to give
+    /// back what was typed rather than the half-built structure in between.
+    pub fn one_step(&mut self, edits: impl FnOnce(&mut Editor)) {
+        let was_grouping = self.grouping;
+        self.grouping = true;
+        edits(self);
+        self.grouping = was_grouping;
+        if !was_grouping {
+            self.grouped = false;
+        }
+        self.last = Step::Other;
+    }
+
     fn record(&mut self, step: Step) {
-        let join = step == Step::Typing && self.last == Step::Typing;
+        let join = self.grouped || (step == Step::Typing && self.last == Step::Typing);
         self.last = step;
         self.future.clear();
         if join {
             return;
         }
+        self.grouped = self.grouping;
         self.past.push(self.snapshot());
         if self.past.len() > HISTORY_LIMIT {
             self.past.remove(0);
@@ -1203,6 +1224,28 @@ mod tests {
         );
         assert!(editor.undo());
         assert_eq!(island(&editor), vec![Node::Char('a'), Node::Char('b')]);
+    }
+
+    /// Turning typed text into a structure is one step of the history: undo
+    /// gives back the characters, not the formula they went into.
+    #[test]
+    fn a_shortcut_that_builds_a_structure_is_one_undo() {
+        let mut editor = editor("x1");
+        editor.set_caret(Pos::new(0, 2));
+        editor.one_step(|editor| {
+            editor.replace_range(Pos::new(0, 0), Pos::new(0, 2), "");
+            editor.insert_island();
+            for c in "x1/".chars() {
+                editor.insert_text(&c.to_string());
+            }
+        });
+        assert!(matches!(island(&editor).as_slice(), [Node::Stack { .. }]));
+        assert!(editor.undo());
+        assert_eq!(plain(&editor), "x1");
+        // Nothing in between: the half-built formula was never a step.
+        assert!(!editor.undo());
+        assert!(editor.redo());
+        assert!(matches!(island(&editor).as_slice(), [Node::Stack { .. }]));
     }
 
     /// A selection inside a formula can be dragged, which is the same selection
