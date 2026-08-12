@@ -715,6 +715,10 @@ impl Editor {
     /// `Ctrl+D`: selects the word at the caret, then each further press adds the
     /// next place where the same text appears.
     pub fn add_next_occurrence(&mut self) -> bool {
+        // A structure holds one caret, so there is nothing to add there.
+        if self.inside.is_some() {
+            return false;
+        }
         self.last = Step::Other;
         let primary = self.primary();
         if primary.is_caret() {
@@ -1224,6 +1228,24 @@ mod tests {
         );
         assert!(editor.undo());
         assert_eq!(island(&editor), vec![Node::Char('a'), Node::Char('b')]);
+    }
+
+    /// Inside a structure there is one caret, so Ctrl+D does nothing rather
+    /// than selecting a word of the text the caret is standing on.
+    #[test]
+    fn ctrl_d_does_nothing_inside_a_formula() {
+        let mut editor = started_in_an_island();
+        editor.insert_text("a");
+        editor.insert_text("b");
+        assert!(!editor.add_next_occurrence());
+        assert_eq!(editor.sels().len(), 1);
+        assert!(editor.inside().is_some());
+        // Typing still goes into the structure.
+        editor.insert_text("c");
+        assert_eq!(
+            island(&editor),
+            vec![Node::Char('a'), Node::Char('b'), Node::Char('c')]
+        );
     }
 
     /// Turning typed text into a structure is one step of the history: undo

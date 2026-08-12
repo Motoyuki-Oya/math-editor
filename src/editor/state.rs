@@ -356,8 +356,11 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
             (false, "Escape") => editor.escape(),
             (true, "a") => editor.select_all(),
             (true, "d") => {
-                editor.add_next_occurrence();
-                Did::Moved
+                if editor.add_next_occurrence() {
+                    Did::Moved
+                } else {
+                    Did::Nothing
+                }
             }
             // Undo, redo and the clipboard are handled once, by the window
             // shortcuts, in the text and in a structure alike.
