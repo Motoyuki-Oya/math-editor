@@ -1207,6 +1207,30 @@ mod tests {
         );
     }
 
+    /// The lower row of a fraction takes one run and hands the caret back, so
+    /// what is typed next lands beside the fraction, not underneath it.
+    #[test]
+    fn typing_on_past_a_fraction_leaves_it_behind() {
+        let mut editor = started_in_an_island();
+        for c in "1/2 + 3".chars() {
+            editor.type_in_island(c);
+        }
+        assert_eq!(
+            editor.inside().expect("inside the formula").path,
+            Vec::new()
+        );
+        let row = island(&editor);
+        assert!(matches!(row.first(), Some(Node::Stack { .. })));
+        let after: String = row[1..]
+            .iter()
+            .filter_map(|node| match node {
+                Node::Char(c) => Some(*c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(after, " + 3");
+    }
+
     /// Enter and Escape end the formula instead of splitting the line.
     #[test]
     fn enter_and_escape_leave_a_formula() {
@@ -1234,6 +1258,7 @@ mod tests {
             path: Vec::new(),
             anchor: 0,
             index: 1,
+            fills: Vec::new(),
         };
         assert!(editor.replace_in_island(at, found, "x/y"));
         editor.set_caret(at);
@@ -1352,6 +1377,7 @@ mod tests {
             path: Vec::new(),
             anchor: 0,
             index: 2,
+            fills: Vec::new(),
         }));
         assert_eq!(
             editor.island_selection(),
