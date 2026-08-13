@@ -56,6 +56,12 @@ pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
                 borrowed.editor.one_step(|editor| {
                     editor.replace_range(from, sel.head, "");
                     editor.insert_island();
+                    // A formula nobody asked for lasts as long as the structure
+                    // that called it up: `1/2 + 3` puts the fraction in a
+                    // formula and the `+ 3` back in the text.
+                    if !matches!(seed, Seed::Empty) {
+                        editor.island_lasts_one_structure();
+                    }
                     match seed {
                         Seed::Empty | Seed::Text(_) => {}
                         Seed::Typed(run, trigger) => {

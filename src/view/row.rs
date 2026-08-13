@@ -450,8 +450,8 @@ impl<'a> Renderer<'a> {
     }
 }
 
-/// How a character is set. Prose is prose; inside a formula a lone letter is a
-/// variable, so it leans, while kana and kanji read as words and stay upright.
+/// How a character is set. Letters read the same as in the text around them;
+/// the classes are for spacing — an operator gets air, a digit does not.
 fn char_class(c: char, math: bool) -> &'static str {
     if !math {
         return RUN_CLASS;

@@ -191,15 +191,28 @@ impl<'a> Editing<'a> {
     }
 
     /// Hands the caret back out of every row that was waiting for the one
-    /// thing now written into it, so writing goes on after the structure.
-    fn settle(&mut self) {
+    /// thing now written into it, so writing goes on after the structure. The
+    /// formula itself can be waiting — one that was started by typing `1/`
+    /// exists only for that fraction — and then the caret goes back to the
+    /// text, which only the caller can do.
+    #[must_use]
+    fn settle(&mut self, leave_formula: bool) -> Option<Escape> {
         while self.cursor.fills.last() == Some(&self.cursor.path.len()) {
-            self.cursor.fills.pop();
-            let Some((node, _)) = self.cursor.path.pop() else {
-                break;
-            };
-            self.caret_at(node + 1);
+            match self.cursor.path.pop() {
+                Some((node, _)) => {
+                    self.cursor.fills.pop();
+                    self.caret_at(node + 1);
+                }
+                // The formula goes on holding what is built on it, so `a/b/c`
+                // stacks; it is only over once ordinary text follows.
+                None if !leave_formula => return None,
+                None => {
+                    self.cursor.fills.pop();
+                    return Some(Escape::Right);
+                }
+            }
         }
+        None
     }
 
     /// Moving the caret is editing rather than writing on, so no row is left
@@ -241,7 +254,9 @@ impl<'a> Editing<'a> {
         true
     }
 
-    pub fn insert_char(&mut self, c: char) {
+    /// Reports an escape when the character belongs outside the formula: the
+    /// caller writes it in the text there, unwritten here.
+    pub fn insert_char(&mut self, c: char) -> Option<Escape> {
         // A row that is waiting takes the same run of characters `/` would have
         // lifted into the upper row; writing anything else carries on outside
         // the structure, so `a/b + 1` reads the way it is typed. Brackets
@@ -250,7 +265,9 @@ impl<'a> Editing<'a> {
             && !carries_on(c)
             && !(self.current_row().is_empty() && matches!(c, '(' | '['))
         {
-            self.settle();
+            if let Some(escape) = self.settle(!builds_on(c)) {
+                return Some(escape);
+            }
         }
         match c {
             '/' => self.insert_stack(Between::Rule),
@@ -261,7 +278,7 @@ impl<'a> Editing<'a> {
                 delim: Delim::from_open(c).unwrap(),
                 body: Row::new(),
             }),
-            ')' | ']' => self.leave_group(),
+            ')' | ']' => return self.leave_group(),
             // A grid grows by a column where the caret is; anywhere else `&` is
             // just a character.
             '&' => {
@@ -271,6 +288,7 @@ impl<'a> Editing<'a> {
             }
             _ => self.insert(Node::Char(c)),
         }
+        None
     }
 
     /// Typing `/` (or an arrow) puts whatever was just typed above it, the way
@@ -298,7 +316,7 @@ impl<'a> Editing<'a> {
     /// is the innermost bracket the caret is anywhere inside of: closing from a
     /// denominator inside the brackets closes them all the same, the way it
     /// would if the whole thing had been typed on one line.
-    fn leave_group(&mut self) {
+    fn leave_group(&mut self) -> Option<Escape> {
         let mut depth = self.cursor.path.len();
         while depth > 0 {
             let (node, _) = self.cursor.path[depth - 1];
@@ -309,11 +327,11 @@ impl<'a> Editing<'a> {
                 self.caret_at(node + 1);
                 // The brackets were the one thing the row outside was waiting
                 // for, so `a/(b + c) + 1` goes on outside the fraction.
-                self.settle();
-                return;
+                return self.settle(true);
             }
             depth -= 1;
         }
+        None
     }
 
     pub fn backspace(&mut self) -> Option<Escape> {
@@ -570,6 +588,13 @@ impl<'a> Editing<'a> {
 /// Whether a typed character is part of the one thing a waiting row takes:
 /// the run `/` itself would have lifted into the upper row, a command being
 /// written (`\alpha`, `√`), or a script, which binds to the run it follows.
+/// Whether a typed character builds on the structure just written instead of
+/// following it: `a/b/c` stacks, `a/b^2` gets a script. These keep the formula
+/// going where anything else ends it.
+fn builds_on(c: char) -> bool {
+    matches!(c, '/' | '^' | '_') || is_arrow(c)
+}
+
 fn carries_on(c: char) -> bool {
     c.is_alphanumeric()
         || matches!(c, '.' | '\\' | '^' | '_')
