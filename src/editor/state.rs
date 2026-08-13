@@ -24,6 +24,9 @@ pub struct Session {
     pub composing: bool,
     /// What the IME is composing right now, drawn where it will be inserted.
     pub preedit: String,
+    /// What an IME just committed. Some browsers hand the same text over a
+    /// second time in the `input` event that follows, which is not more typing.
+    pub committed: Option<String>,
     pub dragging: bool,
     /// Where the next search carries on from, which may be inside a structure.
     pub search_from: Option<search::Key>,
@@ -79,6 +82,7 @@ pub fn init(root: &HtmlElement) -> Option<usize> {
         focused: false,
         composing: false,
         preedit: String::new(),
+        committed: None,
         dragging: false,
         search_from: None,
     }));
@@ -159,11 +163,6 @@ pub fn redraw(session: &Rc<RefCell<Session>>) {
     }
 }
 
-/// Keeps the hidden input where the caret is, so IME candidates show up there.
-pub fn sync_input_box(session: &Rc<RefCell<Session>>) {
-    redraw(session);
-}
-
 pub fn focus() {
     let Some(session) = session() else { return };
     let textarea = session.borrow().textarea.clone();
@@ -177,32 +176,85 @@ pub fn focus() {
 }
 
 pub fn on_input(session: &Rc<RefCell<Session>>, event: InputEvent) {
-    let textarea = session.borrow().textarea.clone();
-    let text = textarea.value();
-    if session.borrow().composing {
-        // Still being composed; `compositionupdate` draws it until it is done.
+    // The browser knows whether an IME is composing; our own flag is only a
+    // memory of it, and a composition the IME abandons never tells us it ended.
+    if event.is_composing() {
+        session.borrow_mut().composing = true;
+        // `compositionupdate` draws it until it is done.
         event.stop_propagation();
         return;
     }
-    textarea.set_value("");
+    end_composition(session);
+    let text = take_typed(session);
     if text.is_empty() {
+        return;
+    }
+    // The same text the IME just committed, handed over once more.
+    if session.borrow_mut().committed.take().as_deref() == Some(text.as_str()) {
         return;
     }
     insert_text(session, &text);
 }
 
+/// Empties the box the typing lands in, and says what was in it.
+fn take_typed(session: &Rc<RefCell<Session>>) -> String {
+    let textarea = session.borrow().textarea.clone();
+    let text = textarea.value();
+    if !text.is_empty() {
+        textarea.set_value("");
+    }
+    text
+}
+
+/// Forgets a composition, whether it ended or was abandoned. Typing is ignored
+/// while one is going on, so a composition left behind would freeze the editor.
+pub fn end_composition(session: &Rc<RefCell<Session>>) {
+    let composing = {
+        let mut borrowed = session.borrow_mut();
+        let composing = borrowed.composing || !borrowed.preedit.is_empty();
+        borrowed.composing = false;
+        borrowed.preedit.clear();
+        composing
+    };
+    if composing {
+        redraw(session);
+    }
+}
+
+pub fn start_composition(session: &Rc<RefCell<Session>>) {
+    {
+        let mut borrowed = session.borrow_mut();
+        borrowed.composing = true;
+        borrowed.preedit.clear();
+        borrowed.committed = None;
+    }
+    redraw(session);
+}
+
 /// Shows what the IME is composing before it is committed.
 pub fn update_composition(session: &Rc<RefCell<Session>>, text: &str) {
-    session.borrow_mut().preedit = text.to_string();
+    {
+        let mut borrowed = session.borrow_mut();
+        borrowed.composing = true;
+        borrowed.preedit = text.to_string();
+    }
     redraw(session);
 }
 
 pub fn commit_composition(session: &Rc<RefCell<Session>>, text: &str) {
-    session.borrow().textarea.set_value("");
-    session.borrow_mut().preedit.clear();
-    if !text.is_empty() {
-        insert_text(session, text);
+    end_composition(session);
+    // Some IMEs hand the committed text over in the event, others only leave it
+    // in the input box; taking both makes the two look the same from here.
+    let mut typed = text.to_string();
+    let left = take_typed(session);
+    if typed.is_empty() {
+        typed = left;
     }
+    if typed.is_empty() {
+        return;
+    }
+    session.borrow_mut().committed = Some(typed.clone());
+    insert_text(session, &typed);
 }
 
 pub fn insert_text(session: &Rc<RefCell<Session>>, text: &str) {
@@ -341,9 +393,13 @@ pub fn leave_math(session: &Rc<RefCell<Session>>) {
 /// structure is the model's business, not the keyboard's, so the caret being in
 /// one changes nothing here.
 pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
-    if session.borrow().composing {
+    // Keys belong to the IME while it composes; the browser says so itself, so
+    // a composition it abandoned without telling us cannot swallow the typing.
+    if event.is_composing() {
+        session.borrow_mut().composing = true;
         return;
     }
+    end_composition(session);
     let key = event.key();
     let ctrl = event.ctrl_key() || event.meta_key();
     let shift = event.shift_key();

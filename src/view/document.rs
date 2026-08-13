@@ -68,6 +68,9 @@ impl View {
             }
         }
         self.align_columns(text);
+        // Structures are placed once the whole line is in the page, because
+        // where each one belongs is read off what is drawn around it.
+        render::align_axes(&self.lines);
         // The caret inside a structure is drawn there, and while an IME is
         // composing the underlined text stands in for the caret.
         let overlay = focused && caret.inside.is_none() && caret.composing.is_none();

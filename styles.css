@@ -295,13 +295,15 @@ body {
 
 /* ---- formulas ---- */
 
+/* The structure stands on the baseline of the line it is written in, the same
+   way a word does. */
 .mn-field {
   display: inline-block;
   font-family: var(--font-math);
   padding: 1px 3px;
   border-radius: 4px;
   outline: none;
-  vertical-align: middle;
+  vertical-align: baseline;
   white-space: nowrap;
   cursor: text;
 }
@@ -322,11 +324,21 @@ body {
   font-size: 1.15em;
 }
 
+/* A row reads left to right on one baseline, like a line of text does. What
+   stands on that baseline is the same at every depth, so a structure inside a
+   structure is placed by the same rule as one in the body text. */
 .mn-row {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 1em;
+  display: inline;
+  white-space: nowrap;
+}
+
+/* Empty, and exactly as tall as the text: it stands on the baseline of its row
+   so that the placement of the structures can be measured against it. */
+.mn-strut {
+  display: inline-block;
+  width: 0;
+  height: 1em;
+  vertical-align: baseline;
 }
 
 .mn-atom {
@@ -405,9 +417,7 @@ body {
   display: inline-flex;
   flex-direction: column;
   align-items: center;
-  vertical-align: middle;
   margin: 0 0.15em;
-  font-size: 0.98em;
 }
 
 .mn-frac-num {
@@ -456,7 +466,6 @@ body {
 .mn-sqrt {
   display: inline-flex;
   align-items: stretch;
-  vertical-align: middle;
   margin: 0 0.1em;
 }
 
@@ -474,11 +483,12 @@ body {
   overflow: visible;
 }
 
+/* The body carries the baseline of the root, so what is under the sign lines
+   up with the text around it. */
 .mn-sqrt-body {
   border-top: 1px solid currentColor;
   padding: 0.12em 0.2em 0.05em 0.1em;
-  display: inline-flex;
-  align-items: center;
+  align-self: baseline;
 }
 
 .mn-sup,
@@ -499,12 +509,12 @@ body {
 .mn-group {
   display: inline-flex;
   align-items: stretch;
-  vertical-align: middle;
 }
 
+/* What is between the delimiters keeps its own baseline; the delimiters grow
+   around it. */
 .mn-group-body {
-  display: inline-flex;
-  align-items: center;
+  align-self: baseline;
   padding: 0 0.1em;
 }
 
@@ -517,7 +527,6 @@ body {
 
 .mn-bigop {
   display: inline-flex;
-  vertical-align: middle;
   margin: 0 0.18em;
 }
 
@@ -558,7 +567,6 @@ body {
 .mn-matrix {
   display: inline-flex;
   align-items: stretch;
-  vertical-align: middle;
 }
 
 .mn-matrix-grid {
@@ -570,6 +578,5 @@ body {
 }
 
 .mn-matrix-cell {
-  display: inline-flex;
-  align-items: center;
+  display: block;
 }
