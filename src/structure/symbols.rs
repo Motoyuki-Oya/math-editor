@@ -2,7 +2,7 @@
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Class {
-    /// Variable-like, drawn in italic.
+    /// Variable-like, drawn tight against what is beside it.
     Ident,
     /// Binary operator, drawn with space on both sides.
     Bin,

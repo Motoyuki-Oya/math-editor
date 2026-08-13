@@ -181,10 +181,10 @@ impl View {
         if let Some(cursor) = caret.inside {
             if !cursor.is_caret() {
                 let (path, _) = caret.place();
-                let start = self.place_box(caret.at.line, &path, cursor.start());
-                let end = self.place_box(caret.at.line, &path, cursor.end());
-                if let (Some(start), Some(end)) = (start, end) {
-                    self.shade(doc, span_box(start, end), &origin);
+                if let Some(rect) =
+                    self.span_in_row(caret.at.line, &path, cursor.start(), Some(cursor.end()))
+                {
+                    self.shade(doc, rect, &origin);
                 }
             }
             if show_carets {
@@ -233,26 +233,36 @@ impl View {
         let mut rects = Vec::new();
         for line in start.line..=end.line {
             let from = if line == start.line { start.col } else { 0 };
-            let to = if line == end.line {
-                Some(end.col)
-            } else {
-                None
-            };
-            let Some(left) = self.place_box(line, &[], from) else {
-                continue;
-            };
-            let right = match to {
-                Some(col) => self.place_box(line, &[], col),
-                // Selecting past the end of a line shows the newline as a gap.
-                None => self.place_box(line, &[], usize::MAX).map(|mut rect| {
-                    rect.left += 6.0;
-                    rect
-                }),
-            };
-            let Some(right) = right else { continue };
-            rects.push(span_box(left, right));
+            let to = (line == end.line).then_some(end.col);
+            if let Some(rect) = self.span_in_row(line, &[], from, to) {
+                rects.push(rect);
+            }
         }
         rects
+    }
+
+    /// The rectangle a selection covers in one row. It is as tall as what it
+    /// spans, not as tall as a line: selecting a fraction shades the whole
+    /// fraction, the way selecting a word shades the whole word.
+    fn span_in_row(
+        &self,
+        line: usize,
+        path: &Path,
+        from: usize,
+        to: Option<usize>,
+    ) -> Option<Box2> {
+        let row = self.row_element(line, path)?;
+        let left = boundary(&row, from)?;
+        let right = match to {
+            Some(index) => boundary(&row, index)?,
+            // Selecting past the end of a line shows the newline as a gap.
+            None => {
+                let mut rect = boundary(&row, usize::MAX)?;
+                rect.left += 6.0;
+                rect
+            }
+        };
+        Some(span_box(&row, left, right))
     }
 
     fn caret_rect(&self, at: Pos) -> Option<Box2> {
@@ -401,12 +411,26 @@ impl Box2 {
     }
 }
 
-fn span_box(left: Box2, right: Box2) -> Box2 {
+fn span_box(row: &Element, left: Box2, right: Box2) -> Box2 {
+    let mut top = left.top.min(right.top);
+    let mut bottom = (left.top + left.height).max(right.top + right.height);
+    let children = row.children();
+    for i in 0..children.length() {
+        let Some(child) = children.item(i) else {
+            continue;
+        };
+        let rect = box_of(&child.get_bounding_client_rect());
+        let middle = rect.left + rect.width / 2.0;
+        if middle > left.left && middle < right.left {
+            top = top.min(rect.top);
+            bottom = bottom.max(rect.top + rect.height);
+        }
+    }
     Box2 {
         left: left.left,
-        top: right.top.min(left.top),
+        top,
         width: (right.left - left.left).max(1.0),
-        height: right.height.max(left.height),
+        height: bottom - top,
     }
     .fix()
 }

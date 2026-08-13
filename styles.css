@@ -298,7 +298,7 @@ body {
 /* An island stays part of the line: it is a piece of the text, so it sits on
    the same baseline as the words around it. */
 .mn-field {
-  font-family: var(--font-math);
+  font-family: var(--font-text);
   outline: none;
   white-space: nowrap;
   cursor: text;
@@ -328,12 +328,9 @@ body {
   display: inline-block;
 }
 
-.mn-ident {
-  font-style: italic;
-  padding: 0 0.02em;
-}
-
-/* Letters of other scripts (kana, kanji) read as words, so they stay upright. */
+/* Letters read the same in a formula as in the text around it: the same face,
+   upright. Only the shape of a structure says it is one. */
+.mn-ident,
 .mn-word {
   font-family: var(--font-text);
   padding: 0 0.02em;

@@ -521,15 +521,34 @@ impl Editor {
     }
 
     fn type_in_island(&mut self, c: char) -> bool {
-        self.in_island(Inside::Type, |editing| {
+        let mut left = false;
+        let done = self.in_island(Inside::Type, |editing| {
             // A space finishes a name that was typed as a command; the shortcuts
             // belong to the structure, not to the keyboard handler.
             if c == ' ' && editing.commit_command() {
                 return None;
             }
-            editing.insert_char(c);
-            None
-        })
+            let escape = editing.insert_char(c);
+            left = escape.is_some();
+            escape
+        });
+        // A formula that was started by typing `1/` is over once the fraction
+        // is written, so what comes after it is text again and is written
+        // there, not inside the formula.
+        if done && left {
+            let mut buffer = [0u8; 4];
+            self.insert_text(c.encode_utf8(&mut buffer));
+        }
+        done
+    }
+
+    /// Marks the formula as lasting only until the structure being typed is
+    /// written, which is what a formula started by a trigger such as `1/` is
+    /// for. Anything typed after it goes back into the text.
+    pub fn island_lasts_one_structure(&mut self) {
+        if let Some(cursor) = self.inside.as_mut() {
+            cursor.fills.insert(0, 0);
+        }
     }
 
     /// Leaves an island the caret walked out of, taking an empty one with it:
@@ -1229,6 +1248,22 @@ mod tests {
             })
             .collect();
         assert_eq!(after, " + 3");
+    }
+
+    /// A formula that a trigger put there holds the structure that called it
+    /// up and nothing more: what is typed after it is text again.
+    #[test]
+    fn a_formula_a_trigger_made_ends_with_its_structure() {
+        let mut editor = started_in_an_island();
+        editor.island_lasts_one_structure();
+        for c in "1/2 + 3".chars() {
+            editor.insert_text(&c.to_string());
+        }
+        assert!(editor.inside().is_none());
+        editor.set_caret(Pos::new(0, 1));
+        assert_eq!(island(&editor).len(), 1);
+        assert!(matches!(island(&editor).first(), Some(Node::Stack { .. })));
+        assert_eq!(plain(&editor), "a\u{fffc} + 3");
     }
 
     /// Enter and Escape end the formula instead of splitting the line.
