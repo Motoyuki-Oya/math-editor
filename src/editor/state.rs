@@ -12,7 +12,7 @@ use super::search::{self, Place, SearchOptions};
 use super::trigger;
 use crate::format::document;
 use crate::structure::ast::Node;
-use crate::view::document::{Caret, View};
+use crate::view::document::{Caret, Hit, View};
 
 pub struct Session {
     /// Names the pane this document is shown in.
@@ -393,24 +393,28 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
     event.prevent_default();
 }
 
+/// Where a point in the view is, at whatever depth: the same question is asked
+/// of the text and of a structure, and one answer covers both.
+fn hit_at(session: &Rc<RefCell<Session>>, x: f64, y: f64) -> Hit {
+    let borrowed = session.borrow();
+    borrowed.view.hit(borrowed.editor.text(), x, y)
+}
+
 /// Puts the caret, or the far end of the selection, where a click landed inside
 /// a formula. Returns whether the click was in one.
-fn click_in_math(session: &Rc<RefCell<Session>>, x: f64, y: f64, extend: bool) -> bool {
-    let Some((at, element)) = session.borrow().view.field_at_point(x, y) else {
-        return false;
-    };
-    let Some(cursor) = crate::view::structure::position_at_point(&element, x, y) else {
+fn click_in_math(session: &Rc<RefCell<Session>>, hit: &Hit, extend: bool) -> bool {
+    let Hit::Inside(at, cursor) = hit else {
         return false;
     };
     let mut borrowed = session.borrow_mut();
     if !extend {
-        return borrowed.editor.enter_island_at(at, &cursor);
+        return borrowed.editor.enter_island_at(*at, cursor);
     }
     // Widening a selection only stays inside the formula it started in.
-    if borrowed.editor.inside().is_none() || borrowed.editor.primary().head != at {
+    if borrowed.editor.inside().is_none() || borrowed.editor.primary().head != *at {
         return false;
     }
-    borrowed.editor.extend_in_island(&cursor)
+    borrowed.editor.extend_in_island(cursor)
 }
 
 pub fn on_mousedown(session: &Rc<RefCell<Session>>, event: MouseEvent) {
@@ -419,7 +423,8 @@ pub fn on_mousedown(session: &Rc<RefCell<Session>>, event: MouseEvent) {
     }
     event.prevent_default();
     let (x, y) = (event.client_x() as f64, event.client_y() as f64);
-    if !input::adds_caret(&event) && click_in_math(session, x, y, event.shift_key()) {
+    let hit = hit_at(session, x, y);
+    if !input::adds_caret(&event) && click_in_math(session, &hit, event.shift_key()) {
         session.borrow_mut().dragging = true;
         focus();
         redraw(session);
@@ -453,7 +458,8 @@ pub fn on_mousemove(session: &Rc<RefCell<Session>>, event: MouseEvent) {
     if session.borrow().editor.inside().is_some() {
         // Dragging inside a formula selects inside it; dragging out of it takes
         // the formula as a whole, which is one item of the text.
-        if !click_in_math(session, x, y, true) {
+        let hit = hit_at(session, x, y);
+        if !click_in_math(session, &hit, true) {
             session.borrow_mut().editor.select_island();
         }
         redraw(session);
