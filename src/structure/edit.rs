@@ -247,20 +247,21 @@ impl<'a> Editing<'a> {
         self.caret_at(0);
     }
 
-    /// Closing a delimiter moves the caret just past the group it closes.
+    /// Closing a delimiter moves the caret just past the group it closes, which
+    /// is the innermost bracket the caret is anywhere inside of: closing from a
+    /// denominator inside the brackets closes them all the same, the way it
+    /// would if the whole thing had been typed on one line.
     fn leave_group(&mut self) {
-        let closes_group = self
-            .cursor
-            .path
-            .last()
-            .and_then(|&(node, _)| {
-                let parent = &self.cursor.path[..self.cursor.path.len() - 1];
-                self.node_at(parent, node)
-            })
-            .is_some_and(|node| matches!(node, Node::Group { .. }));
-        if closes_group {
-            let (node, _) = self.cursor.path.pop().unwrap();
-            self.caret_at(node + 1);
+        let mut depth = self.cursor.path.len();
+        while depth > 0 {
+            let (node, _) = self.cursor.path[depth - 1];
+            let parent = &self.cursor.path[..depth - 1];
+            if matches!(self.node_at(parent, node), Some(Node::Group { .. })) {
+                self.cursor.path.truncate(depth - 1);
+                self.caret_at(node + 1);
+                return;
+            }
+            depth -= 1;
         }
     }
 
@@ -622,6 +623,21 @@ mod tests {
         island.type_in("1+ab/");
         island.type_in("2c");
         assert_eq!(island.to_notation(), "1+$(ab/2c)");
+    }
+
+    #[test]
+    fn a_closing_bracket_leaves_the_brackets_from_inside_a_fraction() {
+        let mut island = Island::new();
+        island.type_in("1/(2/3)+4");
+        // `+4` follows the fraction instead of falling into its lower row.
+        assert_eq!(island.to_notation(), "1/($(2/3))+4");
+    }
+
+    #[test]
+    fn a_closing_bracket_with_no_brackets_open_changes_nothing() {
+        let mut island = Island::new();
+        island.type_in("a)b");
+        assert_eq!(island.to_notation(), "ab");
     }
 
     #[test]
