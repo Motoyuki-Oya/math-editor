@@ -8,6 +8,15 @@ use crate::structure::ast::{Between, Cursor, Delim, MatrixKind, Node, Row};
 use crate::structure::symbols::{self, Class};
 
 const SVG_NS: &str = "http://www.w3.org/2000/svg";
+/// How far above the baseline the line a formula is built around sits, in em.
+/// A fraction's rule, a grid's middle and a big operator all rest on it.
+const AXIS: f64 = 0.26;
+/// Marks the part of a structure that has to end up on the axis of the row
+/// around it. Which part that is belongs to the structure, and the alignment
+/// pass then treats every structure the same way at every depth.
+const AXIS_ATTR: &str = "data-axis";
+const STRUT_CLASS: &str = "mn-strut";
+const ROW_CLASS: &str = "mn-row";
 
 /// Where the caret would land if the user clicked an element: the row it lives
 /// in, and its offset in that row.
@@ -105,7 +114,10 @@ impl<'a> Renderer<'a> {
 
     /// Renders one row; `path` is the address of the row inside the formula.
     pub fn row(&self, row: &Row, path: &[(usize, usize)]) -> Element {
-        let container = self.el("span", "mn-row");
+        let container = self.el("span", ROW_CLASS);
+        // An empty box that stands on the baseline of the row, so the alignment
+        // pass can see where that baseline is.
+        container.append_child(&self.el("span", STRUT_CLASS)).ok();
         let here = self.cursor.filter(|cursor| cursor.path == path);
         let caret_here = here.filter(|cursor| cursor.is_caret()).map(|c| c.index);
         let selected = here.filter(|cursor| !cursor.is_caret());
@@ -136,7 +148,8 @@ impl<'a> Renderer<'a> {
             }
             container.append_child(&element).ok();
         }
-        if caret_here == Some(row.len()) {
+        // An empty row already drew the caret inside its placeholder.
+        if !row.is_empty() && caret_here == Some(row.len()) {
             container.append_child(&self.caret()).ok();
         }
         container
@@ -193,10 +206,16 @@ impl<'a> Renderer<'a> {
                 frac.append_child(&num).ok();
                 match between {
                     // The rule is its own element so that it spans the wider row.
-                    Between::Rule => frac.append_child(&self.el("span", "mn-frac-rule")).ok(),
-                    Between::Arrow(arrow) => frac.append_child(&self.arrow(*arrow)).ok(),
+                    Between::Rule => Some(self.el("span", "mn-frac-rule")),
+                    Between::Arrow(arrow) => Some(self.arrow(*arrow)),
                     Between::Nothing => None,
-                };
+                }
+                .map(|between| {
+                    // What goes between the rows is what the rows are read
+                    // around, so that is what sits on the axis.
+                    between.set_attribute(AXIS_ATTR, "").ok();
+                    frac.append_child(&between).ok()
+                });
                 frac.append_child(&den).ok();
                 frac
             }
@@ -264,8 +283,10 @@ impl<'a> Renderer<'a> {
                 } else {
                     "mn-bigop-symbol"
                 };
+                let symbol = self.span(symbol_class, glyph);
+                symbol.set_attribute(AXIS_ATTR, "").ok();
                 container.append_child(&upper_el).ok();
-                container.append_child(&self.span(symbol_class, glyph)).ok();
+                container.append_child(&symbol).ok();
                 container.append_child(&lower_el).ok();
                 container
             }
@@ -303,6 +324,7 @@ impl<'a> Renderer<'a> {
                         grid.append_child(&cell).ok();
                     }
                 }
+                grid.set_attribute(AXIS_ATTR, "").ok();
                 container.append_child(&grid).ok();
                 if matches!(kind, MatrixKind::Grid) {
                     container
@@ -387,6 +409,90 @@ pub fn render_into(host: &Element, row: &Row, cursor: Option<&Cursor>, preedit: 
     let renderer = Renderer::new(&doc, cursor).with_preedit(preedit);
     let rendered = renderer.row(row, &[]);
     host.append_child(&rendered).ok();
+}
+
+/// Puts every structure on the axis of the row around it.
+///
+/// One rule, applied at every depth: the part a structure is read around (a
+/// fraction's rule, a grid's middle, a big operator) has to sit on the axis of
+/// the row it stands in, which is a fixed distance above that row's baseline.
+/// The innermost structures are placed first, so that by the time a structure
+/// is placed, everything it contains has already settled.
+pub fn align_axes(host: &Element) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Ok(marks) = host.query_selector_all(&format!("[{AXIS_ATTR}]")) else {
+        return;
+    };
+    let mut marked: Vec<(usize, Element)> = Vec::new();
+    for i in 0..marks.length() {
+        let Some(mark) = marks
+            .item(i)
+            .and_then(|node| node.dyn_into::<Element>().ok())
+        else {
+            continue;
+        };
+        marked.push((depth_of(&mark), mark));
+    }
+    marked.sort_by_key(|(depth, _)| std::cmp::Reverse(*depth));
+    for (_, mark) in marked {
+        let Some(structure) = mark.parent_element() else {
+            continue;
+        };
+        let Some(row) = structure.parent_element().and_then(|parent| {
+            parent
+                .closest(&format!(".{ROW_CLASS}"))
+                .ok()
+                .flatten()
+                .and_then(|row| row.dyn_into::<Element>().ok())
+        }) else {
+            continue;
+        };
+        let Some(baseline) = baseline_of(&row) else {
+            continue;
+        };
+        let axis = baseline - AXIS * font_size(&window, &row);
+        let rect = mark.get_bounding_client_rect();
+        let middle = rect.top() + rect.height() / 2.0;
+        // A positive length raises the box, and the mark is below the axis by
+        // exactly as much as the box has to come up.
+        let raise = middle - axis;
+        if raise.abs() > 0.05 {
+            structure
+                .set_attribute("style", &format!("vertical-align:{raise:.2}px"))
+                .ok();
+        }
+    }
+}
+
+/// Where the baseline of a row is, read off the empty box standing on it.
+fn baseline_of(row: &Element) -> Option<f64> {
+    let strut = row.first_element_child()?;
+    strut
+        .class_list()
+        .contains(STRUT_CLASS)
+        .then(|| strut.get_bounding_client_rect().bottom())
+}
+
+fn font_size(window: &web_sys::Window, element: &Element) -> f64 {
+    window
+        .get_computed_style(element)
+        .ok()
+        .flatten()
+        .and_then(|style| style.get_property_value("font-size").ok())
+        .and_then(|size| size.trim_end_matches("px").parse::<f64>().ok())
+        .unwrap_or(16.0)
+}
+
+fn depth_of(element: &Element) -> usize {
+    let mut depth = 0;
+    let mut node = element.parent_element();
+    while let Some(parent) = node {
+        depth += 1;
+        node = parent.parent_element();
+    }
+    depth
 }
 
 /// Finds the caret position closest to a click inside a rendered formula.

@@ -53,9 +53,7 @@ pub fn install(session: &Rc<RefCell<Session>>) {
         "compositionstart",
         session,
         |session, _: CompositionEvent| {
-            session.borrow_mut().composing = true;
-            session.borrow_mut().preedit.clear();
-            state::sync_input_box(session);
+            state::start_composition(session);
         },
     );
     on(
@@ -71,9 +69,7 @@ pub fn install(session: &Rc<RefCell<Session>>) {
         "compositionend",
         session,
         |session, event: CompositionEvent| {
-            session.borrow_mut().composing = false;
-            let text = event.data().unwrap_or_default();
-            state::commit_composition(session, &text);
+            state::commit_composition(session, &event.data().unwrap_or_default());
         },
     );
     on(
@@ -82,6 +78,8 @@ pub fn install(session: &Rc<RefCell<Session>>) {
         session,
         |session, _: web_sys::FocusEvent| {
             session.borrow_mut().focused = false;
+            // Whatever an IME was composing is gone with the focus.
+            state::end_composition(session);
             state::redraw(session);
         },
     );
