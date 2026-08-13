@@ -205,6 +205,12 @@ pub struct Cursor {
     pub path: Vec<(usize, usize)>,
     pub index: usize,
     pub anchor: usize,
+    /// Depths of the rows that are waiting for the one thing written into
+    /// them. Typing `/` opens a lower row that takes the next thing written
+    /// and then hands the caret back, so `a/b + 1` reads the way it is typed;
+    /// a longer lower row is bracketed, as in `a/(b + 1)`. Moving the caret
+    /// ends the wait, because from then on the user is editing, not writing on.
+    pub fills: Vec<usize>,
 }
 
 impl Cursor {
@@ -213,6 +219,7 @@ impl Cursor {
             path: Vec::new(),
             index,
             anchor: index,
+            fills: Vec::new(),
         }
     }
 

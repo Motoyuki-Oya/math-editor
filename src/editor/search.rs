@@ -119,6 +119,7 @@ fn search_row(
                     path: path.clone(),
                     anchor: start + from,
                     index: start + to,
+                    fills: Vec::new(),
                 },
                 groups,
             );
@@ -390,6 +391,7 @@ mod tests {
                 path: vec![(0, 0)],
                 anchor: 0,
                 index: 1,
+                fills: Vec::new(),
             },
         };
         let mut places = vec![deep.clone(), text.clone(), shallow.clone()];

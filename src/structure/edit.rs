@@ -65,6 +65,7 @@ impl<'a> Editing<'a> {
     /// Grows the selection by one place, or takes the whole structure the
     /// selection sits in once it reaches the end of its row.
     pub fn extend(&mut self, forward: bool) -> Option<Escape> {
+        self.stop_waiting();
         let index = self.cursor.index;
         let target = if forward {
             (index < self.current_row().len()).then_some(index + 1)
@@ -84,6 +85,7 @@ impl<'a> Editing<'a> {
     /// A place in another row is not part of the same selection, so it is left
     /// alone rather than guessed at.
     pub fn extend_to(&mut self, to: &Cursor) {
+        self.stop_waiting();
         if to.path != self.cursor.path {
             return;
         }
@@ -110,6 +112,7 @@ impl<'a> Editing<'a> {
 
     /// Selects the whole row the caret is in, for Select All.
     pub fn select_row(&mut self) {
+        self.stop_waiting();
         self.cursor.anchor = 0;
         self.cursor.index = self.current_row().len();
     }
@@ -149,6 +152,7 @@ impl<'a> Editing<'a> {
 
     /// Puts a whole row of structures in at the caret, for a paste.
     pub fn insert_row(&mut self, nodes: Row) {
+        self.stop_waiting();
         self.take_selection();
         let index = self.cursor.index;
         let count = nodes.len();
@@ -161,15 +165,47 @@ impl<'a> Editing<'a> {
 
     fn place(&mut self, node: Node) {
         self.take_selection();
+        let waits = waits_for_one(&node);
         let enter = node.slot_count() > 0;
         let index = self.cursor.index;
         self.current_row_mut().insert(index, node);
         if enter {
             self.cursor.path.push((index, 0));
             self.caret_at(0);
+            if waits {
+                self.wait_for_one();
+            }
         } else {
             self.caret_at(self.cursor.index + 1);
         }
+    }
+
+    /// Whether the row the caret is in is waiting for the one thing it takes.
+    fn waiting(&self) -> bool {
+        self.cursor.fills.last() == Some(&self.cursor.path.len())
+    }
+
+    /// Marks the row the caret just entered as taking one thing only.
+    fn wait_for_one(&mut self) {
+        self.cursor.fills.push(self.cursor.path.len());
+    }
+
+    /// Hands the caret back out of every row that was waiting for the one
+    /// thing now written into it, so writing goes on after the structure.
+    fn settle(&mut self) {
+        while self.cursor.fills.last() == Some(&self.cursor.path.len()) {
+            self.cursor.fills.pop();
+            let Some((node, _)) = self.cursor.path.pop() else {
+                break;
+            };
+            self.caret_at(node + 1);
+        }
+    }
+
+    /// Moving the caret is editing rather than writing on, so no row is left
+    /// waiting for its one thing.
+    fn stop_waiting(&mut self) {
+        self.cursor.fills.clear();
     }
 
     /// Turns a just-typed `\name` (or a typed glyph such as `√`) into the
@@ -206,6 +242,16 @@ impl<'a> Editing<'a> {
     }
 
     pub fn insert_char(&mut self, c: char) {
+        // A row that is waiting takes the same run of characters `/` would have
+        // lifted into the upper row; writing anything else carries on outside
+        // the structure, so `a/b + 1` reads the way it is typed. Brackets
+        // opened straight away are that one thing instead: `a/(b + 1)`.
+        if self.waiting()
+            && !carries_on(c)
+            && !(self.current_row().is_empty() && matches!(c, '(' | '['))
+        {
+            self.settle();
+        }
         match c {
             '/' => self.insert_stack(Between::Rule),
             c if is_arrow(c) => self.insert_stack(Between::Arrow(c)),
@@ -245,6 +291,7 @@ impl<'a> Editing<'a> {
         self.current_row_mut().insert(start, node);
         self.cursor.path.push((start, 1));
         self.caret_at(0);
+        self.wait_for_one();
     }
 
     /// Closing a delimiter moves the caret just past the group it closes, which
@@ -258,7 +305,11 @@ impl<'a> Editing<'a> {
             let parent = &self.cursor.path[..depth - 1];
             if matches!(self.node_at(parent, node), Some(Node::Group { .. })) {
                 self.cursor.path.truncate(depth - 1);
+                self.cursor.fills.retain(|&at| at <= self.cursor.path.len());
                 self.caret_at(node + 1);
+                // The brackets were the one thing the row outside was waiting
+                // for, so `a/(b + c) + 1` goes on outside the fraction.
+                self.settle();
                 return;
             }
             depth -= 1;
@@ -266,6 +317,7 @@ impl<'a> Editing<'a> {
     }
 
     pub fn backspace(&mut self) -> Option<Escape> {
+        self.stop_waiting();
         if self.take_selection() {
             return None;
         }
@@ -314,6 +366,7 @@ impl<'a> Editing<'a> {
     }
 
     pub fn delete_forward(&mut self) {
+        self.stop_waiting();
         if self.take_selection() {
             return;
         }
@@ -325,6 +378,7 @@ impl<'a> Editing<'a> {
     }
 
     pub fn move_left(&mut self) -> Option<Escape> {
+        self.stop_waiting();
         // Moving off a selection just puts the caret at its edge.
         if self.collapse(false) {
             return None;
@@ -363,6 +417,7 @@ impl<'a> Editing<'a> {
     }
 
     pub fn move_right(&mut self) -> Option<Escape> {
+        self.stop_waiting();
         if self.collapse(true) {
             return None;
         }
@@ -409,6 +464,7 @@ impl<'a> Editing<'a> {
     /// the current one: numerator vs denominator, upper vs lower limit, or the
     /// neighbouring row of a matrix.
     fn move_vertically(&mut self, up: bool) -> bool {
+        self.stop_waiting();
         self.collapse(!up);
         for depth in (0..self.cursor.path.len()).rev() {
             let (node_index, slot) = self.cursor.path[depth];
@@ -455,10 +511,12 @@ impl<'a> Editing<'a> {
     }
 
     pub fn move_home(&mut self) {
+        self.stop_waiting();
         self.caret_at(0);
     }
 
     pub fn move_end(&mut self) {
+        self.stop_waiting();
         self.caret_at(self.current_row().len());
     }
 
@@ -507,6 +565,26 @@ impl<'a> Editing<'a> {
         }
         false
     }
+}
+
+/// Whether a typed character is part of the one thing a waiting row takes:
+/// the run `/` itself would have lifted into the upper row, a command being
+/// written (`\alpha`, `√`), or a script, which binds to the run it follows.
+fn carries_on(c: char) -> bool {
+    c.is_alphanumeric()
+        || matches!(c, '.' | '\\' | '^' | '_')
+        || commands::node_for_glyph(c).is_some()
+}
+
+/// Whether the row this structure opens takes one thing and then hands the
+/// caret back. These are the structures a one-dimensional reading writes
+/// without brackets — `√2 + 1`, `x^2 + 1` — so writing them has to end the
+/// same way. Anything longer is bracketed: `√(a + b)`.
+fn waits_for_one(node: &Node) -> bool {
+    matches!(
+        node,
+        Node::Sqrt { index: None, .. } | Node::Sup(_) | Node::Sub(_)
+    )
 }
 
 /// Finds where the implicit upper row starts when `/` is typed: the run of
@@ -630,7 +708,60 @@ mod tests {
         let mut island = Island::new();
         island.type_in("1/(2/3)+4");
         // `+4` follows the fraction instead of falling into its lower row.
-        assert_eq!(island.to_notation(), "1/($(2/3))+4");
+        assert_eq!(island.to_notation(), "$(1/($(2/3)))+4");
+    }
+
+    /// The lower row takes the run `/` itself would have lifted up, and hands
+    /// the caret back, so what is typed reads the way it is written on a line.
+    #[test]
+    fn a_lower_row_takes_one_run_and_then_hands_the_caret_back() {
+        let mut island = Island::new();
+        island.type_in("a/b + 1");
+        assert_eq!(island.to_notation(), "$(a/b) + 1");
+    }
+
+    #[test]
+    fn a_longer_lower_row_is_written_in_brackets() {
+        let mut island = Island::new();
+        island.type_in("a/(b + c) + 1");
+        assert_eq!(island.to_notation(), "$(a/(b + c)) + 1");
+    }
+
+    #[test]
+    fn a_digit_run_stays_in_the_lower_row() {
+        let mut island = Island::new();
+        island.type_in("1/12+3");
+        assert_eq!(island.to_notation(), "$(1/12)+3");
+    }
+
+    #[test]
+    fn brackets_after_the_lower_row_are_not_part_of_it() {
+        let mut island = Island::new();
+        island.type_in("c/d(e/f) +g");
+        assert_eq!(island.to_notation(), "$(c/d)($(e/f)) +g");
+    }
+
+    #[test]
+    fn a_second_slash_stacks_on_the_first_fraction() {
+        let mut island = Island::new();
+        island.type_in("a/b/c");
+        assert_eq!(island.to_notation(), "$(a/b)/c");
+    }
+
+    #[test]
+    fn a_root_takes_one_run_the_same_way() {
+        let mut island = Island::new();
+        island.type_in("√");
+        assert!(island.edit().commit_command());
+        island.type_in("2 + 1");
+        assert_eq!(island.to_notation(), "$(√ 2) + 1");
+    }
+
+    #[test]
+    fn a_script_belongs_to_the_run_it_follows() {
+        let mut island = Island::new();
+        island.type_in("a/b^2 + 1");
+        assert_eq!(island.to_notation(), "$(a/b$(^ 2)) + 1");
     }
 
     #[test]

@@ -314,6 +314,7 @@ impl View {
                     path: rest.to_vec(),
                     index,
                     anchor: index,
+                    fills: Vec::new(),
                 },
             ),
         }
