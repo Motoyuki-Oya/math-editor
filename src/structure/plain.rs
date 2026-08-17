@@ -6,7 +6,7 @@
 //! is free to be plain and short, and it stays out of the notation's way.
 
 use super::ast::{Between, MatrixKind, Node, Row};
-use super::commands;
+use super::vocabulary;
 use super::text::Item;
 
 /// The lines of a range of the text, one string per line.
@@ -46,7 +46,7 @@ fn node(node: &Node) -> String {
     match node {
         Node::Char(c) => c.to_string(),
         // A name stands for a character wherever there is one for it.
-        Node::Sym(name) => commands::glyph_for(name)
+        Node::Sym(name) => vocabulary::glyph_for(name)
             .unwrap_or(name.as_str())
             .to_string(),
         Node::Func(name) => name.clone(),
@@ -73,7 +73,7 @@ fn node(node: &Node) -> String {
             format!("{open}{}{close}", row(body))
         }
         Node::Limits { sym, lower, upper } => {
-            let sym = commands::glyph_for(sym).unwrap_or(sym.as_str());
+            let sym = vocabulary::glyph_for(sym).unwrap_or(sym.as_str());
             let mut out = sym.to_string();
             if !lower.is_empty() {
                 out.push('_');

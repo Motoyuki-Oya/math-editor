@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use super::session::{self, Session};
 use crate::structure::ast::Node as MathNode;
-use crate::structure::commands;
+use crate::structure::vocabulary;
 use crate::structure::text::Pos;
 
 enum Seed {
@@ -131,10 +131,10 @@ fn trailing_run(text: &str) -> String {
 /// character stay text.
 fn trailing_shortcut(text: &str) -> Option<(usize, Seed)> {
     if let Some(name) = trailing_command(text) {
-        if let Some(node) = commands::node_for(&name) {
+        if let Some(node) = vocabulary::node_for(&name) {
             let consumed = name.chars().count() + 1;
             let seed = match node {
-                MathNode::Sym(name) => Seed::Text(commands::glyph_for(&name)?.to_string()),
+                MathNode::Sym(name) => Seed::Text(vocabulary::glyph_for(&name)?.to_string()),
                 MathNode::Func(name) => Seed::Text(name),
                 node => Seed::Node(node),
             };
@@ -142,7 +142,7 @@ fn trailing_shortcut(text: &str) -> Option<(usize, Seed)> {
         }
     }
     let glyph = text.chars().next_back()?;
-    let node = commands::node_for_glyph(glyph)?;
+    let node = vocabulary::node_for_glyph(glyph)?;
     Some((1, Seed::Node(node)))
 }
 
