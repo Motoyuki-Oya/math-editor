@@ -107,6 +107,11 @@ pub fn install(session: &Rc<RefCell<Session>>) {
     on(&root, "dblclick", session, |session, event: MouseEvent| {
         mouse::on_dblclick(session, event);
     });
+    // Only the lines that can be seen are in the page, so scrolling has to draw
+    // the ones that came into sight.
+    on(&root, "scroll", session, |session, _: web_sys::Event| {
+        session::scrolled(session);
+    });
     if let Some(window) = web_sys::window() {
         let target: web_sys::EventTarget = window.into();
         on(&target, "mouseup", session, |session, _: MouseEvent| {

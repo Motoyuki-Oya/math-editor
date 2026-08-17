@@ -10,5 +10,6 @@
 //! caret can be placed and a click understood.
 
 pub mod document;
+mod heights;
 pub mod measure;
 pub mod row;

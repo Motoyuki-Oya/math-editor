@@ -134,12 +134,7 @@ pub fn changed(session: &Rc<RefCell<Session>>) {
 
 pub fn redraw(session: &Rc<RefCell<Session>>) {
     let session = session.borrow();
-    // One caret describes both cases, so the drawing has no mode to pick.
-    let caret = Caret {
-        at: session.editor.primary().head,
-        inside: session.editor.inside(),
-        composing: (!session.preedit.is_empty()).then_some(session.preedit.as_str()),
-    };
+    let caret = caret_of(&session);
     session.view.draw(
         session.editor.text(),
         session.editor.sels(),
@@ -157,7 +152,29 @@ pub fn redraw(session: &Rc<RefCell<Session>>) {
     }
 }
 
-/// Keeps the hidden input where the caret is, so IME candidates show up there.
+/// Draws again after the view was scrolled, so the lines that came into sight
+/// are put in the page. Unlike [`redraw`] this leaves the view where the user
+/// scrolled it to and does not move it to the caret.
+pub fn scrolled(session: &Rc<RefCell<Session>>) {
+    let session = session.borrow();
+    let caret = caret_of(&session);
+    session.view.repaint(
+        session.editor.text(),
+        session.editor.sels(),
+        &caret,
+        session.focused,
+    );
+}
+
+/// One caret describes both cases, so the drawing has no mode to pick.
+fn caret_of(session: &Session) -> Caret<'_> {
+    Caret {
+        at: session.editor.primary().head,
+        inside: session.editor.inside(),
+        composing: (!session.preedit.is_empty()).then_some(session.preedit.as_str()),
+    }
+}
+
 /// Redraws every pane, for when something that shapes all of them (the
 /// settings) has changed.
 pub fn redraw_all() {
