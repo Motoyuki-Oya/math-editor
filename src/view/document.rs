@@ -126,34 +126,104 @@ impl View {
         focused: bool,
         follow_caret: bool,
     ) {
-        let Some(doc) = self.lines.owner_document() else {
-            return;
-        };
         self.heights.borrow_mut().fit(text.line_count());
         // Where the view is going to be: at the caret when something changed,
         // and where the user left it when they scrolled.
-        let scroll = match follow_caret {
+        let mut scroll = match follow_caret {
             true => self.scroll_for(caret.at.line, text.line_count()),
             false => self.root.scroll_top() as f64,
         };
-        let window = self.widen_for_blocks(text, self.window(scroll, text.line_count()));
-        // Scrolling within the margin shows lines that are already there, so
-        // there is nothing to draw.
-        if !follow_caret && window == *self.drawn.borrow() {
+        // Whether the caret's line can be seen right now. A draw that follows
+        // the caret has to end with it in sight; a draw that does not must at
+        // least not lose sight of it, which measuring the lines anew can do at
+        // the end of the document, where the scroll cannot move as far as the
+        // lines it has to make room for.
+        let mut keep = follow_caret;
+        if !follow_caret {
+            let window = self.widen_for_blocks(text, self.window(scroll, text.line_count()));
+            // Scrolling within the margin shows lines that are already there,
+            // so there is nothing to draw.
+            if window == *self.drawn.borrow() {
+                return;
+            }
+            keep = (self.scroll_onto(caret.at.line, scroll) - scroll).abs() <= 0.5;
+        }
+        scroll = self.render(text, sels, caret, focused, scroll);
+        if !keep {
             return;
         }
+        // The scroll above was worked out from heights that were still guesses
+        // for the lines it was about to draw, so the caret's line can end up
+        // somewhere else than the guess put it. Where the view ends up is
+        // therefore settled against the lines as they were drawn, until it
+        // stops moving: a guess is never what the user is left looking at.
+        for _ in 0..3 {
+            let settled = self.scroll_onto(caret.at.line, scroll);
+            if (settled - scroll).abs() <= 0.5 {
+                return;
+            }
+            scroll = self.render(text, sels, caret, focused, settled);
+        }
+    }
+
+    /// The scroll that shows a line whole, or `scroll` if the line is in sight
+    /// there already. The line as drawn is what is measured, so a guess about
+    /// the lines above it cannot move the answer. A line brought into sight is
+    /// brought a line further than it needs, because a line flush with the edge
+    /// of the view reads as one that is not there; at the end of the document
+    /// the browser trims the extra, where the padding leaves room anyway.
+    fn scroll_onto(&self, line: usize, scroll: f64) -> f64 {
+        let view = self.root.client_height() as f64;
+        let Some(holder) = self.line_element(line) else {
+            // The line the view is being moved for is not even drawn, so the
+            // heights that chose the range were wrong about it. Aim at it once
+            // more from what has been measured since.
+            return (self.heights.borrow().top_of(line) - view / 3.0).max(0.0);
+        };
+        let rect = measure::box_of(&holder.get_bounding_client_rect());
+        let root = measure::box_of(&self.root.get_bounding_client_rect());
+        // What is on screen, said in the scroll's own measure.
+        let top = rect.top - root.top + scroll;
+        let bottom = top + rect.height;
+        if top < scroll {
+            (top - rect.height).max(0.0)
+        } else if bottom > scroll + view {
+            bottom + rect.height - view
+        } else {
+            scroll
+        }
+    }
+
+    /// Puts the lines for `scroll` in the page and leaves the view there,
+    /// giving back where it actually ended up.
+    fn render(
+        &self,
+        text: &Text,
+        sels: &[Sel],
+        caret: &Caret<'_>,
+        focused: bool,
+        scroll: f64,
+    ) -> f64 {
+        let Some(doc) = self.lines.owner_document() else {
+            return self.root.scroll_top() as f64;
+        };
+        let window = self.widen_for_blocks(text, self.window(scroll, text.line_count()));
         // Text an IME is composing belongs at the caret, whichever row that is
         // in: the component that draws the row puts it there.
         let (path, index) = caret.place();
         let preedit = caret.composing.map(|text| Preedit { path, index, text });
         self.lines.set_inner_html("");
         let above = element(&doc, "div", GAP_CLASS);
+        // What the lines above the drawn ones were taken to be worth. Measuring
+        // changes it, and the drawn lines move by the difference, so the scroll
+        // has to move with them.
+        let guessed = self.heights.borrow().span(0..window.start);
         if let Some(gap) = &above {
             // The gaps are given their height before they are in the page: a
             // page that is briefly shorter than the document is a page the
             // browser trims the scroll of, which would stop the view from
             // going any further down.
-            set_height(gap, self.heights.borrow().span(0..window.start));
+            set_height(gap, guessed);
             append(&self.lines, gap);
         }
         for line in window.clone() {
@@ -182,8 +252,9 @@ impl View {
         self.measure(&window);
         // The gaps again, now that the lines between them have been measured.
         let heights = self.heights.borrow();
+        let measured = heights.span(0..window.start);
         if let Some(gap) = &above {
-            set_height(gap, heights.span(0..window.start));
+            set_height(gap, measured);
         }
         if let Some(gap) = &below {
             set_height(gap, heights.span(window.end..text.line_count()));
@@ -192,12 +263,19 @@ impl View {
         // Where the view ends up is decided here and nowhere else. Replacing
         // the lines can leave the scroll trimmed to a page that was shorter for
         // a moment, and a scroll that comes back trimmed is a view that cannot
-        // be scrolled past the lines that happen to be drawn.
+        // be scrolled past the lines that happen to be drawn. The gap above
+        // growing or shrinking as the lines are measured moves the lines with
+        // it, and moving the scroll by the same amount is what keeps what is on
+        // screen where it was.
+        let scroll = (scroll + measured - guessed).max(0.0);
         if (self.root.scroll_top() as f64 - scroll).abs() > 0.5 {
             self.root.set_scroll_top(scroll as i32);
         }
         self.align_columns(text, &window);
         self.draw_carets(&doc, sels, caret, focused);
+        // What the browser gave, not what was asked for: the end of the
+        // document is as far as it goes.
+        self.root.scroll_top() as f64
     }
 
     /// The lines the screen reaches, plus a screen above and below so that
@@ -492,29 +570,37 @@ impl View {
         self.place_box(caret.at.line, &path, index)
     }
 
-    /// Scrolls so the caret stays in sight, and reports where it is on screen so
-    /// the input element can follow it (which is where IME candidates appear).
+    /// Scrolls so the caret stays in sight, and reports where it is **in the
+    /// document** so the input element can follow it (which is where IME
+    /// candidates appear). Document, not screen: the input element sits among
+    /// the lines and scrolls with them, and an input element left behind at the
+    /// top of the document is one the browser scrolls back to as soon as it is
+    /// typed into.
     pub fn reveal(&self, caret: &Caret<'_>) -> Option<Box2> {
         let rect = self.caret_box(caret)?;
         let view = measure::box_of(&self.root.get_bounding_client_rect());
-        let top = rect.top - view.top + self.root.scroll_top() as f64;
-        let left = rect.left - view.left + self.root.scroll_left() as f64;
-        if top < self.root.scroll_top() as f64 {
+        let scroll = (
+            self.root.scroll_top() as f64,
+            self.root.scroll_left() as f64,
+        );
+        let top = rect.top - view.top + scroll.0;
+        let left = rect.left - view.left + scroll.1;
+        // What can be seen is the client box: the room a scrollbar takes is not
+        // room a caret can be seen in.
+        let height = self.root.client_height() as f64;
+        let width = self.root.client_width() as f64;
+        if top < scroll.0 {
             self.root.set_scroll_top(top as i32);
-        } else if top + rect.height > self.root.scroll_top() as f64 + view.height {
+        } else if top + rect.height > scroll.0 + height {
             self.root
-                .set_scroll_top((top + rect.height - view.height) as i32);
+                .set_scroll_top((top + rect.height - height) as i32);
         }
-        if left < self.root.scroll_left() as f64 {
+        if left < scroll.1 {
             self.root.set_scroll_left((left - 24.0).max(0.0) as i32);
-        } else if left > self.root.scroll_left() as f64 + view.width - 24.0 {
-            self.root.set_scroll_left((left - view.width + 24.0) as i32);
+        } else if left > scroll.1 + width - 24.0 {
+            self.root.set_scroll_left((left - width + 24.0) as i32);
         }
-        Some(Box2 {
-            left: rect.left - view.left,
-            top: rect.top - view.top,
-            ..rect
-        })
+        Some(Box2 { left, top, ..rect })
     }
 }
 
