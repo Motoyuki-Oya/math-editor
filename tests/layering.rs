@@ -25,6 +25,7 @@ const RULES: &[Rule] = &[
             "crate::format",
             "crate::view",
             "crate::editor",
+            "crate::settings",
             "web_sys",
             "wasm_bindgen",
             "leptos",
@@ -36,6 +37,7 @@ const RULES: &[Rule] = &[
         forbidden: &[
             "crate::view",
             "crate::editor",
+            "crate::settings",
             "web_sys",
             "wasm_bindgen",
             "leptos",

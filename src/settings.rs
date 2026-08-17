@@ -1,0 +1,154 @@
+//! The user's settings: one place for every default, and the file that
+//! overrides them.
+//!
+//! The saved notation is not a setting — it is the file format itself, and
+//! making it configurable would make files unreadable elsewhere. The DOM
+//! classes the view uses are not settings either; they are its own contract.
+
+use std::cell::RefCell;
+
+use wasm_bindgen::JsCast;
+
+/// Everything the user can change. What the settings window shows is a
+/// subset: values the user has no reason to touch stay in the file only.
+#[derive(Clone, PartialEq)]
+pub struct Settings {
+    /// The size of the text in the editor, in pixels.
+    pub font_size: f64,
+    /// The font of the text. Empty means the built-in default.
+    pub font_family: String,
+    /// Whether the caret blinks.
+    pub caret_blink: bool,
+    /// The gap between aligned columns, in pixels. File only.
+    pub column_gap: f64,
+    /// How many steps the undo history keeps. File only.
+    pub history_limit: usize,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            font_size: 15.0,
+            font_family: String::new(),
+            caret_blink: true,
+            column_gap: 18.0,
+            history_limit: 500,
+        }
+    }
+}
+
+thread_local! {
+    static CURRENT: RefCell<Settings> = RefCell::new(Settings::default());
+}
+
+pub fn column_gap() -> f64 {
+    CURRENT.with(|current| current.borrow().column_gap)
+}
+
+pub fn history_limit() -> usize {
+    CURRENT.with(|current| current.borrow().history_limit)
+}
+
+/// Makes `settings` the ones in effect, showing the visual ones on screen.
+pub fn apply(settings: Settings) {
+    show(&settings);
+    CURRENT.with(|current| *current.borrow_mut() = settings);
+}
+
+/// Visual settings reach the screen as CSS variables on the document root,
+/// so the stylesheet stays the only place that decides how things look.
+fn show(settings: &Settings) {
+    let Some(root) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.document_element())
+    else {
+        return;
+    };
+    let root: web_sys::HtmlElement = match root.dyn_into() {
+        Ok(root) => root,
+        Err(_) => return,
+    };
+    let style = root.style();
+    style
+        .set_property("--setting-font-size", &format!("{}px", settings.font_size))
+        .ok();
+    if settings.font_family.is_empty() {
+        style.remove_property("--setting-font-text").ok();
+    } else {
+        style
+            .set_property("--setting-font-text", &settings.font_family)
+            .ok();
+    }
+    style
+        .set_property(
+            "--setting-caret-blink",
+            if settings.caret_blink {
+                "running"
+            } else {
+                "paused"
+            },
+        )
+        .ok();
+}
+
+/// Reads the settings back, starting from the defaults: a missing or broken
+/// line keeps its default, so an old or edited file still opens.
+pub fn read(text: &str) -> Settings {
+    let mut settings = Settings::default();
+    for line in text.lines() {
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        let (name, value) = (name.trim(), value.trim());
+        match name {
+            "font_size" => {
+                if let Ok(size) = value.parse() {
+                    settings.font_size = size;
+                }
+            }
+            "font_family" => {
+                settings.font_family = value.trim_matches('"').to_string();
+            }
+            "caret_blink" => {
+                if let Ok(blink) = value.parse() {
+                    settings.caret_blink = blink;
+                }
+            }
+            "column_gap" => {
+                if let Ok(gap) = value.parse() {
+                    settings.column_gap = gap;
+                }
+            }
+            "history_limit" => {
+                if let Ok(limit) = value.parse() {
+                    settings.history_limit = limit;
+                }
+            }
+            _ => {}
+        }
+    }
+    settings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_overrides_only_what_it_names() {
+        let settings = read(
+            "font_size = 18\nfont_family = \"Serif\"\ncaret_blink = false\nhistory_limit = 100\n",
+        );
+        assert!(settings.font_size == 18.0);
+        assert!(settings.font_family == "Serif");
+        assert!(!settings.caret_blink);
+        assert!(settings.history_limit == 100);
+        assert!(settings.column_gap == Settings::default().column_gap);
+    }
+
+    #[test]
+    fn a_broken_or_old_file_keeps_the_defaults() {
+        let settings = read("font_size = large\nnot a line\nnewer_setting = 1\n");
+        assert!(settings == Settings::default());
+    }
+}

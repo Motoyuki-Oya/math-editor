@@ -18,8 +18,6 @@ struct Snapshot {
     inside: Option<Cursor>,
 }
 
-const LIMIT: usize = 500;
-
 /// What has been done, held as whole snapshots. Only [`Editor`] writes here:
 /// the history knows when steps join, the editor knows what a step is.
 pub(super) struct History {
@@ -95,7 +93,7 @@ impl Editor {
         self.history.grouped = self.history.grouping;
         let snapshot = self.snapshot();
         self.history.past.push(snapshot);
-        if self.history.past.len() > LIMIT {
+        if self.history.past.len() > crate::settings::history_limit() {
             self.history.past.remove(0);
         }
     }

@@ -21,8 +21,6 @@ use crate::view::row::{
 };
 
 pub const LINE_CLASS: &str = "mn-line";
-/// The gap left after the widest cell of a column.
-const COLUMN_GAP: f64 = 18.0;
 const LINE_ATTR: &str = "data-line";
 
 pub struct View {
@@ -164,7 +162,7 @@ impl View {
                 .fold(f64::MIN, f64::max);
             for tab in separators {
                 let left = tab.get_bounding_client_rect().left();
-                let width = (widest - left + COLUMN_GAP).max(1.0);
+                let width = (widest - left + crate::settings::column_gap()).max(1.0);
                 tab.set_attribute("style", &format!("width:{width}px")).ok();
             }
         }
