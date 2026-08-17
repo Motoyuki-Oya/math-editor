@@ -5,10 +5,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use super::model::Pos;
 use super::state::{self, Session};
 use crate::structure::ast::Node as MathNode;
 use crate::structure::commands;
+use crate::structure::text::Pos;
 
 enum Seed {
     /// `$`: an empty formula.
