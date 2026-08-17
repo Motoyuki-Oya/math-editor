@@ -469,12 +469,12 @@ body {
 
 .mn-frac-num {
   align-self: end;
-  padding: 0 0.3em 0.1em;
+  padding: 0 0.32em 0.22em;
 }
 
 .mn-frac-den {
   align-self: start;
-  padding: 0.1em 0.3em 0;
+  padding: 0.26em 0.32em 0;
 }
 
 /* As wide as the wider of the two rows. */
@@ -519,8 +519,9 @@ body {
 .mn-sqrt {
   display: inline-block;
   position: relative;
-  padding-left: 0.62em;
-  margin: 0 0.1em;
+  /* Room for the sign, which is drawn in this padding. */
+  padding-left: 0.82em;
+  margin: 0 0.14em;
 }
 
 .mn-sqrt-index {
@@ -535,7 +536,9 @@ body {
   position: absolute;
   left: 0;
   top: 0;
-  width: 0.6em;
+  /* As wide as the padding it sits in, so its tip meets the bar over the
+     body exactly. */
+  width: 0.8em;
   height: 100%;
   overflow: visible;
 }
@@ -543,7 +546,9 @@ body {
 .mn-sqrt-body {
   display: inline-block;
   border-top: 1px solid currentColor;
-  padding: 0.12em 0.2em 0.05em 0.05em;
+  /* Air on every side: under the bar, and between the sign and the first
+     letter, so the sign never touches what is under the root. */
+  padding: 0.2em 0.3em 0.08em 0.22em;
 }
 
 .mn-sup,

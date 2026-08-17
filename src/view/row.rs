@@ -255,10 +255,13 @@ impl<'a> Renderer<'a> {
                 }
                 // The sign is laid over the body, which leaves the body in the
                 // text: the root sits on the same baseline as what is around it.
+                // The kick, the descent and the long rising stroke, which is
+                // slanted rather than upright: that slant is what makes the
+                // sign read as a radical and not as a bracket.
                 sqrt.append_child(&self.svg(
                     "mn-radical",
-                    "0 0 20 100",
-                    "M0 62 L5 62 L11 97 L19 4",
+                    "0 0 26 100",
+                    "M0 58 L5 60 L11 96 L25 3",
                 ))
                 .ok();
                 let body = self.el("span", "mn-sqrt-body");
