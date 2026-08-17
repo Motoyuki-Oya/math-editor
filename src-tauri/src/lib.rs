@@ -1,3 +1,5 @@
+mod menu;
+
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -296,6 +298,7 @@ pub fn run() {
         })
         .setup(|app| {
             restore_window_size(app.handle());
+            menu::install(app.handle())?;
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -319,7 +322,8 @@ pub fn run() {
             write_settings,
             write_draft,
             remove_draft,
-            read_drafts
+            read_drafts,
+            menu::sync_view_menu
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
