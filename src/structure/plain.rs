@@ -6,8 +6,8 @@
 //! is free to be plain and short, and it stays out of the notation's way.
 
 use super::ast::{Between, MatrixKind, Node, Row};
-use super::vocabulary;
 use super::text::Item;
+use super::vocabulary;
 
 /// The lines of a range of the text, one string per line.
 pub fn lines(lines: &[Vec<Item>]) -> String {

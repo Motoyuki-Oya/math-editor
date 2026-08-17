@@ -8,7 +8,7 @@
 //! other (see `docs/architecture.md`).
 
 pub mod ast;
-pub mod vocabulary;
 pub mod edit;
 pub mod plain;
 pub mod text;
+pub mod vocabulary;

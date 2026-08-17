@@ -203,8 +203,6 @@ pub fn is_function(name: &str) -> bool {
     FUNCTIONS.contains(&name)
 }
 
-
-
 /// The node a `\name` shortcut expands to, if the name is known.
 pub fn node_for(name: &str) -> Option<Node> {
     match name {
@@ -279,4 +277,3 @@ mod tests {
         assert_eq!(glyph_for("nope"), None);
     }
 }
-

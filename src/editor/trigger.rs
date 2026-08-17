@@ -7,8 +7,8 @@ use std::rc::Rc;
 
 use super::session::{self, Session};
 use crate::structure::ast::Node as MathNode;
-use crate::structure::vocabulary;
 use crate::structure::text::Pos;
+use crate::structure::vocabulary;
 
 enum Seed {
     /// `$`: an empty formula.

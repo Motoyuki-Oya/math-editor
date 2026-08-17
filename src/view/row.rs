@@ -10,8 +10,8 @@
 use web_sys::{Document, Element};
 
 use crate::structure::ast::{Between, Delim, MatrixKind, Node, Row};
-use crate::structure::vocabulary::{self as vocabulary, Class};
 use crate::structure::text::Item;
+use crate::structure::vocabulary::{self as vocabulary, Class};
 
 const SVG_NS: &str = "http://www.w3.org/2000/svg";
 
