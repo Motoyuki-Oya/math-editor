@@ -1,5 +1,6 @@
 //! Application shell: toolbar, structure palette, search bar and status bar.
 
+mod display;
 mod find;
 mod keys;
 mod palette;
@@ -11,6 +12,7 @@ use leptos::prelude::*;
 use leptos::reactive::owner::Owner;
 use leptos::task::spawn_local;
 
+use display::DisplayMenu;
 use find::FindBar;
 use palette::Palette;
 use panes::PaneView;
@@ -34,6 +36,7 @@ pub fn App() -> impl IntoView {
         find_focus: RwSignal::new(None),
     };
     let preferences_open = RwSignal::new(false);
+    let display_open = RwSignal::new(false);
 
     Effect::new(move |_| {
         editor::set_on_change(Box::new(move |pane| shell.mark_dirty(pane)));
@@ -75,6 +78,7 @@ pub fn App() -> impl IntoView {
                     >
                         {move || if shell.panes.get().len() > 1 { "分割解除" } else { "分割" }}
                     </button>
+                    <DisplayMenu open=display_open/>
                     <button class="tool" on:mousedown=hold_focus on:click=move |_| preferences_open.update(|open| *open = !*open)>"設定"</button>
                 </div>
             </div>

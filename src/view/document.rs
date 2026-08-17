@@ -23,6 +23,9 @@ use crate::view::row::{self, Path, Preedit, Renderer, FIELD_CLASS, PATH_ATTR, TA
 
 pub const LINE_CLASS: &str = "mn-line";
 const LINE_ATTR: &str = "data-line";
+/// The number shown beside a line. It sits in the margin, outside the row, so
+/// that nothing measuring the text can mistake it for part of the line.
+const NUMBER_CLASS: &str = "mn-number";
 
 pub struct View {
     /// Scrolls, and receives the mouse.
@@ -113,6 +116,12 @@ impl View {
     ) -> Option<Element> {
         let holder = element(doc, "div", LINE_CLASS)?;
         holder.set_attribute(LINE_ATTR, &line.to_string()).ok();
+        if crate::settings::line_numbers() {
+            if let Some(number) = element(doc, "span", NUMBER_CLASS) {
+                number.set_text_content(Some(&(line + 1).to_string()));
+                append(&holder, &number);
+            }
+        }
         let renderer = Renderer::new(doc).with_preedit(preedit);
         append(&holder, &renderer.line(text.line(line)));
         Some(holder)
@@ -173,7 +182,7 @@ impl View {
         if let Some(cursor) = caret.inside {
             if !cursor.is_caret() {
                 let (path, _) = caret.place();
-                if let Some(rect) =
+                for rect in
                     self.span_in_row(caret.at.line, &path, cursor.start(), Some(cursor.end()))
                 {
                     self.shade(doc, rect, &origin);
@@ -226,35 +235,23 @@ impl View {
         for line in start.line..=end.line {
             let from = if line == start.line { start.col } else { 0 };
             let to = (line == end.line).then_some(end.col);
-            if let Some(rect) = self.span_in_row(line, &[], from, to) {
-                rects.push(rect);
-            }
+            rects.extend(self.span_in_row(line, &[], from, to));
         }
         rects
     }
 
-    /// The rectangle a selection covers in one row. It is as tall as what it
-    /// spans, not as tall as a line: selecting a fraction shades the whole
-    /// fraction, the way selecting a word shades the whole word.
-    fn span_in_row(
-        &self,
-        line: usize,
-        path: &Path,
-        from: usize,
-        to: Option<usize>,
-    ) -> Option<Box2> {
-        let row = self.row_element(line, path)?;
-        let left = measure::boundary(&row, from)?;
-        let right = match to {
-            Some(index) => measure::boundary(&row, index)?,
-            // Selecting past the end of a line shows the newline as a gap.
-            None => {
-                let mut rect = measure::boundary(&row, usize::MAX)?;
-                rect.left += 6.0;
-                rect
-            }
+    /// The rectangles a selection covers in one row. Usually one, but a line
+    /// carried on underneath is covered a piece at a time, one per carried
+    /// line. Each is as tall as what it spans, not as tall as a line: selecting
+    /// a fraction shades the whole fraction, the way selecting a word shades
+    /// the whole word.
+    fn span_in_row(&self, line: usize, path: &Path, from: usize, to: Option<usize>) -> Vec<Box2> {
+        let Some(row) = self.row_element(line, path) else {
+            return Vec::new();
         };
-        Some(measure::span_box(&row, left, right))
+        // Selecting past the end of a line shows the newline as a gap.
+        let past_end = to.is_none();
+        measure::span_boxes(&row, from, to.unwrap_or(usize::MAX), past_end)
     }
 
     fn caret_rect(&self, at: Pos) -> Option<Box2> {
@@ -307,14 +304,14 @@ impl View {
             Hit::Text(at) => at,
             // A point inside an island is at the island, and past it once the
             // pointer is on its right half, so dragging over one takes it in.
-            Hit::Inside(at, _) => match self.field_box(at) {
+            Hit::Inside(at, _) => match self.island_box(at) {
                 Some(rect) if x > rect.left + rect.width / 2.0 => Pos::new(at.line, at.col + 1),
                 _ => at,
             },
         }
     }
 
-    fn field_box(&self, at: Pos) -> Option<Box2> {
+    fn island_box(&self, at: Pos) -> Option<Box2> {
         let row = self.line_row(at.line)?;
         let children = row.children();
         for i in 0..children.length() {

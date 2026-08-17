@@ -85,6 +85,45 @@ pub(super) fn span_box(row: &Element, left: Box2, right: Box2) -> Box2 {
     .fix()
 }
 
+/// The rectangles a stretch of a row covers, a piece at a time: one when the
+/// row is on a single line, one per carried line when it is wrapped. `to` may
+/// be `usize::MAX` for the end of the row, and `past_end` widens the last piece
+/// so that a selection reaching past a line shows the newline as a gap.
+pub(super) fn span_boxes(row: &Element, from: usize, to: usize, past_end: bool) -> Vec<Box2> {
+    let mut pieces: Vec<Vec<Box2>> = Vec::new();
+    let mut piece: Vec<Box2> = Vec::new();
+    for (index, rect) in boundaries(row) {
+        if index < from || (to != usize::MAX && index > to) {
+            continue;
+        }
+        // A place that dropped to another line starts a new piece: it is where
+        // the browser carried the row on.
+        if piece
+            .last()
+            .is_some_and(|last| (last.top - rect.top).abs() > 1.0)
+        {
+            pieces.push(std::mem::take(&mut piece));
+        }
+        piece.push(rect);
+    }
+    if !piece.is_empty() {
+        pieces.push(piece);
+    }
+    let last = pieces.len();
+    pieces
+        .into_iter()
+        .enumerate()
+        .filter_map(|(nth, piece)| {
+            let left = *piece.first()?;
+            let mut right = *piece.last()?;
+            if past_end && nth + 1 == last {
+                right.left += 6.0;
+            }
+            Some(span_box(row, left, right))
+        })
+        .collect()
+}
+
 /// The place in a row a point is nearest to, at whatever depth: the innermost
 /// row the point is in decides, so clicking a denominator lands in the
 /// denominator and not beside the fraction.
@@ -92,7 +131,7 @@ pub(super) fn hit_in_line(holder: &Element, line: usize, x: f64, y: f64) -> Hit 
     let Some(row) = innermost_row(holder, x, y) else {
         return Hit::Text(Pos::new(line, 0));
     };
-    let index = nearest_index(&row, x);
+    let index = nearest_index(&row, x, y);
     let path = row
         .get_attribute(PATH_ATTR)
         .and_then(|encoded| row::decode_path(&encoded))
@@ -141,11 +180,16 @@ fn innermost_row(holder: &Element, x: f64, y: f64) -> Option<Element> {
     best.map(|(_, row)| row).or(fallback)
 }
 
-/// The place in a row nearest to a point.
-fn nearest_index(row: &Element, x: f64) -> usize {
+/// The place in a row nearest to a point. The line the point is on counts
+/// before the place along it, so clicking the second line of a wrapped row
+/// lands there and not on the same column of the first.
+fn nearest_index(row: &Element, x: f64, y: f64) -> usize {
     let mut best = (f64::MAX, 0usize);
     for (index, rect) in boundaries(row) {
-        let distance = (rect.left - x).abs();
+        let above = y - (rect.top + rect.height);
+        let below = rect.top - y;
+        let away = above.max(below).max(0.0);
+        let distance = away * 1000.0 + (rect.left - x).abs();
         if distance < best.0 {
             best = (distance, index);
         }

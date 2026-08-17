@@ -80,6 +80,36 @@ body {
   font-size: 13px;
 }
 
+/* A menu in the toolbar: the button, and what it opens under itself. */
+.menu {
+  position: relative;
+  display: flex;
+}
+
+.menu-items {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  white-space: nowrap;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgb(0 0 0 / 12%);
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
 .findbar {
   display: flex;
   flex-wrap: wrap;
@@ -235,17 +265,38 @@ body {
 .mn-content {
   position: relative;
   min-height: 100%;
-  width: max-content;
+  /* Without wrapping the content is as wide as the longest line, which is
+     what gives the editor something to scroll sideways. */
+  width: var(--setting-line-width, 100%);
   min-width: 100%;
 }
 
 .mn-lines {
   position: relative;
-  white-space: pre;
+  white-space: var(--setting-wrap, pre-wrap);
+  /* A line carried on underneath breaks wherever it has to: a long word is
+     still a long word. */
+  overflow-wrap: anywhere;
+  /* Room for the line numbers, when they are shown. */
+  padding-left: var(--setting-gutter, 0px);
 }
 
 .mn-line {
+  position: relative;
   min-height: 1.6em;
+}
+
+/* The number of a line, in the margin. It belongs to the line but not to its
+   text, so it sits outside the row and never takes the mouse. */
+.mn-number {
+  position: absolute;
+  left: calc(-1 * var(--setting-gutter, 0px));
+  width: var(--setting-gutter, 0px);
+  padding-right: 0.9em;
+  text-align: right;
+  color: var(--muted);
+  user-select: none;
+  pointer-events: none;
 }
 
 /* A column separator, $(t). Its width is set while drawing so that the

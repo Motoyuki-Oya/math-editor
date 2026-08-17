@@ -19,6 +19,11 @@ pub struct Settings {
     pub font_family: String,
     /// Whether the caret blinks.
     pub caret_blink: bool,
+    /// Whether a line too long for the window is carried on underneath
+    /// instead of running off the side.
+    pub wrap: bool,
+    /// Whether each line shows its number.
+    pub line_numbers: bool,
     /// The gap between aligned columns, in pixels. File only.
     pub column_gap: f64,
     /// How many steps the undo history keeps. File only.
@@ -31,6 +36,8 @@ impl Default for Settings {
             font_size: 15.0,
             font_family: String::new(),
             caret_blink: true,
+            wrap: true,
+            line_numbers: false,
             column_gap: 18.0,
             history_limit: 500,
         }
@@ -48,6 +55,10 @@ pub fn current() -> Settings {
 
 pub fn column_gap() -> f64 {
     CURRENT.with(|current| current.borrow().column_gap)
+}
+
+pub fn line_numbers() -> bool {
+    CURRENT.with(|current| current.borrow().line_numbers)
 }
 
 pub fn history_limit() -> usize {
@@ -94,16 +105,42 @@ fn show(settings: &Settings) {
             },
         )
         .ok();
+    style
+        .set_property(
+            "--setting-wrap",
+            if settings.wrap { "pre-wrap" } else { "pre" },
+        )
+        .ok();
+    // A wrapped line is as wide as the window; an unwrapped one is as wide as
+    // it needs, which is what gives the editor something to scroll sideways.
+    style
+        .set_property(
+            "--setting-line-width",
+            if settings.wrap { "100%" } else { "max-content" },
+        )
+        .ok();
+    style
+        .set_property(
+            "--setting-gutter",
+            if settings.line_numbers {
+                "3.5em"
+            } else {
+                "0px"
+            },
+        )
+        .ok();
 }
 
 /// Writes the settings as the file keeps them: one `name = value` per line,
 /// which is a small corner of TOML.
 pub fn write(settings: &Settings) -> String {
     format!(
-        "font_size = {}\nfont_family = \"{}\"\ncaret_blink = {}\ncolumn_gap = {}\nhistory_limit = {}\n",
+        "font_size = {}\nfont_family = \"{}\"\ncaret_blink = {}\nwrap = {}\nline_numbers = {}\ncolumn_gap = {}\nhistory_limit = {}\n",
         settings.font_size,
         settings.font_family.replace('"', ""),
         settings.caret_blink,
+        settings.wrap,
+        settings.line_numbers,
         settings.column_gap,
         settings.history_limit,
     )
@@ -132,6 +169,16 @@ pub fn read(text: &str) -> Settings {
                     settings.caret_blink = blink;
                 }
             }
+            "wrap" => {
+                if let Ok(wrap) = value.parse() {
+                    settings.wrap = wrap;
+                }
+            }
+            "line_numbers" => {
+                if let Ok(numbers) = value.parse() {
+                    settings.line_numbers = numbers;
+                }
+            }
             "column_gap" => {
                 if let Ok(gap) = value.parse() {
                     settings.column_gap = gap;
@@ -158,6 +205,8 @@ mod tests {
             font_size: 18.0,
             font_family: "Serif".to_string(),
             caret_blink: false,
+            wrap: false,
+            line_numbers: true,
             history_limit: 100,
             ..Settings::default()
         };
