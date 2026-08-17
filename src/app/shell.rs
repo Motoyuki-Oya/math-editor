@@ -115,6 +115,8 @@ pub(super) struct Shell {
     pub(super) status: RwSignal<String>,
     pub(super) stats: RwSignal<(usize, usize)>,
     pub(super) searching: RwSignal<bool>,
+    /// Whether the settings are on screen.
+    pub(super) preferences: RwSignal<bool>,
     /// The field of the find bar waiting for the cursor, once it is on screen.
     pub(super) find_focus: RwSignal<Option<Field>>,
 }

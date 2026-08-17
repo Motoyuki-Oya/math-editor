@@ -1,9 +1,10 @@
-//! Application shell: toolbar, structure palette, search bar and status bar.
+//! Application shell: structure palette, search bar and status bar. The menus
+//! themselves are the operating system's own (see `menu` and `src-tauri`).
 
-mod display;
 mod drafts;
 mod find;
 mod keys;
+mod menu;
 mod palette;
 mod panes;
 mod preferences;
@@ -13,7 +14,6 @@ use leptos::prelude::*;
 use leptos::reactive::owner::Owner;
 use leptos::task::spawn_local;
 
-use display::DisplayMenu;
 use find::FindBar;
 use palette::Palette;
 use panes::PaneView;
@@ -34,16 +34,18 @@ pub fn App() -> impl IntoView {
         status: RwSignal::new(String::new()),
         stats: RwSignal::new((0, 1)),
         searching: RwSignal::new(false),
+        preferences: RwSignal::new(false),
         find_focus: RwSignal::new(None),
     };
-    let preferences_open = RwSignal::new(false);
-    let display_open = RwSignal::new(false);
 
     Effect::new(move |_| {
         editor::set_on_change(Box::new(move |pane| shell.mark_dirty(pane)));
         keys::install_shortcuts(shell);
+        menu::install(shell);
         spawn_local(async move {
             settings::apply(settings::read(&ipc::read_settings().await));
+            // The menu's check marks are put where the saved settings are.
+            menu::show_state(shell);
             // The panes exist by now: reading the settings gave the effect that
             // builds them its turn.
             shell.restore_drafts(ipc::read_drafts().await);
@@ -64,37 +66,14 @@ pub fn App() -> impl IntoView {
 
     view! {
         <div class="app">
-            <div class="toolbar">
-                <div class="group">
-                    <button class="tool" on:mousedown=hold_focus on:click=move |_| shell.new_document() title="新しいタブ (Ctrl+T)">"新規"</button>
-                    <button class="tool" on:mousedown=hold_focus on:click=move |_| shell.open()>"開く"</button>
-                    <button class="tool" on:mousedown=hold_focus on:click=move |_| shell.save(false)>"保存"</button>
-                    <button class="tool" on:mousedown=hold_focus on:click=move |_| shell.save(true)>"名前を付けて"</button>
-                </div>
-                <div class="group">
-                    <button class="tool" on:mousedown=hold_focus on:click=move |_| editor::insert_math() title="構造を挿入 (Ctrl+M)">"構造"</button>
-                    <button class="tool" on:mousedown=hold_focus on:click=move |_| shell.searching.update(|s| *s = !*s) title="検索と置換 (Ctrl+F / 置換は Ctrl+R)">"検索"</button>
-                    <button
-                        class="tool"
-                        on:mousedown=hold_focus
-                        on:click=move |_| shell.toggle_split()
-                        title="左右に分割 / 解除 (Ctrl+\\)"
-                    >
-                        {move || if shell.panes.get().len() > 1 { "分割解除" } else { "分割" }}
-                    </button>
-                    <DisplayMenu open=display_open/>
-                    <button class="tool" on:mousedown=hold_focus on:click=move |_| preferences_open.update(|open| *open = !*open)>"設定"</button>
-                </div>
-            </div>
-
             <Palette/>
 
             <Show when=move || shell.searching.get()>
                 <FindBar shell=shell/>
             </Show>
 
-            <Show when=move || preferences_open.get()>
-                <Preferences open=preferences_open/>
+            <Show when=move || shell.preferences.get()>
+                <Preferences open=shell.preferences/>
             </Show>
 
             <div class="panes">

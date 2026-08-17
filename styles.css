@@ -44,7 +44,6 @@ body {
   overflow: hidden;
 }
 
-.toolbar,
 .palette,
 .prefbar {
   display: flex;
@@ -78,36 +77,6 @@ body {
   background: var(--bg);
   color: var(--fg);
   font-size: 13px;
-}
-
-/* A menu in the toolbar: the button, and what it opens under itself. */
-.menu {
-  position: relative;
-  display: flex;
-}
-
-.menu-items {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  z-index: 2;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px 10px;
-  white-space: nowrap;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  box-shadow: 0 4px 14px rgb(0 0 0 / 12%);
-}
-
-.menu-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  cursor: pointer;
 }
 
 .findbar {

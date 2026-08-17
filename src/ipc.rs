@@ -7,6 +7,46 @@ use wasm_bindgen::prelude::*;
 extern "C" {
     #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"], catch)]
     async fn invoke(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
+
+    #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "event"], catch)]
+    async fn listen(event: &str, handler: &JsValue) -> Result<JsValue, JsValue>;
+}
+
+/// Calls `chosen` with the name of the item picked from the system's menus.
+pub fn on_menu(chosen: impl Fn(&str) + 'static) {
+    let handler = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
+        let name = js_sys::Reflect::get(&event, &JsValue::from_str("payload"))
+            .ok()
+            .and_then(|payload| payload.as_string());
+        if let Some(name) = name {
+            chosen(&name);
+        }
+    });
+    wasm_bindgen_futures::spawn_local(async move {
+        let _ = listen("menu", handler.as_ref()).await;
+        // Kept alive: the listener lives as long as the window does.
+        handler.forget();
+    });
+}
+
+/// Tells the system's 表示 menu what is currently on.
+pub async fn sync_view_menu(wrap: bool, line_numbers: bool, split: bool) {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Args {
+        wrap: bool,
+        line_numbers: bool,
+        split: bool,
+    }
+    let _ = call(
+        "sync_view_menu",
+        Args {
+            wrap,
+            line_numbers,
+            split,
+        },
+    )
+    .await;
 }
 
 async fn call<T: Serialize>(command: &str, args: T) -> Result<JsValue, String> {
