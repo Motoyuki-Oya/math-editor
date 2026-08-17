@@ -158,6 +158,15 @@ pub fn redraw(session: &Rc<RefCell<Session>>) {
 }
 
 /// Keeps the hidden input where the caret is, so IME candidates show up there.
+/// Redraws every pane, for when something that shapes all of them (the
+/// settings) has changed.
+pub fn redraw_all() {
+    let sessions = PANES.with(|panes| panes.borrow().clone());
+    for session in sessions {
+        redraw(&session);
+    }
+}
+
 pub fn sync_input_box(session: &Rc<RefCell<Session>>) {
     redraw(session);
 }
