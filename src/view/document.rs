@@ -27,6 +27,7 @@ use web_sys::{Document, Element, HtmlElement};
 
 use crate::structure::ast::Cursor;
 use crate::structure::text::{Item, Pos, Sel, Text};
+use crate::view::heights::Heights;
 use crate::view::measure::{self, Box2, Hit};
 use crate::view::row::{self, Path, Preedit, Renderer, FIELD_CLASS, PATH_ATTR, TAB_CLASS};
 
@@ -42,8 +43,6 @@ const GAP_CLASS: &str = "mn-gap";
 /// How far past the screen lines are drawn, in screens. Scrolling by less than
 /// this shows lines that are already there.
 const MARGIN_SCREENS: f64 = 1.0;
-/// What a line is taken to be worth before it has ever been measured.
-const GUESS: f64 = 20.0;
 /// How far a block of column separators may pull the drawn range past the
 /// screen. Lining columns up needs the whole block, but not at any price.
 const BLOCK_LIMIT: usize = 200;
@@ -53,8 +52,8 @@ pub struct View {
     pub root: HtmlElement,
     lines: Element,
     overlay: Element,
-    /// Every line's height as last measured; `0.0` for a line never drawn.
-    heights: RefCell<Vec<f64>>,
+    /// How tall every line is, which is what decides the lines to draw.
+    heights: RefCell<Heights>,
     /// The lines that are in the page right now. Everything that measures the
     /// page can only speak about these.
     drawn: RefCell<Range<usize>>,
@@ -103,7 +102,7 @@ impl View {
             root,
             lines,
             overlay,
-            heights: RefCell::new(Vec::new()),
+            heights: RefCell::new(Heights::new()),
             drawn: RefCell::new(0..0),
         })
     }
@@ -130,11 +129,19 @@ impl View {
         let Some(doc) = self.lines.owner_document() else {
             return;
         };
-        self.fit_heights(text.line_count());
-        if follow_caret {
-            self.scroll_to_line(caret.at.line);
+        self.heights.borrow_mut().fit(text.line_count());
+        // Where the view is going to be: at the caret when something changed,
+        // and where the user left it when they scrolled.
+        let scroll = match follow_caret {
+            true => self.scroll_for(caret.at.line, text.line_count()),
+            false => self.root.scroll_top() as f64,
+        };
+        let window = self.widen_for_blocks(text, self.window(scroll, text.line_count()));
+        // Scrolling within the margin shows lines that are already there, so
+        // there is nothing to draw.
+        if !follow_caret && window == *self.drawn.borrow() {
+            return;
         }
-        let window = self.widen_for_blocks(text, self.window(text));
         // Text an IME is composing belongs at the caret, whichever row that is
         // in: the component that draws the row puts it there.
         let (path, index) = caret.place();
@@ -166,61 +173,33 @@ impl View {
         // Measured first, so the two gaps stand for what the lines around them
         // are really worth.
         self.measure(&window);
+        let heights = self.heights.borrow();
         if let Some(gap) = &above {
-            set_height(gap, self.span(0..window.start));
+            set_height(gap, heights.span(0..window.start));
         }
         if let Some(gap) = &below {
-            set_height(gap, self.span(window.end..text.line_count()));
+            set_height(gap, heights.span(window.end..text.line_count()));
+        }
+        drop(heights);
+        // Moved last: the browser trims a scroll to the length of what is in
+        // the page, so the gaps have to stand for the lines that are not there
+        // first. Otherwise pasting a long text would leave the view short of
+        // the caret.
+        if follow_caret && (self.root.scroll_top() as f64 - scroll).abs() > 0.5 {
+            self.root.set_scroll_top(scroll as i32);
         }
         self.align_columns(text, &window);
         self.draw_carets(&doc, sels, caret, focused);
     }
 
-    /// Keeps one height per line, so that a line's measurement outlives the
-    /// time it spends off screen.
-    fn fit_heights(&self, count: usize) {
-        let mut heights = self.heights.borrow_mut();
-        if heights.len() != count {
-            heights.resize(count, 0.0);
-        }
-    }
-
-    /// What a stretch of lines is worth: measured where it has been drawn, and
-    /// guessed at where it has not.
-    fn span(&self, lines: Range<usize>) -> f64 {
-        let heights = self.heights.borrow();
-        let unit = unit_height(&heights);
-        lines
-            .map(|line| match heights.get(line) {
-                Some(height) if *height > 0.0 => *height,
-                _ => unit,
-            })
-            .sum()
-    }
-
     /// The lines the screen reaches, plus a screen above and below so that
     /// scrolling a little needs no drawing at all.
-    fn window(&self, text: &Text) -> Range<usize> {
-        let count = text.line_count();
+    fn window(&self, scroll: f64, count: usize) -> Range<usize> {
         let height = self.root.client_height() as f64;
         let margin = (height * MARGIN_SCREENS).max(200.0);
-        let scroll = self.root.scroll_top() as f64;
-        let (top, bottom) = (scroll - margin, scroll + height + margin);
-        let mut start = 0;
-        let mut y = 0.0;
-        while start + 1 < count {
-            let next = y + self.span(start..start + 1);
-            if next >= top {
-                break;
-            }
-            y = next;
-            start += 1;
-        }
-        let mut end = start;
-        while end < count && y <= bottom {
-            y += self.span(end..end + 1);
-            end += 1;
-        }
+        let heights = self.heights.borrow();
+        let start = heights.line_at(scroll - margin);
+        let end = heights.line_at(scroll + height + margin) + 1;
         start..end.max(start + 1).min(count)
     }
 
@@ -250,27 +229,24 @@ impl View {
             };
             let height = holder.get_bounding_client_rect().height();
             if height > 0.0 {
-                if let Some(slot) = heights.get_mut(line) {
-                    *slot = height;
-                }
+                heights.set(line, height);
             }
         }
     }
 
-    /// Brings a line into the screen when it is not there, which is what makes
-    /// a caret that jumped far (Ctrl+End, a search hit) reachable at all: only
-    /// drawn lines can be measured, so the view has to move first.
-    fn scroll_to_line(&self, line: usize) {
-        let height = self.root.client_height() as f64;
+    /// Where the view has to be for a line to be drawn at all. A line the
+    /// coming range already reaches leaves the view alone: moving to the caret
+    /// a line at a time is [`Self::reveal`]'s job. A line further off than that
+    /// (Ctrl+End, a search hit, a long paste) is what this is for, because an
+    /// undrawn line cannot be measured, so the view has to move first.
+    fn scroll_for(&self, line: usize, count: usize) -> f64 {
         let scroll = self.root.scroll_top() as f64;
-        let top = self.span(0..line);
-        let bottom = top + self.span(line..line + 1);
-        if top >= scroll && bottom <= scroll + height {
-            return;
+        if self.window(scroll, count).contains(&line) {
+            return scroll;
         }
+        let height = self.root.client_height() as f64;
         // A third of the way down, so that what follows the caret is visible.
-        self.root
-            .set_scroll_top((top - height / 3.0).max(0.0) as i32);
+        (self.heights.borrow().top_of(line) - height / 3.0).max(0.0)
     }
 
     fn draw_line(
@@ -549,21 +525,6 @@ fn set_height(element: &Element, height: f64) {
     element
         .set_attribute("style", &format!("height:{height}px"))
         .ok();
-}
-
-/// What an unmeasured line is taken to be worth: what the measured ones are,
-/// on average, so a document of tall lines is not guessed at as short ones.
-fn unit_height(heights: &[f64]) -> f64 {
-    let mut total = 0.0;
-    let mut seen = 0;
-    for height in heights.iter().filter(|height| **height > 0.0) {
-        total += *height;
-        seen += 1;
-    }
-    if seen == 0 {
-        return GUESS;
-    }
-    total / seen as f64
 }
 
 fn has_tab(items: &[Item]) -> bool {
