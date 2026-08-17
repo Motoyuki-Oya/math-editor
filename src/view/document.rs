@@ -492,29 +492,37 @@ impl View {
         self.place_box(caret.at.line, &path, index)
     }
 
-    /// Scrolls so the caret stays in sight, and reports where it is on screen so
-    /// the input element can follow it (which is where IME candidates appear).
+    /// Scrolls so the caret stays in sight, and reports where it is **in the
+    /// document** so the input element can follow it (which is where IME
+    /// candidates appear). Document, not screen: the input element sits among
+    /// the lines and scrolls with them, and an input element left behind at the
+    /// top of the document is one the browser scrolls back to as soon as it is
+    /// typed into.
     pub fn reveal(&self, caret: &Caret<'_>) -> Option<Box2> {
         let rect = self.caret_box(caret)?;
         let view = measure::box_of(&self.root.get_bounding_client_rect());
-        let top = rect.top - view.top + self.root.scroll_top() as f64;
-        let left = rect.left - view.left + self.root.scroll_left() as f64;
-        if top < self.root.scroll_top() as f64 {
+        let scroll = (
+            self.root.scroll_top() as f64,
+            self.root.scroll_left() as f64,
+        );
+        let top = rect.top - view.top + scroll.0;
+        let left = rect.left - view.left + scroll.1;
+        // What can be seen is the client box: the room a scrollbar takes is not
+        // room a caret can be seen in.
+        let height = self.root.client_height() as f64;
+        let width = self.root.client_width() as f64;
+        if top < scroll.0 {
             self.root.set_scroll_top(top as i32);
-        } else if top + rect.height > self.root.scroll_top() as f64 + view.height {
+        } else if top + rect.height > scroll.0 + height {
             self.root
-                .set_scroll_top((top + rect.height - view.height) as i32);
+                .set_scroll_top((top + rect.height - height) as i32);
         }
-        if left < self.root.scroll_left() as f64 {
+        if left < scroll.1 {
             self.root.set_scroll_left((left - 24.0).max(0.0) as i32);
-        } else if left > self.root.scroll_left() as f64 + view.width - 24.0 {
-            self.root.set_scroll_left((left - view.width + 24.0) as i32);
+        } else if left > scroll.1 + width - 24.0 {
+            self.root.set_scroll_left((left - width + 24.0) as i32);
         }
-        Some(Box2 {
-            left: rect.left - view.left,
-            top: rect.top - view.top,
-            ..rect
-        })
+        Some(Box2 { left, top, ..rect })
     }
 }
 
