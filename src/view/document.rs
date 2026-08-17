@@ -1,24 +1,12 @@
-//! Draws the document, the carets and the selections into the page.
+//! ドキュメント、キャレット、選択範囲をページに描画します。
 //!
-//! Every line is drawn by [`crate::view::row`], the one component that draws a
-//! row, so a line of text and the inside of a structure are the same thing to
-//! everything here. The only thing a line does that a row inside a structure
-//! cannot is line its column separators up with its neighbours.
+//! すべての行は、行を描画する 1 つのコンポーネントである [`crate::view::row`] によって描画されるため、テキストの行と構造の内部は、ここでのすべてのものと同じです。構造内の行にできない唯一のことは、列セパレータを隣接する行と並べることです。
 //!
-//! Where the drawn things ended up is read back by [`crate::view::measure`]:
-//! putting something on screen and measuring what is there are opposite jobs,
-//! so they are kept apart.
+//! 描画されたものがどこに到達したかは、[`crate::view::measure`] によって読み戻されます。画面上に何かを配置することと、そこにあるものを測定することは反対の仕事であるため、それらは離れたままになります。
 //!
-//! Nothing here is editable by the browser: lines are plain spans, and every
-//! caret is a small absolutely placed element, which is how several carets can
-//! be shown at once, and how a caret inside a structure is the same caret as a
-//! caret in the text.
+//! ここにあるものはブラウザでは編集できません。行は単純なスパンであり、すべてのキャレットは絶対に配置された小さな要素です。キャレットは一度に表示でき、構造内のキャレットがテキスト内のキャレットとどのように同じであるかについて説明します。
 //!
-//! Only the lines that can be seen are in the page. Above and below them sit
-//! two empty elements as tall as the lines they stand for, so the document
-//! scrolls its full length while the page holds a screenful of it. A line's
-//! height is kept once measured; a line never drawn is guessed at, which is why
-//! the scrollbar settles as the document is scrolled through.
+//! ページ内には表示される行のみが表示されます。それらの上下には、それらが表す行と同じ高さの 2 つの空の要素が配置されているため、ページに 1 画面分の文書が含まれている間、文書は全長にスクロールします。線の高さは一度測定されると維持されます。決して描かれていない線は推測されるため、文書がスクロールされるとスクロールバーが固定されます。
 
 use std::cell::RefCell;
 use std::ops::Range;
@@ -33,48 +21,39 @@ use crate::view::row::{self, Path, Preedit, Renderer, FIELD_CLASS, PATH_ATTR, TA
 
 pub const LINE_CLASS: &str = "mn-line";
 const LINE_ATTR: &str = "data-line";
-/// The number shown beside a line. It sits in the margin, outside the row, so
-/// that nothing measuring the text can mistake it for part of the line.
+/// 線の横に表示される数字。これは行の外側のマージンに配置されるため、テキストを測定する人が行の一部と間違えることはありません。
 const NUMBER_CLASS: &str = "mn-number";
-/// Stands for the lines that are not in the page, so the document keeps its
-/// full length.
+/// ページ内にない行を表し、ドキュメントの全長が維持されます。
 const GAP_CLASS: &str = "mn-gap";
 
-/// How far past the screen lines are drawn, in screens. Scrolling by less than
-/// this shows lines that are already there.
+/// スクリーン線を超えてどのくらいの距離が描画されるか (画面単位)。これより少ない量でスクロールすると、すでにそこにある行が表示されます。
 const MARGIN_SCREENS: f64 = 1.0;
-/// How far a block of column separators may pull the drawn range past the
-/// screen. Lining columns up needs the whole block, but not at any price.
+/// 列セパレータのブロックが描画範囲を画面を超えて引き込むことができる距離。列を並べるにはブロック全体が必要ですが、何の代償もかかりません。
 const BLOCK_LIMIT: usize = 200;
 
 pub struct View {
-    /// Scrolls, and receives the mouse.
+    /// スクロールし、マウスを受け取ります。
     pub root: HtmlElement,
     lines: Element,
     overlay: Element,
-    /// How tall every line is, which is what decides the lines to draw.
+    /// 各行の高さ。それによって描画する線が決まります。
     heights: RefCell<Heights>,
-    /// The lines that are in the page right now. Everything that measures the
-    /// page can only speak about these.
+    /// 現在ページ内にある行。ページを測定するものはすべて、これらについてのみ語ることができます。
     drawn: RefCell<Range<usize>>,
 }
 
-/// Where the caret is, which is all the drawing needs to know about it: a place
-/// in the text, how deep into the structure there it reaches, and what an IME is
-/// composing at it. There is no mode: the same caret describes both cases.
+/// キャレットがどこにあるか、描画がそれについて知る必要があるのはそれだけです。テキスト内の場所、キャレットがそこにある構造のどの深さまで到達しているか、IME がそこで何を構成しているかです。モードはありません。同じキャレットで両方のケースを説明します。
 #[derive(Default)]
 pub struct Caret<'a> {
     pub at: Pos,
-    /// Set when the caret is inside the structure at `at`.
+    /// キャレットが `at` の構造内にあるときに設定されます。
     pub inside: Option<&'a Cursor>,
-    /// Text an IME has not committed yet, drawn where it will land.
+    /// IME がまだコミットしていないテキスト。着地する場所に描画されます。
     pub composing: Option<&'a str>,
 }
 
 impl Caret<'_> {
-    /// The row the caret is in, and how far into it it is. A caret in the text
-    /// is in the row of the line; a caret inside a structure is in a row of
-    /// that structure, reached through the island standing at `at`.
+    /// キャレットが含まれる行と、その行のどこまで入っているか。テキスト内のキャレットはその行の行にあります。構造内のキャレットは、その構造の行内にあり、`at` にあるアイランドを通って到達します。
     fn place(&self) -> (Vec<(usize, usize)>, usize) {
         match self.inside {
             None => (Vec::new(), self.at.col),
@@ -88,7 +67,7 @@ impl Caret<'_> {
 }
 
 impl View {
-    /// Builds the layers inside `root`, which the caller owns.
+    /// 呼び出し元が所有する `root` 内にレイヤーを構築します。
     pub fn new(root: HtmlElement) -> Option<Self> {
         let doc = root.owner_document()?;
         root.set_inner_html("");
@@ -107,13 +86,12 @@ impl View {
         })
     }
 
-    /// Draws after a change, bringing the caret's line into the page.
+    /// 変更後に描画し、キャレットの行をページ内に移動します。
     pub fn draw(&self, text: &Text, sels: &[Sel], caret: &Caret<'_>, focused: bool) {
         self.paint(text, sels, caret, focused, true);
     }
 
-    /// Draws after a scroll, which must not move the view to the caret: the
-    /// scrollbar is the user's, not the caret's.
+    /// スクロール後に描画します。これによりビューがキャレットに移動してはなりません。スクロールバーはキャレットではなくユーザーのものです。
     pub fn repaint(&self, text: &Text, sels: &[Sel], caret: &Caret<'_>, focused: bool) {
         self.paint(text, sels, caret, focused, false);
     }
@@ -127,22 +105,16 @@ impl View {
         follow_caret: bool,
     ) {
         self.heights.borrow_mut().fit(text.line_count());
-        // Where the view is going to be: at the caret when something changed,
-        // and where the user left it when they scrolled.
+        // ビューはどこにあるのか内容は次のようになります: 何かが変更されたときのキャレット、およびユーザーがスクロールしたときにそこから離れた場所。
         let mut scroll = match follow_caret {
             true => self.scroll_for(caret.at.line, text.line_count()),
             false => self.root.scroll_top() as f64,
         };
-        // Whether the caret's line can be seen right now. A draw that follows
-        // the caret has to end with it in sight; a draw that does not must at
-        // least not lose sight of it, which measuring the lines anew can do at
-        // the end of the document, where the scroll cannot move as far as the
-        // lines it has to make room for.
+        // キャレットの行が現在表示されるかどうか。キャレットに続く描画は、キャレットが見えた状態で終了する必要があります。描画は、少なくとも見失ってはなりません。これは、文書の最後で行を新たに測定することができます。スクロールは、スペースを確保する必要がある行まで移動できません。
         let mut keep = follow_caret;
         if !follow_caret {
             let window = self.widen_for_blocks(text, self.window(scroll, text.line_count()));
-            // Scrolling within the margin shows lines that are already there,
-            // so there is nothing to draw.
+            // 余白内でスクロールすると、すでにそこにある行が表示されるため、描画するものは何もありません。
             if window == *self.drawn.borrow() {
                 return;
             }
@@ -152,11 +124,7 @@ impl View {
         if !keep {
             return;
         }
-        // The scroll above was worked out from heights that were still guesses
-        // for the lines it was about to draw, so the caret's line can end up
-        // somewhere else than the guess put it. Where the view ends up is
-        // therefore settled against the lines as they were drawn, until it
-        // stops moving: a guess is never what the user is left looking at.
+        // 上のスクロールは、描画しようとしている行のまだ推測された高さに基づいて計算されているため、キャレットの行が推測とは異なる場所に到達する可能性があります。したがって、ビューが終了する場所は、移動が停止するまで、描かれた線に基づいて決定されます。ユーザーが見ているままにされることは決してありません。
         for _ in 0..3 {
             let settled = self.scroll_onto(caret.at.line, scroll);
             if (settled - scroll).abs() <= 0.5 {
@@ -166,23 +134,16 @@ impl View {
         }
     }
 
-    /// The scroll that shows a line whole, or `scroll` if the line is in sight
-    /// there already. The line as drawn is what is measured, so a guess about
-    /// the lines above it cannot move the answer. A line brought into sight is
-    /// brought a line further than it needs, because a line flush with the edge
-    /// of the view reads as one that is not there; at the end of the document
-    /// the browser trims the extra, where the padding leaves room anyway.
+    /// 線全体を表示するスクロール、または線がすでに見えている場合は `scroll`。描かれた線が測定されるものであるため、その上の線を推測しても答えは変わりません。視界に入った線は、必要以上に遠くに表示されます。これは、ビューの端と同じ高さの線がそこに存在しないものとして読み取られるためです。ドキュメントの最後で、ブラウザは余分な部分をトリミングしますが、パディングによってスペースが確保されます。
     fn scroll_onto(&self, line: usize, scroll: f64) -> f64 {
         let view = self.root.client_height() as f64;
         let Some(holder) = self.line_element(line) else {
-            // The line the view is being moved for is not even drawn, so the
-            // heights that chose the range were wrong about it. Aim at it once
-            // more from what has been measured since.
+            // ビューが移動される線も描かれていないため、範囲を選択した高さが間違っていました。それ以降に測定されたものからもう一度目標を立てます。
             return (self.heights.borrow().top_of(line) - view / 3.0).max(0.0);
         };
         let rect = measure::box_of(&holder.get_bounding_client_rect());
         let root = measure::box_of(&self.root.get_bounding_client_rect());
-        // What is on screen, said in the scroll's own measure.
+        // 画面上にあるもの。スクロール自体の尺度で示されます。
         let top = rect.top - root.top + scroll;
         let bottom = top + rect.height;
         if top < scroll {
@@ -194,8 +155,7 @@ impl View {
         }
     }
 
-    /// Puts the lines for `scroll` in the page and leaves the view there,
-    /// giving back where it actually ended up.
+    /// ページ内に `scroll` の行を配置し、ビューをそこに残し、実際に最終的にどこに到達したかを返します。
     fn render(
         &self,
         text: &Text,
@@ -208,26 +168,20 @@ impl View {
             return self.root.scroll_top() as f64;
         };
         let window = self.widen_for_blocks(text, self.window(scroll, text.line_count()));
-        // Text an IME is composing belongs at the caret, whichever row that is
-        // in: the component that draws the row puts it there.
+        // IME が作成しているテキストは、どの行にあってもキャレットに属します。行を描画するコンポーネントがそれをそこに配置します。
         let (path, index) = caret.place();
         let preedit = caret.composing.map(|text| Preedit { path, index, text });
         self.lines.set_inner_html("");
         let above = element(&doc, "div", GAP_CLASS);
-        // What the lines above the drawn ones were taken to be worth. Measuring
-        // changes it, and the drawn lines move by the difference, so the scroll
-        // has to move with them.
+        // 描画された行の上にある行が何であるかがわかります。価値がある。測定すると変化し、描画された線もその差分だけ移動するため、スクロールも一緒に移動する必要があります。
         let guessed = self.heights.borrow().span(0..window.start);
         if let Some(gap) = &above {
-            // The gaps are given their height before they are in the page: a
-            // page that is briefly shorter than the document is a page the
-            // browser trims the scroll of, which would stop the view from
-            // going any further down.
+            // ギャップには、ページ内に配置される前に高さが設定されます。ドキュメントより短いページはブラウザによってスクロールがトリミングされ、ビューがそれ以上下に移動できなくなります。
             set_height(gap, guessed);
             append(&self.lines, gap);
         }
         for line in window.clone() {
-            // Only the line the caret is on shows what is being composed.
+            // キャレットがある行のみ、構成内容が表示されます。
             let here = preedit
                 .as_ref()
                 .filter(|_| caret.at.line == line)
@@ -250,7 +204,7 @@ impl View {
         }
         *self.drawn.borrow_mut() = window.clone();
         self.measure(&window);
-        // The gaps again, now that the lines between them have been measured.
+        // ギャップは、ギャップ間の線が調整されたので再び表示されます。
         let heights = self.heights.borrow();
         let measured = heights.span(0..window.start);
         if let Some(gap) = &above {
@@ -260,26 +214,18 @@ impl View {
             set_height(gap, heights.span(window.end..text.line_count()));
         }
         drop(heights);
-        // Where the view ends up is decided here and nowhere else. Replacing
-        // the lines can leave the scroll trimmed to a page that was shorter for
-        // a moment, and a scroll that comes back trimmed is a view that cannot
-        // be scrolled past the lines that happen to be drawn. The gap above
-        // growing or shrinking as the lines are measured moves the lines with
-        // it, and moving the scroll by the same amount is what keeps what is on
-        // screen where it was.
+        // ビューがどこに到達するかは、他の場所ではなくここで決まります。行を置き換えると、スクロールがトリミングされてページが一時的に短くなったままになる可能性があり、トリミングされて戻ったスクロールは、たまたま描画された行を超えてスクロールすることはできません。行の測定に伴って拡大または縮小するギャップによって行も移動し、同じ量だけスクロールを移動すると、画面上の内容が元の位置に保たれます。
         let scroll = (scroll + measured - guessed).max(0.0);
         if (self.root.scroll_top() as f64 - scroll).abs() > 0.5 {
             self.root.set_scroll_top(scroll as i32);
         }
         self.align_columns(text, &window);
         self.draw_carets(&doc, sels, caret, focused);
-        // What the browser gave, not what was asked for: the end of the
-        // document is as far as it goes.
+        // 要求されたものではなく、ブラウザが提供したものです。文書の最後はそこまでです。
         self.root.scroll_top() as f64
     }
 
-    /// The lines the screen reaches, plus a screen above and below so that
-    /// scrolling a little needs no drawing at all.
+    /// 画面が到達する行に加え、上下に画面があるため、少しスクロールするだけでまったく描画する必要がありません。
     fn window(&self, scroll: f64, count: usize) -> Range<usize> {
         let height = self.root.client_height() as f64;
         let margin = (height * MARGIN_SCREENS).max(200.0);
@@ -289,8 +235,7 @@ impl View {
         start..end.max(start + 1).min(count)
     }
 
-    /// Widens the drawn range to whole blocks of column separators: lining a
-    /// column up is about the block, so a block cannot be drawn in halves.
+    /// 描画範囲を列区切りのブロック全体に広げます。列を整列させるのは
     fn widen_for_blocks(&self, text: &Text, window: Range<usize>) -> Range<usize> {
         let count = text.line_count();
         let mut start = window.start;
@@ -306,7 +251,7 @@ impl View {
         start..end
     }
 
-    /// Notes how tall the lines just drawn turned out to be.
+    /// 描画した線の高さがどれくらいであるかに注目してください。
     fn measure(&self, window: &Range<usize>) {
         let mut heights = self.heights.borrow_mut();
         for line in window.clone() {
@@ -320,18 +265,14 @@ impl View {
         }
     }
 
-    /// Where the view has to be for a line to be drawn at all. A line the
-    /// coming range already reaches leaves the view alone: moving to the caret
-    /// a line at a time is [`Self::reveal`]'s job. A line further off than that
-    /// (Ctrl+End, a search hit, a long paste) is what this is for, because an
-    /// undrawn line cannot be measured, so the view has to move first.
+    /// 線を描画するにはどこにビューがなければなりません。次の範囲がすでに到達している行はビューをそのまま残します。一度に 1 行ずつキャレットに移動するのは [`Self::reveal`] の仕事です。それよりも離れた行 (Ctrl+End、検索ヒット、長いペースト) がこれの目的です。描画されていない線は測定できないため、ビューを最初に移動する必要があります。
     fn scroll_for(&self, line: usize, count: usize) -> f64 {
         let scroll = self.root.scroll_top() as f64;
         if self.window(scroll, count).contains(&line) {
             return scroll;
         }
         let height = self.root.client_height() as f64;
-        // A third of the way down, so that what follows the caret is visible.
+        // 3 分の 1 ほど下に移動して、キャレットの後に続くものが表示されるようにします。
         (self.heights.borrow().top_of(line) - height / 3.0).max(0.0)
     }
 
@@ -355,9 +296,7 @@ impl View {
         Some(holder)
     }
 
-    /// Lines up the column separators of neighbouring lines. This is the one
-    /// thing a line does that a row inside a structure does not: it is about
-    /// several lines at once, which only the document has.
+    /// 隣接する行の列区切り文字を揃えます。これは、構造内の行になく行にできることの 1 つです。一度に数行行われますが、これは文書だけが持つことです。
     fn align_columns(&self, text: &Text, window: &Range<usize>) {
         let mut line = window.start;
         while line < window.end {
@@ -383,8 +322,7 @@ impl View {
             .collect();
         let columns = tabs.iter().map(Vec::len).max().unwrap_or(0);
         for column in 0..columns {
-            // One column at a time, because widening a column moves the ones
-            // after it, and the measurements have to follow.
+            // 一度に 1 列です。列の幅を広げるとその後の列が移動し、測定値もそれに従う必要があるためです。
             let separators: Vec<&Element> =
                 tabs.iter().filter_map(|line| line.get(column)).collect();
             let widest = separators
@@ -399,13 +337,11 @@ impl View {
         }
     }
 
-    /// Draws every caret and every selection, in the text and inside a
-    /// structure alike: they are all rectangles measured from what was drawn.
+    /// テキスト内と構造内に同じようにすべてのキャレットとすべての選択範囲を描画します。それらはすべて、描画されたものから測定された長方形です。
     fn draw_carets(&self, doc: &Document, sels: &[Sel], caret: &Caret<'_>, focused: bool) {
         self.overlay.set_inner_html("");
         let origin = self.lines.get_bounding_client_rect();
-        // While an IME is composing, the underlined text stands in for the
-        // caret, wherever it is.
+        // IME の作成中、下線付きのテキストは、
         let show_carets = focused && caret.composing.is_none();
         if let Some(cursor) = caret.inside {
             if !cursor.is_caret() {
@@ -468,16 +404,12 @@ impl View {
         rects
     }
 
-    /// The rectangles a selection covers in one row. Usually one, but a line
-    /// carried on underneath is covered a piece at a time, one per carried
-    /// line. Each is as tall as what it spans, not as tall as a line: selecting
-    /// a fraction shades the whole fraction, the way selecting a word shades
-    /// the whole word.
+    /// 選択範囲が 1 行でカバーする四角形。通常は 1 つですが、その下に運ばれるラインは一度に 1 つずつ、運ばれるラインごとに 1 つずつカバーされます。それぞれの高さは、行の高さではなく、その範囲と同じです。分数を選択すると、分数全体が影になります。単語を選択すると、単語全体が影になります。
     fn span_in_row(&self, line: usize, path: &Path, from: usize, to: Option<usize>) -> Vec<Box2> {
         let Some(row) = self.row_element(line, path) else {
             return Vec::new();
         };
-        // Selecting past the end of a line shows the newline as a gap.
+        // 行末を超えて選択すると、改行がギャップとして表示されます。
         let past_end = to.is_none();
         measure::span_boxes(&row, from, to.unwrap_or(usize::MAX), past_end)
     }
@@ -486,14 +418,13 @@ impl View {
         self.place_box(at.line, &[], at.col)
     }
 
-    /// Where a place in a row is on screen. `usize::MAX` means the end of it.
+    /// 行内の場所が画面上にある場所。 `usize::MAX` はその終わりを意味します。
     fn place_box(&self, line: usize, path: &Path, index: usize) -> Option<Box2> {
         let row = self.row_element(line, path)?;
         measure::boundary(&row, index)
     }
 
-    /// A line's element, by the line it stands for rather than by its place
-    /// among the children: only some of the lines are in the page.
+    /// 行の要素は、子の中での位置ではなく、その行が表す行によって決まります。ページ内には行の一部のみが存在します。
     fn line_element(&self, line: usize) -> Option<Element> {
         self.lines
             .query_selector(&format!("[{LINE_ATTR}=\"{line}\"]"))
@@ -511,12 +442,9 @@ impl View {
         holder.query_selector(&selector).ok().flatten()
     }
 
-    /// The place in the document a click landed on, at whatever depth: the
-    /// innermost row the point is in decides, so clicking a denominator lands
-    /// in the denominator and not beside the fraction.
+    /// クリックが到達したドキュメント内の場所（深さは問いません）。ポイントが存在する最も内側の行が決定するため、分母をクリックすると、分数の横ではなく分母に到達します。
     pub fn hit(&self, text: &Text, x: f64, y: f64) -> Hit {
-        // Only what is in the page can be hit, so a click is answered with the
-        // drawn lines: everything else is not under the pointer anyway.
+        // ページ内にあるもののみがヒットします。したがって、クリックは描画された線で応答されます。とにかく、他のすべてはポインタの下にありません。
         let drawn = self.drawn.borrow().clone();
         let last = text.line_count() - 1;
         let mut line = drawn.end.saturating_sub(1).min(last);
@@ -535,12 +463,11 @@ impl View {
         }
     }
 
-    /// The place in the text a click landed on, taking an island as a whole.
+    /// テキスト内のクリックが着地した場所。島全体を示します。
     pub fn pos_at_point(&self, text: &Text, x: f64, y: f64) -> Pos {
         match self.hit(text, x, y) {
             Hit::Text(at) => at,
-            // A point inside an island is at the island, and past it once the
-            // pointer is on its right half, so dragging over one takes it in.
+            // 島内の点は島にあり、ポインタが右半分に来ると島を通過するため、1 つ上をドラッグすると島が取り込まれます。
             Hit::Inside(at, _) => match self.island_box(at) {
                 Some(rect) if x > rect.left + rect.width / 2.0 => Pos::new(at.line, at.col + 1),
                 _ => at,
@@ -563,19 +490,13 @@ impl View {
         None
     }
 
-    /// Where the caret is drawn, be that a place in the text or a place inside
-    /// the structure standing there.
+    /// キャレットが描画される場所は、テキスト内の場所であっても、そこに立っている構造内の場所であっても構いません。
     fn caret_box(&self, caret: &Caret<'_>) -> Option<Box2> {
         let (path, index) = caret.place();
         self.place_box(caret.at.line, &path, index)
     }
 
-    /// Scrolls so the caret stays in sight, and reports where it is **in the
-    /// document** so the input element can follow it (which is where IME
-    /// candidates appear). Document, not screen: the input element sits among
-    /// the lines and scrolls with them, and an input element left behind at the
-    /// top of the document is one the browser scrolls back to as soon as it is
-    /// typed into.
+    /// スクロールしてキャレットが見えるようにし、入力要素がキャレットに従うことができるように**文書内の**場所を報告します (ここに IME 候補が表示されます)。画面ではなくドキュメント: input 要素は行の間に配置され、行と一緒にスクロールします。ドキュメントの上部に残された input 要素は、入力されるとすぐにブラウザがスクロールして戻ってくるものです。
     pub fn reveal(&self, caret: &Caret<'_>) -> Option<Box2> {
         let rect = self.caret_box(caret)?;
         let view = measure::box_of(&self.root.get_bounding_client_rect());
@@ -585,8 +506,7 @@ impl View {
         );
         let top = rect.top - view.top + scroll.0;
         let left = rect.left - view.left + scroll.1;
-        // What can be seen is the client box: the room a scrollbar takes is not
-        // room a caret can be seen in.
+        // 見えるのはクライアント ボックスです。スクロールバーが占めるスペースは、キャレットが表示できるスペースではありません。
         let height = self.root.client_height() as f64;
         let width = self.root.client_width() as f64;
         if top < scroll.0 {

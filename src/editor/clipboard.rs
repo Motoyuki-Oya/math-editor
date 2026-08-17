@@ -1,10 +1,6 @@
-//! What copying puts on the clipboard, and what pasting makes of what is there.
+//! コピーによってクリップボードに保存される内容、およびそこにあるものからの貼り付けによって何が作成されるか。
 //!
-//! The clipboard is not a file, so nothing here goes through the file format:
-//! what leaves the editor is ordinary text, read the way the document reads on
-//! screen. The piece itself is kept here beside the text that went out, so a
-//! copy that comes back into the editor keeps its shape, while text from
-//! anywhere else arrives as the plain characters it is.
+//! クリップボードはファイルではないため、ここではファイル形式を介したものは何もありません。エディターから出力されるのは通常のテキストであり、文書が画面上で読み取られる方法を読み取ります。部分自体は、出力されたテキストの横にここに保持されるため、エディタに戻ってくるコピーはその形状を維持しますが、他の場所からのテキストはそのままの文字として到着します。
 
 use std::cell::RefCell;
 
@@ -12,17 +8,17 @@ use crate::structure::ast::{Node, Row};
 use crate::structure::plain;
 use crate::structure::text::Item;
 
-/// A piece of a document on its way through the clipboard.
+/// クリップボードを通過する途中のドキュメントの一部。
 #[derive(Clone)]
 pub enum Clip {
-    /// Lines of the text, structures included.
+    /// テキストの行、構造が含まれる。
     Text(Vec<Vec<Item>>),
-    /// Part of one row of a structure.
+    /// 構造の 1 行の一部。
     Row(Row),
 }
 
 impl Clip {
-    /// How the piece reads as ordinary text.
+    /// 部分が通常のテキストとして読み取られる方法。
     pub fn text(&self) -> String {
         match self {
             Clip::Text(lines) => plain::lines(lines),
@@ -30,8 +26,7 @@ impl Clip {
         }
     }
 
-    /// The piece as lines of the text: a row of plain characters is those
-    /// characters, and a row with a shape becomes one structure.
+    /// テキストの行としての部分: プレーン文字の行はそれらの文字であり、形状を持つ行が 1 つの構造になります。
     pub fn items(&self) -> Vec<Vec<Item>> {
         match self {
             Clip::Text(lines) => lines.clone(),
@@ -51,7 +46,7 @@ impl Clip {
         }
     }
 
-    /// The piece as part of a row, for pasting inside a structure.
+    /// 構造内に貼り付けるための、行の一部としての部分です。
     pub fn row(&self) -> Row {
         match self {
             Clip::Row(row) => row.clone(),
@@ -60,8 +55,7 @@ impl Clip {
                 .flatten()
                 .flat_map(|item| match item {
                     Item::Char(c) => vec![Node::Char(*c)],
-                    // A structure inside a structure is just its own things in
-                    // the row; a column separator has no meaning in one.
+                    // 構造内の構造は、行内にある独自のものです。列区切り文字は、一方では意味を持ちません。
                     Item::Math(row) => row.clone(),
                     Item::Tab => Vec::new(),
                 })
@@ -71,19 +65,18 @@ impl Clip {
 }
 
 thread_local! {
-    /// The last piece copied, with the text that was handed out for it.
+    /// コピーされた最後の部分と、その部分に配布されたテキストです。
     static KEPT: RefCell<Option<(String, Clip)>> = const { RefCell::new(None) };
 }
 
-/// Keeps a copied piece and returns the text to put on the clipboard.
+/// コピーされた部分を保持し、クリップボードに置くテキストを返します。
 pub fn keep(clip: Clip) -> String {
     let text = clip.text();
     KEPT.with(|kept| *kept.borrow_mut() = Some((text.clone(), clip)));
     text
 }
 
-/// The piece that was copied, when the pasted text is the one it went out as.
-/// Anything else came from somewhere outside and is plain text.
+/// 貼り付けられたテキストがそのまま出力された場合、コピーされた部分。それ以外のものは外部のどこかから来たものであり、プレーン テキストです。
 pub fn pasted(text: &str) -> Option<Clip> {
     KEPT.with(|kept| {
         kept.borrow()
@@ -121,14 +114,13 @@ mod tests {
         assert!(pasted("x/y").is_none());
     }
 
-    /// An empty structure reads as nothing, so whether there is something to
-    /// copy cannot be decided by the text: that is the selection's business.
+    /// 空の構造は何も読み取られないため、コピーするものがあるかどうかはテキストによって決定できません。それが選択の仕事です。
     #[test]
     fn an_empty_structure_reads_as_nothing() {
         assert_eq!(Clip::Text(vec![vec![Item::Math(Vec::new())]]).text(), "");
     }
 
-    /// Plain characters copied out of a structure are plain characters.
+    /// 構造からコピーされたプレーン キャラクタはプレーン キャラクタです。
     #[test]
     fn a_row_of_characters_pastes_as_characters() {
         let clip = Clip::Row(vec![Node::Char('a'), Node::Char('b')]);

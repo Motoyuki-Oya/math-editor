@@ -1,11 +1,6 @@
-//! The one component that draws a row.
+//! 行を描画する 1 つのコンポーネントです。
 //!
-//! A row is a row wherever it is: a line of the document, the inside of an
-//! island, the numerator of a fraction. They are all drawn by this component,
-//! so a character, an IME's uncommitted text and a nested structure behave the
-//! same at every depth. A row knows where it is from its path, and that is the
-//! only thing that differs: the path of a line of the document is empty, and a
-//! line is the only row that accepts a column separator.
+//! 行は、ドキュメントの行、アイランドの内部、分数の分子など、どこにあっても行です。これらはすべてこのコンポーネントによって描画されるため、文字、IME のコミットされていないテキスト、およびネストされた構造は、どの深さでも同じように動作します。行はパスからその行がどこにあるかを認識しており、それが唯一の違いです。ドキュメントの行のパスは空で、行は列区切り文字を受け入れる唯一の行です。
 
 use web_sys::{Document, Element};
 
@@ -20,16 +15,14 @@ pub const RUN_CLASS: &str = "mn-run";
 pub const FIELD_CLASS: &str = "mn-field";
 pub const TAB_CLASS: &str = "mn-tab";
 pub const PREEDIT_CLASS: &str = "mn-preedit";
-/// The box an empty row shows so that it can be seen and clicked on.
+/// 空の行が表示され、クリックできるように表示されるボックス。
 pub const PLACEHOLDER_CLASS: &str = "mn-placeholder";
-/// The path of the row an element is, written on every row.
+/// 要素が存在する行のパス。各行に書き込まれます。
 pub const PATH_ATTR: &str = "data-path";
-/// The place in the row an element starts at, written on everything in a row.
+/// 要素が開始する行内の場所。行内のすべてに書き込まれます。
 pub const START_ATTR: &str = "data-start";
 
-/// Where a row is: the slots to walk through to reach it. Slots are `(the place
-/// of the thing in its row, which of its rows)`, so `1.0,2.1` is the second row
-/// of the third thing of the first row of the second thing of the line.
+/// Where行は、そこに到達するために通過するスロットです。スロットは `(その行内のものの位置、その行のどの位置)` です。したがって、`1.0,2.1` は、その行の 1 行目の 3 番目の 2 番目の行の 2 番目の行です。
 pub type Path = [(usize, usize)];
 
 pub fn encode_path(path: &Path) -> String {
@@ -50,15 +43,14 @@ pub fn decode_path(encoded: &str) -> Option<Vec<(usize, usize)>> {
         .collect()
 }
 
-/// One thing in a row. A line of the document and a slot inside a structure
-/// hold different things, and this is where that difference ends.
+/// 行内の 1 つのもの。ドキュメントの行と構造内のスロットは異なるものを保持しており、これがその違いの終点です。
 pub enum Cell<'a> {
     Char(char),
-    /// A column separator, which only a line of the document has.
+    /// ドキュメントの行のみにある列区切り文字。
     Tab,
-    /// An island: a piece of a line that needs two dimensions.
+    /// アイランド: 2 つの次元が必要な行の一部。
     Field(&'a Row),
-    /// Something inside a formula.
+    /// 数式内の何か。
     Node(&'a Node),
 }
 
@@ -77,8 +69,7 @@ pub fn cells_of_row(row: &Row) -> Vec<Cell<'_>> {
     row.iter().map(Cell::Node).collect()
 }
 
-/// Text an IME has not committed yet, and the place in the document it will
-/// land in: the row, and how far into it.
+/// IME がまだコミットしていないテキスト、およびドキュメント内の配置先: 行とそのどこまで。
 pub struct Preedit<'a> {
     pub path: Vec<(usize, usize)>,
     pub index: usize,
@@ -90,8 +81,7 @@ pub struct Renderer<'a> {
     preedit: Option<&'a Preedit<'a>>,
 }
 
-/// Characters waiting to be drawn as one span, which is how text keeps its
-/// spacing and its shape.
+/// 待機中の文字1 つのスパンとして描画されます。これにより、テキストの間隔と形状が維持されます。
 struct Run {
     start: usize,
     class: &'static str,
@@ -108,15 +98,14 @@ impl<'a> Renderer<'a> {
         self
     }
 
-    /// Draws a line of the document. A line is the row whose path is empty.
+    /// ドキュメントの線を描画します。行とは、パスが空の行です。
     pub fn line(&self, items: &[Item]) -> Element {
         self.row(&cells_of_line(items), &[])
     }
 
-    /// Draws one row, wherever it is.
+    /// どこにでも 1 行を描画します。
     pub fn row(&self, cells: &[Cell<'_>], path: &Path) -> Element {
-        // A line of the document is prose; anything inside an island is a
-        // formula, and its letters are set the way a formula's are.
+        // 文書の行は散文です。アイランド内のすべてのものは数式であり、その文字は数式と同じように設定されます。
         let math = !path.is_empty();
         let container = self.el("span", ROW_CLASS);
         container.set_attribute(PATH_ATTR, &encode_path(path)).ok();
@@ -159,7 +148,7 @@ impl<'a> Renderer<'a> {
         container
     }
 
-    /// An empty row still needs something to measure and to click on.
+    /// 空の行でも、測定してクリックする必要があります。
     fn empty(&self, math: bool) -> Element {
         let class = if math { PLACEHOLDER_CLASS } else { RUN_CLASS };
         let element = self.el("span", class);
@@ -185,7 +174,7 @@ impl<'a> Renderer<'a> {
 
     fn cell(&self, cell: &Cell<'_>, path: &Path, index: usize) -> Element {
         match cell {
-            // Handled by the run above; a run is never a cell of its own.
+            // 上記の実行によって処理されます。ランは決して独自のセルではありません。
             Cell::Char(c) => self.span(char_class(*c, !path.is_empty()), &c.to_string()),
             Cell::Tab => self.el("span", TAB_CLASS),
             Cell::Field(row) => {
@@ -227,8 +216,7 @@ impl<'a> Renderer<'a> {
             }
             Node::Func(name) => self.span("mn-atom mn-func", name),
             Node::Stack { between, .. } => {
-                // Equal halves above and below the rule put the rule in the
-                // middle of the box, and the middle is what the row aligns on.
+                // ルールの上下が等しい場合、ルールはボックスの中央に配置され、その中央に行が配置されます。
                 let frac = self.el("span", "mn-frac");
                 let num = self.el("span", "mn-frac-num");
                 num.append_child(&self.child_row(node, 0, path, index)).ok();
@@ -253,11 +241,7 @@ impl<'a> Renderer<'a> {
                         .ok();
                     sqrt.append_child(&degree).ok();
                 }
-                // The sign is laid over the body, which leaves the body in the
-                // text: the root sits on the same baseline as what is around it.
-                // The kick, the descent and the long rising stroke, which is
-                // slanted rather than upright: that slant is what makes the
-                // sign read as a radical and not as a bracket.
+                // 記号は本体の上に配置され、テキスト内に本体が残ります。つまり、ルートはその周囲にあるものと同じベースライン上にあります。キック、下降、および長い上昇ストローク。直立ではなく傾斜しています。この傾斜により、記号は括弧ではなく部首として読み取られます。
                 sqrt.append_child(&self.svg(
                     "mn-radical",
                     "0 0 26 100",
@@ -353,14 +337,13 @@ impl<'a> Renderer<'a> {
         }
     }
 
-    /// An arrow between the two rows of a stack. The shaft is a flexible line
-    /// so the arrow ends up as wide as the wider row, like the rule is.
+    /// スタックの 2 行間の矢印。シャフトは柔軟な線なので、ルールと同様に、矢印は幅の広い行と同じ幅になります。
     fn arrow(&self, arrow: char) -> Element {
         let holder = self.el("span", "mn-arrow");
         let shaft = || self.el("span", "mn-arrow-shaft");
         let glyph = self.span("mn-arrow-head", &arrow.to_string());
         match arrow {
-            // The glyph carries the head, so the line goes on its blunt side.
+            // グリフは頭を運ぶので、線は鈍い側に進みます。
             '→' | '⇒' | '↦' => {
                 holder.append_child(&shaft()).ok();
                 holder.append_child(&glyph).ok();
@@ -369,7 +352,7 @@ impl<'a> Renderer<'a> {
                 holder.append_child(&glyph).ok();
                 holder.append_child(&shaft()).ok();
             }
-            // Two heads: each end is a glyph of its own, with the line between.
+            // 2 つの頭: それぞれの端は独自のグリフで、間に線があります。
             '↔' | '⇔' => {
                 let (left, right) = if arrow == '↔' {
                     ('←', '→')
@@ -384,7 +367,7 @@ impl<'a> Renderer<'a> {
                     .append_child(&self.span("mn-arrow-head", &right.to_string()))
                     .ok();
             }
-            // A pair of arrows, one above the other, both stretched.
+            // 一対の矢印が上下に並び、両方とも引き伸ばされます。
             '⇄' => {
                 let column = self.el("span", "mn-arrow-pair");
                 column.append_child(&self.arrow('→')).ok();
@@ -453,8 +436,7 @@ impl<'a> Renderer<'a> {
     }
 }
 
-/// How a character is set. Letters read the same as in the text around them;
-/// the classes are for spacing — an operator gets air, a digit does not.
+/// 文字の設定方法。文字はその周囲のテキストと同じように読み取れます。クラスはスペースを確保するためのものです。演算子には空気が入りますが、数字には空気が入りません。
 fn char_class(c: char, math: bool) -> &'static str {
     if !math {
         return RUN_CLASS;

@@ -1,6 +1,4 @@
-//! The editor core: a document the editor renders itself, instead of letting
-//! the browser edit a `contenteditable` element. Keyboard and IME input arrive
-//! through a hidden textarea, which is what makes several cursors possible.
+//! エディター コア: ブラウザーに「contenteditable」要素を編集させる代わりに、エディター自体がレンダリングするドキュメント。キーボードと IME の入力は、隠しテキストエリアを介して届きます。これにより、複数のカーソルが可能になります。
 
 pub mod clipboard;
 mod commands;

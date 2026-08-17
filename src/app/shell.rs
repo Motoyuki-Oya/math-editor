@@ -1,5 +1,4 @@
-//! The state of the application: the panes, the tabs, the files they show,
-//! and what opening, saving and closing them does.
+//! アプリケーションの状態: ペイン、タブ、それらに表示されるファイル、およびそれらを開く、保存する、閉じる際の動作。
 
 use leptos::prelude::*;
 use leptos::reactive::owner::{LocalStorage, Owner};
@@ -12,8 +11,7 @@ use crate::ipc;
 const UNTITLED: &str = "無題";
 
 thread_local! {
-    /// Names the next tab. A tab's number is also the name of its draft, so it
-    /// has to outlive the tab itself: a restored draft keeps its number.
+    /// 次のタブに名前を付けます。タブの番号はそのドラフトの名前でもあるため、タブ自体よりも存続する必要があります。復元されたドラフトではその番号が保持されます。
     static NEXT_ID: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -23,11 +21,10 @@ fn next_id() -> usize {
     id
 }
 
-/// One open file. The document itself lives in the editor while the tab is
-/// shown, and is parked here while another tab is.
+/// 開いているファイルが 1 つあります。ドキュメント自体は、タブが表示されている間はエディター内に存在し、別のタブが表示されている間はここに保留されます。
 #[derive(Clone, Copy)]
 pub(super) struct Tab {
-    /// Names this tab's draft on disk.
+    /// ディスク上のこのタブのドラフトに名前を付けます。
     pub(super) id: RwSignal<usize>,
     pub(super) path: RwSignal<Option<String>>,
     pub(super) dirty: RwSignal<bool>,
@@ -53,15 +50,14 @@ impl Tab {
     }
 }
 
-/// One view on the documents: its own tab strip and its own editor. Split view
-/// is what makes there be more than one.
+/// ドキュメントの 1 つのビュー: 独自のタブ ストリップと独自のエディター。分割ビューを使用すると、複数のビューが表示されます。
 #[derive(Clone, Copy)]
 pub(super) struct Pane {
-    /// Names this pane in the editor core, once its element exists.
+    /// 要素が存在すると、エディター コアでこのペインに名前を付けます。
     pub(super) editor: StoredValue<Option<usize>>,
     pub(super) tabs: RwSignal<Vec<Tab>>,
     pub(super) current: RwSignal<usize>,
-    /// Keeps the pane's element across renders.
+    /// レンダリング間でペインの要素を保持します。
     pub(super) key: usize,
 }
 
@@ -90,12 +86,11 @@ impl Pane {
             .with_untracked(|tabs| tabs[index.min(tabs.len() - 1)])
     }
 
-    /// Takes the shown document off screen, keeping it with its tab.
+    /// 表示されているドキュメントを画面から外し、タブを付けたままにします。
     pub(super) fn park(&self) {
         let pane = self.editor_pane();
         let tab = self.tab_untracked();
-        // Written now: once the document is off screen the draft cannot read
-        // it from the pane any more.
+        // 現在作成中: ドキュメントが画面から消えると、下書きはペインからそれを読み取ることができなくなります。
         if tab.dirty.get_untracked() {
             drafts::write(tab, pane);
         }
@@ -105,23 +100,22 @@ impl Pane {
 
 #[derive(Clone, Copy)]
 pub(super) struct Shell {
-    /// Panes and tabs are made under this owner, which outlives every pane, so
-    /// that closing one does not drop the documents it hands over.
+    /// ペインとタブはこの所有者の下で作成され、各ペインの存続​​期間を超えて存続するため、ペインを閉じても、渡されたドキュメントが削除されることはありません。
     pub(super) root: StoredValue<Owner, LocalStorage>,
     pub(super) panes: RwSignal<Vec<Pane>>,
-    /// Which pane takes the typing.
+    /// どのペインが入力を必要とするか。
     pub(super) focused: RwSignal<usize>,
     pub(super) next_key: RwSignal<usize>,
     pub(super) status: RwSignal<String>,
     pub(super) stats: RwSignal<(usize, usize)>,
     pub(super) searching: RwSignal<bool>,
-    /// Whether the settings are on screen.
+    /// 設定が画面上に表示されるかどうか。
     pub(super) preferences: RwSignal<bool>,
-    /// The field of the find bar waiting for the cursor, once it is on screen.
+    /// カーソルが画面上に表示されると、それを待機する検索バーのフィールド。
     pub(super) find_focus: RwSignal<Option<Field>>,
 }
 
-/// A field of the find bar, named so a shortcut can ask for it.
+/// 検索バーのフィールド。ショートカットで検索できるように名前が付けられています。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Field {
     Query,
@@ -129,8 +123,7 @@ pub(super) enum Field {
 }
 
 impl Shell {
-    /// Opens the find bar with the cursor in `field`, which is what Ctrl+F and
-    /// Ctrl+R do.
+    /// カーソルが「フィールド」にある状態で検索バーを開きます。これは、Ctrl+F および Ctrl+R で行われることです。
     pub(super) fn find(&self, field: Field) {
         self.searching.set(true);
         self.find_focus.set(Some(field));
@@ -171,7 +164,7 @@ impl Shell {
         self.stats.set(editor::stats());
     }
 
-    /// Tells the native side whether closing the window would lose work.
+    /// ウィンドウを閉じると作業が失われるかどうかをネイティブ側に伝えます。
     pub(super) fn sync_dirty(&self) {
         let any = self.panes.with_untracked(|panes| {
             panes.iter().any(|pane| {
@@ -182,7 +175,7 @@ impl Shell {
         spawn_local(ipc::set_dirty(any));
     }
 
-    /// Marks the document of the pane the change came from.
+    /// 変更元のペインのドキュメントをマークします。
     pub(super) fn mark_dirty(&self, editor_pane: usize) {
         let pane = self
             .panes
@@ -202,7 +195,7 @@ impl Shell {
         self.refresh();
     }
 
-    /// The document now matches its file, so its draft has nothing to restore.
+    /// ドキュメントがそのファイルと一致するようになったので、そのドラフトには復元するものは何もありません。
     pub(super) fn mark_clean(&self) {
         let tab = self.tab_untracked();
         tab.dirty.set(false);
@@ -211,7 +204,7 @@ impl Shell {
         self.refresh();
     }
 
-    /// Sends the typing to the pane a click landed in.
+    /// クリックされたペインに入力内容を送信します。
     pub(super) fn focus_on(&self, pane: Pane) {
         if let Some(index) = self.index_of(pane) {
             self.focused.set(index);
@@ -223,8 +216,7 @@ impl Shell {
             .with_untracked(|panes| panes.iter().position(|other| other.key == pane.key))
     }
 
-    /// The pane a click or the focus landed in becomes the one in use, so that
-    /// the status bar and the shortcuts follow the caret.
+    /// クリックまたはフォーカスが置かれたペインが使用中のペインになり、ステータス バーとショートカットがキャレットに従います。
     pub(super) fn note_focus(&self, pane: Pane) {
         let Some(index) = self.index_of(pane) else {
             return;
@@ -236,7 +228,7 @@ impl Shell {
         self.refresh();
     }
 
-    /// Sends the typing to a pane.
+    /// 入力内容をペインに送信します。
     pub(super) fn focus_pane(&self, index: usize) {
         let Some(pane) = self.panes.with_untracked(|panes| panes.get(index).copied()) else {
             return;
@@ -246,7 +238,7 @@ impl Shell {
         self.refresh();
     }
 
-    /// Shows the tab at `index` of `pane`, parking the one on screen.
+    /// `pane` の `index` にあるタブを表示し、そのタブを画面上に駐車します。
     pub(super) fn switch(&self, pane: Pane, index: usize) {
         let current = pane.current.get_untracked();
         let Some(next) = pane.tabs.with_untracked(|tabs| tabs.get(index).copied()) else {
@@ -261,12 +253,11 @@ impl Shell {
         self.show(pane, next);
     }
 
-    /// Puts a tab's document on screen in `pane`, keeping its unsaved mark.
+    /// タブのドキュメントを `pane` の画面に置き、未保存のマークを保持します。
     pub(super) fn show(&self, pane: Pane, tab: Tab) {
         let dirty = tab.dirty.get_untracked();
         let parked = tab.parked.try_update_value(Option::take).flatten();
-        // Drawing the document counts as a change, so the mark is set back —
-        // and with it the draft, which drawing must not create either.
+        // 文書を描画することは変更としてカウントされるため、マークは元に戻されます。また、それとともに下書きも設定され、その描画も作成してはなりません。
         editor::restore(pane.editor_pane(), parked);
         tab.dirty.set(dirty);
         if !dirty {
@@ -277,7 +268,7 @@ impl Shell {
         editor::focus_pane(pane.editor_pane());
     }
 
-    /// Opens an empty tab, or reuses the shown one when it is untouched.
+    /// 空のタブを開くか、表示されているタブが未操作の場合は再利用します。
     pub(super) fn add_tab(&self, pane: Pane) -> Tab {
         let shown = pane.tab_untracked();
         if shown.path.get_untracked().is_none() && !shown.dirty.get_untracked() {
@@ -308,12 +299,11 @@ impl Shell {
             {
                 return;
             }
-            // Thrown away on purpose.
+            // わざと捨てた。
             drafts::forget(tab);
             let current = pane.current.get_untracked();
             if pane.tabs.with_untracked(Vec::len) == 1 {
-                // The last tab stays, emptied, so there is always a document.
-                // It becomes a new tab as far as drafts go.
+                // 最後のタブは空のままなので、常にドキュメントが存在します。下書きに関しては、新しいタブになります。
                 tab.id.set(next_id());
                 tab.path.set(None);
                 editor::restore(pane.editor_pane(), None);
@@ -342,7 +332,7 @@ impl Shell {
         });
     }
 
-    /// Adds a pane beside the shown one, or removes the shown one.
+    /// 表示されているペインの横にペインを追加するか、表示されているペインを削除します。
     pub(super) fn toggle_split(&self) {
         if self.panes.with_untracked(Vec::len) > 1 {
             self.unsplit();
@@ -355,8 +345,7 @@ impl Shell {
         self.focus_pane(self.panes.with_untracked(|panes| panes.len() - 1));
     }
 
-    /// Keeps the pane in use and drops the other one. Its tabs move over, so no
-    /// document is closed.
+    /// ペインの使用を維持し、他のペインを削除します。タブが移動するため、ドキュメントは閉じられません。
     pub(super) fn unsplit(&self) {
         let count = self.panes.with_untracked(Vec::len);
         if count < 2 {
@@ -368,7 +357,7 @@ impl Shell {
             .panes
             .with_untracked(|panes| (panes[index], panes[staying]));
         going.park();
-        // The tabs move first: the pane they came from owns them until it goes.
+        // タブが最初に移動します。タブが移動するまでは、タブの元のペインがタブを所有します。
         let moved = going.tabs.get_untracked();
         staying.tabs.update(|tabs| tabs.extend(moved));
         self.panes.update(|panes| {
@@ -401,9 +390,7 @@ impl Shell {
         });
     }
 
-    /// Opens what was on screen when the application last stopped. The drafts
-    /// come back as unsaved tabs, keeping their numbers so that a second stop
-    /// overwrites the same drafts.
+    /// アプリケーションが最後に停止したときに画面に表示されていたものを開きます。ドラフトは未保存のタブとして返され、番号が保持されるため、2 番目のストップで同じドラフトが上書きされます。
     pub(super) fn restore_drafts(&self, drafts: Vec<ipc::Draft>) {
         if drafts.is_empty() {
             return;

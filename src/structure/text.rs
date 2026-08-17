@@ -1,18 +1,15 @@
-//! A document: lines of [`Item`]s, where an island counts as one item.
+//! ドキュメント: [`Item`] の行。アイランドは 1 つのアイテムとしてカウントされます。
 //!
-//! This is the shape both the notation and the display work from, and it holds
-//! the structures themselves, so neither of them has to know about the other.
+//! これは、表記と表示の両方が機能する形状であり、構造自体を保持するため、どちらも他の構造について知る必要はありません。
 
 use super::ast::Row;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Item {
     Char(char),
-    /// A column separator. Separators on neighbouring lines line up with each
-    /// other; it carries no content of its own.
+    /// 列区切り文字。隣接する行のセパレータは互いに並びます。独自の内容は持ちません。
     Tab,
-    /// An island: a piece of the text that needs two dimensions, held as the
-    /// structure itself rather than as the notation it is stored in.
+    /// アイランド: 2 次元を必要とするテキストの一部で、表記法としてではなく構造自体として保持されます。
     Math(Row),
 }
 
@@ -25,7 +22,7 @@ impl Item {
     }
 }
 
-/// A place between two items. `col` counts items, not bytes.
+/// 2 つの項目の間の場所。 `col` はバイトではなく項目をカウントします。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Pos {
     pub line: usize,
@@ -38,7 +35,7 @@ impl Pos {
     }
 }
 
-/// A caret (`anchor == head`) or a selected range, growing from `anchor`.
+/// キャレット (`anchor == head`) または `anchor` から伸びる選択範囲。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sel {
     pub anchor: Pos,
@@ -73,7 +70,7 @@ impl Sel {
     }
 }
 
-/// The lines of the document. There is always at least one line.
+/// ドキュメントの行。常に少なくとも 1 つの行があります。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Text {
     lines: Vec<Vec<Item>>,
@@ -141,7 +138,7 @@ impl Text {
         out
     }
 
-    /// Removes everything between the two places and returns where they joined.
+    /// 2 つの場所の間のすべてを削除し、それらが結合した場所を返します。
     pub fn remove(&mut self, from: Pos, to: Pos) -> Pos {
         let (from, to) = (self.clamp(from), self.clamp(to));
         if from == to {
@@ -154,7 +151,7 @@ impl Text {
         from
     }
 
-    /// Inserts lines of items and returns the place just after them.
+    /// 項目の行を挿入し、その直後の場所を返します。
     pub fn insert(&mut self, at: Pos, mut what: Vec<Vec<Item>>) -> Pos {
         let at = self.clamp(at);
         if what.is_empty() {
@@ -183,8 +180,7 @@ impl Text {
         end
     }
 
-    /// The island at `at`, to be edited in place. Editing an island is editing
-    /// the document: there is no copy of it to write back.
+    /// その場で編集される「at」の島。アイランドの編集はドキュメントの編集です。書き戻すドキュメントのコピーはありません。
     pub fn math_at_mut(&mut self, at: Pos) -> Option<&mut Row> {
         match self
             .lines
@@ -196,18 +192,18 @@ impl Text {
         }
     }
 
-    /// Characters and lines, for the status bar. A formula counts as one.
+    /// ステータス バーの文字と行。数式は 1 つとしてカウントされます。
     pub fn stats(&self) -> (usize, usize) {
         (self.lines.iter().map(Vec::len).sum(), self.line_count())
     }
 }
 
-/// The place one item to the left on the same line, if there is one.
+/// 項目がある場合は、同じ行の 1 つの項目を左に配置します。
 pub fn before_col(at: Pos) -> Option<Pos> {
     (at.col > 0).then(|| Pos::new(at.line, at.col - 1))
 }
 
-/// The place one item to the left, used after inserting an item to point at it.
+/// 項目を 1 つ左に配置します。項目を挿入してポイントした後に使用されます。
 pub fn before_pos(at: Pos) -> Pos {
     before_col(at).unwrap_or(at)
 }

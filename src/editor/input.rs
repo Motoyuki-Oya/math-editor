@@ -1,8 +1,6 @@
-//! Keyboard, IME and mouse handling for the editor core.
+//! エディター コアのキーボード、IME、およびマウスの処理。
 //!
-//! Typing goes through a hidden textarea: the browser gives it the keystrokes
-//! and the IME composition, and every change is applied to the model at all of
-//! the carets at once.
+//! 入力は非表示のテキストエリアを経由します。ブラウザーはキーストロークと IME の構成を提供し、すべての変更がモデルのすべてのキャレットに同時に適用されます。
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -33,7 +31,7 @@ pub fn build(doc: &Document, root: &HtmlElement) -> Option<HtmlTextAreaElement> 
     Some(textarea)
 }
 
-/// Wires the events that make the editor usable.
+/// エディターを使用可能にするイベントを結び付けます。
 pub fn install(session: &Rc<RefCell<Session>>) {
     let textarea = session.borrow().textarea.clone();
     let root = session.borrow().view.root.clone();
@@ -107,8 +105,7 @@ pub fn install(session: &Rc<RefCell<Session>>) {
     on(&root, "dblclick", session, |session, event: MouseEvent| {
         mouse::on_dblclick(session, event);
     });
-    // Only the lines that can be seen are in the page, so scrolling has to draw
-    // the ones that came into sight.
+    // ページ内には表示されている行のみが存在するため、スクロールでは表示された行を描画する必要があります。
     on(&root, "scroll", session, |session, _: web_sys::Event| {
         session::scrolled(session);
     });
@@ -148,8 +145,7 @@ pub fn install(session: &Rc<RefCell<Session>>) {
 }
 
 fn copy_selection(session: &Rc<RefCell<Session>>, event: &web_sys::ClipboardEvent, remove: bool) {
-    // Whether there is anything to copy is a question about the selection, not
-    // about the text it reads as: an empty structure reads as nothing.
+    // コピーするものがあるかどうかは、読み取られるテキストについてではなく、選択内容についての質問です。空の構造は何も読み取られません。
     let Some(text) = commands::selected_text(session) else {
         return;
     };
@@ -162,7 +158,7 @@ fn copy_selection(session: &Rc<RefCell<Session>>, event: &web_sys::ClipboardEven
     }
 }
 
-/// Adds a listener that borrows the session only while it runs.
+/// 実行中のみセッションを借用するリスナーを追加します。
 fn on<E, T>(
     target: &T,
     name: &str,
@@ -181,7 +177,7 @@ fn on<E, T>(
     closure.forget();
 }
 
-/// Whether a mouse event asks for another caret rather than moving the only one.
+/// マウス イベントが唯一のキャレットを移動するのではなく、別のキャレットを要求するかどうか。
 pub fn adds_caret(event: &MouseEvent) -> bool {
     event.alt_key()
 }

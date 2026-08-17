@@ -1,5 +1,4 @@
-//! One editing session per pane: the ledger of who is on screen, who has the
-//! focus, and how a change reaches the screen and the shell.
+//! ペインごとに 1 つの編集セッション: 誰が画面上にあるか、誰がフォーカスを持っているか、および変更が画面とシェルにどのように到達するかの台帳。
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -13,33 +12,33 @@ use crate::format::document;
 use crate::view::document::{Caret, View};
 
 pub struct Session {
-    /// Names the pane this document is shown in.
+    /// このドキュメントが表示されているペインに名前を付けます。
     pub pane: usize,
     pub editor: Editor,
     pub view: View,
     pub textarea: HtmlTextAreaElement,
     pub focused: bool,
     pub composing: bool,
-    /// What the IME is composing right now, drawn where it will be inserted.
+    /// IME が現在作成している内容、挿入される場所に描画されます。
     pub preedit: String,
     pub dragging: bool,
-    /// Where the next search carries on from, which may be inside a structure.
+    /// 次の検索がどこから行われるか。構造の内部にある可能性があります。
     pub search_from: Option<search::Key>,
 }
 
-/// Called with the pane whose document changed.
+/// ドキュメントが変更されたペインで呼び出されます。
 type OnChange = Box<dyn Fn(usize)>;
 
 thread_local! {
-    /// One session per pane on screen. Split view is what makes it a list.
+    /// ペインごとに 1 つのセッション画面。分割ビューはリストを作成します。
     static PANES: RefCell<Vec<Rc<RefCell<Session>>>> = const { RefCell::new(Vec::new()) };
-    /// The pane that takes the typing.
+    /// 入力を行うペイン。
     static FOCUSED: Cell<usize> = const { Cell::new(0) };
     static NEXT_PANE: Cell<usize> = const { Cell::new(0) };
     static ON_CHANGE: RefCell<Option<OnChange>> = const { RefCell::new(None) };
 }
 
-/// The session of the pane that takes the typing.
+/// 入力を行うペインのセッション。
 pub fn session() -> Option<Rc<RefCell<Session>>> {
     let focused = FOCUSED.get();
     PANES.with(|panes| {
@@ -62,7 +61,7 @@ fn pane_session(pane: usize) -> Option<Rc<RefCell<Session>>> {
     })
 }
 
-/// Builds an editor inside `root`. The returned number names the pane.
+/// `root` 内にエディターを構築します。返された番号はペインに名前を付けます。
 pub fn init(root: &HtmlElement) -> Option<usize> {
     let doc = root.owner_document()?;
     let view = View::new(root.clone())?;
@@ -89,7 +88,7 @@ pub fn init(root: &HtmlElement) -> Option<usize> {
     Some(pane)
 }
 
-/// Drops a pane, when the split is undone.
+/// 分割が元に戻されると、ペインを削除します。
 pub fn close_pane(pane: usize) {
     PANES.with(|panes| {
         panes
@@ -104,7 +103,7 @@ pub fn close_pane(pane: usize) {
     }
 }
 
-/// Sends the typing to `pane`.
+/// 入力を「ペイン」に送信します。
 pub fn focus_pane(pane: usize) {
     if pane_session(pane).is_some() {
         FOCUSED.set(pane);
@@ -112,7 +111,7 @@ pub fn focus_pane(pane: usize) {
     focus();
 }
 
-/// The pane the events came from is the one that takes the typing.
+/// イベントが発生したペインが、入力を受け取るペインです。
 pub fn note_focus(session: &Rc<RefCell<Session>>) {
     FOCUSED.set(session.borrow().pane);
 }
@@ -152,9 +151,7 @@ pub fn redraw(session: &Rc<RefCell<Session>>) {
     }
 }
 
-/// Draws again after the view was scrolled, so the lines that came into sight
-/// are put in the page. Unlike [`redraw`] this leaves the view where the user
-/// scrolled it to and does not move it to the caret.
+/// ビューがスクロールされた後に再度描画するため、表示された行がページに配置されます。 [`redraw`] とは異なり、これはユーザーがスクロールしたビューを残し、キャレットに移動しません。
 pub fn scrolled(session: &Rc<RefCell<Session>>) {
     let session = session.borrow();
     let caret = caret_of(&session);
@@ -166,7 +163,7 @@ pub fn scrolled(session: &Rc<RefCell<Session>>) {
     );
 }
 
-/// One caret describes both cases, so the drawing has no mode to pick.
+/// 1 つのキャレットで両方のケースを説明するため、描画に選択するモードはありません。
 fn caret_of(session: &Session) -> Caret<'_> {
     Caret {
         at: session.editor.primary().head,
@@ -175,8 +172,7 @@ fn caret_of(session: &Session) -> Caret<'_> {
     }
 }
 
-/// Redraws every pane, for when something that shapes all of them (the
-/// settings) has changed.
+/// すべてのペインを形成する何か (設定) が変更された場合に備えて、すべてのペインを再描画します。
 pub fn redraw_all() {
     let sessions = PANES.with(|panes| panes.borrow().clone());
     for session in sessions {
@@ -192,27 +188,26 @@ pub fn focus() {
     let Some(session) = session() else { return };
     let textarea = session.borrow().textarea.clone();
     textarea.focus().ok();
-    // Focusing an element that already has the focus fires no event, so the
-    // carets would stay hidden if we waited for one.
+    // すでにフォーカスがある要素にフォーカスしてもイベントは発生しないため、イベントを待っていてもキャレットは非表示のままになります。
     if !session.borrow().focused {
         session.borrow_mut().focused = true;
         redraw(&session);
     }
 }
 
-/// A whole document, kept aside while another tab is shown.
+/// Aドキュメント全体。別のタブが表示されている間脇に置かれます。
 pub struct Parked {
     editor: Editor,
 }
 
-/// Takes a pane's document out so that another one can take its place.
+/// ペインのドキュメントを取り出して、別のペインがその場所に移動できるようにします。
 pub fn park(pane: usize) -> Option<Parked> {
     let session = pane_session(pane)?;
     let editor = std::mem::take(&mut session.borrow_mut().editor);
     Some(Parked { editor })
 }
 
-/// Shows a parked document in `pane`, or an empty one.
+/// 「ペイン」に保留されているドキュメント、または空のドキュメントを表示します。
 pub fn restore(pane: usize, parked: Option<Parked>) {
     let Some(session) = pane_session(pane) else {
         return;
@@ -237,8 +232,7 @@ pub fn to_document() -> String {
         .unwrap_or_default()
 }
 
-/// The document of one pane, whichever pane has the typing. Used by the
-/// drafts, which follow the pane a change came from.
+/// 1 つのペインのドキュメント（入力されているペインのいずれか）。変更元のペインに続くドラフトで使用されます。
 pub fn document_of(pane: usize) -> Option<String> {
     let session = pane_session(pane)?;
     let text = document::write(session.borrow().editor.text());

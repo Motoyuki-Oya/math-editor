@@ -1,4 +1,4 @@
-//! The undo history: snapshots of the document, and how steps join.
+//! 元に戻す履歴: ドキュメントのスナップショット、およびステップの結合方法。
 
 use super::Editor;
 use crate::structure::ast::Cursor;
@@ -6,7 +6,7 @@ use crate::structure::text::{Sel, Text};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Step {
-    /// Typed characters, which join with the step before them.
+    /// 入力された文字。その前のステップと結合します。
     Typing,
     Other,
 }
@@ -18,15 +18,14 @@ struct Snapshot {
     inside: Option<Cursor>,
 }
 
-/// What has been done, held as whole snapshots. Only [`Editor`] writes here:
-/// the history knows when steps join, the editor knows what a step is.
+/// 実行内容。スナップショット全体として保持されます。 [`Editor`] だけがここに書き込みます。履歴はステップがいつ結合するかを知っており、エディタはステップが何であるかを知っています。
 pub(super) struct History {
     past: Vec<Snapshot>,
     future: Vec<Snapshot>,
     last: Step,
-    /// Set while several edits are being made as one step of the history.
+    /// いくつかの編集が履歴の 1 ステップとして行われている間に設定されます。
     grouping: bool,
-    /// Set once that step has been written, so the rest join it.
+    /// そのステップが書き​​込まれると、残りがそれに結合されるように設定されます。
     grouped: bool,
 }
 
@@ -43,15 +42,14 @@ impl Default for History {
 }
 
 impl History {
-    /// Forgets everything, when another document takes the editor over.
+    /// 別のドキュメントがエディタを引き継ぐと、すべてが忘れられます。
     pub(super) fn clear(&mut self) {
         self.past.clear();
         self.future.clear();
         self.last = Step::Other;
     }
 
-    /// Ends the step being written, so the next command starts its own.
-    /// Moving the caret cuts typing apart the same way.
+    /// 書き込まれているステップが終了するため、次のコマンドが独自のコマンドを開始します。キャレットを移動すると、同様に入力作業が省略されます。
     pub(super) fn cut(&mut self) {
         self.last = Step::Other;
     }
@@ -66,9 +64,7 @@ impl Editor {
         }
     }
 
-    /// Makes everything `edits` does one step of the history. Turning typed
-    /// text into a structure takes several edits, and undoing it has to give
-    /// back what was typed rather than the half-built structure in between.
+    /// すべての「編集」が履歴の 1 ステップになります。入力したテキストを構造に変換するには複数の編集が必要で、元に戻すには、途中で構築された構造ではなく、入力された内容を元に戻す必要があります。
     pub fn one_step(&mut self, edits: impl FnOnce(&mut Editor)) {
         let was_grouping = self.history.grouping;
         self.history.grouping = true;
@@ -80,8 +76,7 @@ impl Editor {
         self.history.cut();
     }
 
-    /// Writes the step about to be taken into the history, unless it joins
-    /// the one before it.
+    /// 前のステップと結合しない限り、履歴に取り込まれようとしているステップを書き込みます。
     pub(super) fn record(&mut self, step: Step) {
         let join =
             self.history.grouped || (step == Step::Typing && self.history.last == Step::Typing);

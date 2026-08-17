@@ -1,15 +1,12 @@
-//! Reading a piece of a document out as ordinary one-dimensional text.
+//! ドキュメントの一部を通常の 1 次元テキストとして読み出す。
 //!
-//! This is what the world outside sees: a structure laid flat the way it would
-//! have been written before it could be drawn, `a+b` over `c` becoming
-//! `(a+b)/c`. It is not the file format — nothing here can be read back — so it
-//! is free to be plain and short, and it stays out of the notation's way.
+//! これが外の世界に見えるものです。描画される前に書かれていたであろう構造が平らに置かれ、「c」の上の「a+b」が「(a+b)/c」になります。これはファイル形式ではありません。ここにあるものは読み戻すことができません。そのため、単純で短くすることは自由であり、表記法に邪魔されません。
 
 use super::ast::{Between, MatrixKind, Node, Row};
 use super::text::Item;
 use super::vocabulary;
 
-/// The lines of a range of the text, one string per line.
+/// テキストの範囲の行。1 行に 1 つの文字列。
 pub fn lines(lines: &[Vec<Item>]) -> String {
     lines
         .iter()
@@ -26,13 +23,12 @@ fn item(item: &Item) -> String {
     }
 }
 
-/// A row of a structure, read left to right.
+/// 構造の行。左から右に読みます。
 pub fn row(row: &Row) -> String {
     row.iter().map(node).collect()
 }
 
-/// A row that is about to sit beside something else, in brackets when it is
-/// more than one thing: `a+b` over `c` may not read as `a+b/c`.
+/// 他のものの横にある行。複数の場合は括弧で囲みます。`c` の上に `a+b` は次のようには読み取れません。 `a+b/c`.
 fn part(part: &Row) -> String {
     let text = row(part);
     if part.len() > 1 {
@@ -45,7 +41,7 @@ fn part(part: &Row) -> String {
 fn node(node: &Node) -> String {
     match node {
         Node::Char(c) => c.to_string(),
-        // A name stands for a character wherever there is one for it.
+        // 名前は、文字が存在する場合はどこでもその文字を表します。
         Node::Sym(name) => vocabulary::glyph_for(name)
             .unwrap_or(name.as_str())
             .to_string(),
@@ -85,7 +81,7 @@ fn node(node: &Node) -> String {
             }
             out
         }
-        // A grid reads the way a table reads in text: cells apart, rows apart.
+        // グリッドは、表がテキストを読み取るのと同じように読み取ります。つまり、セルを離し、行を離します。
         Node::Matrix { kind, cells } => {
             let rows = cells
                 .iter()
@@ -164,7 +160,7 @@ mod tests {
         assert_eq!(row(&vec![node]), "(x)");
     }
 
-    /// A column separator is a tab, which is what it is everywhere else.
+    /// 列の区切り文字はタブであり、他の場所でも同様です。
     #[test]
     fn the_text_reads_with_its_structures_in_place() {
         let items = vec![vec![

@@ -1,4 +1,4 @@
-//! A pane on screen: its tab strip and the editor below it.
+//! 画面上のペイン: そのタブ ストリップとその下のエディタ。
 
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
@@ -8,7 +8,7 @@ use super::hold_focus;
 use super::shell::{Pane, Shell};
 use crate::editor;
 
-/// A tab strip and the editor below it.
+/// タブストリップとエディタの下にある。
 #[component]
 pub(super) fn PaneView(shell: Shell, pane: Pane) -> impl IntoView {
     let editor_ref = NodeRef::<leptos::html::Div>::new();
@@ -24,7 +24,7 @@ pub(super) fn PaneView(shell: Shell, pane: Pane) -> impl IntoView {
             return;
         }
         pane.editor.set_value(editor::init(&element));
-        // A pane made by splitting takes the typing right away.
+        // スプリットで作られたパンは、すぐにタイピングを取ります。
         if let Some(index) = shell.index_of(pane) {
             if index == shell.focused.get_untracked() {
                 shell.focus_pane(index);
@@ -51,7 +51,7 @@ pub(super) fn PaneView(shell: Shell, pane: Pane) -> impl IntoView {
     }
 }
 
-/// One button per open file, with the unsaved mark and a way to close it.
+/// 開いているファイルごとに 1 つのボタンがあり、未保存マークとそれを閉じる方法が表示されます。
 #[component]
 fn Tabs(shell: Shell, pane: Pane) -> impl IntoView {
     view! {
