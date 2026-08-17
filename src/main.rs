@@ -2,6 +2,7 @@ mod app;
 mod editor;
 mod format;
 mod ipc;
+mod settings;
 mod structure;
 mod view;
 

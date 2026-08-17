@@ -17,6 +17,7 @@ use shell::{Pane, Shell};
 
 use crate::editor;
 use crate::ipc;
+use crate::settings;
 
 #[component]
 pub fn App() -> impl IntoView {
@@ -34,7 +35,10 @@ pub fn App() -> impl IntoView {
     Effect::new(move |_| {
         editor::set_on_change(Box::new(move |pane| shell.mark_dirty(pane)));
         keys::install_shortcuts(shell);
-        spawn_local(ipc::frontend_ready());
+        spawn_local(async {
+            settings::apply(settings::read(&ipc::read_settings().await));
+            ipc::frontend_ready().await;
+        });
     });
 
     Effect::new(move |_| {

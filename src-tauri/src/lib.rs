@@ -62,6 +62,72 @@ fn write_document(path: String, contents: String) -> Result<(), String> {
     std::fs::write(&path, contents).map_err(|e| format!("{path} を保存できませんでした: {e}"))
 }
 
+/// Where the settings file lives: `settings.toml` in the app's own config
+/// directory.
+fn settings_path(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let dir = app.path().app_config_dir().ok()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("settings.toml"))
+}
+
+#[tauri::command]
+fn read_settings(app: tauri::AppHandle) -> String {
+    settings_path(&app)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn write_settings(app: tauri::AppHandle, contents: String) -> Result<(), String> {
+    let Some(path) = settings_path(&app) else {
+        return Err("設定の保存先がありません".to_string());
+    };
+    std::fs::write(&path, contents).map_err(|e| format!("設定を保存できませんでした: {e}"))
+}
+
+/// Remembers the window size across runs, next to the settings.
+fn window_size_path(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let dir = app.path().app_config_dir().ok()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("window.toml"))
+}
+
+fn save_window_size(window: &tauri::Window) {
+    let Some(path) = window_size_path(window.app_handle()) else {
+        return;
+    };
+    if let Ok(size) = window.inner_size() {
+        if size.width > 0 && size.height > 0 {
+            let contents = format!("width = {}\nheight = {}\n", size.width, size.height);
+            std::fs::write(path, contents).ok();
+        }
+    }
+}
+
+fn restore_window_size(app: &tauri::AppHandle) {
+    let Some(contents) = window_size_path(app).and_then(|path| std::fs::read_to_string(path).ok())
+    else {
+        return;
+    };
+    let mut width = None;
+    let mut height = None;
+    for line in contents.lines() {
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        match name.trim() {
+            "width" => width = value.trim().parse::<u32>().ok(),
+            "height" => height = value.trim().parse::<u32>().ok(),
+            _ => {}
+        }
+    }
+    if let (Some(width), Some(height)) = (width, height) {
+        if let Some(window) = app.get_webview_window("main") {
+            window.set_size(tauri::PhysicalSize { width, height }).ok();
+        }
+    }
+}
+
 #[tauri::command]
 fn set_dirty(state: State<'_, AppState>, dirty: bool) {
     *state.dirty.lock().unwrap() = dirty;
@@ -136,8 +202,13 @@ pub fn run() {
             dirty: Mutex::new(false),
             started: Instant::now(),
         })
+        .setup(|app| {
+            restore_window_size(app.handle());
+            Ok(())
+        })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
+                save_window_size(window);
                 if is_dirty(window) {
                     api.prevent_close();
                     confirm_discard_on_close(window);
@@ -151,7 +222,9 @@ pub fn run() {
             write_document,
             set_dirty,
             frontend_ready,
-            confirm_discard
+            confirm_discard,
+            read_settings,
+            write_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -87,6 +87,15 @@ pub async fn set_dirty(dirty: bool) {
     let _ = call("set_dirty", DirtyArg { dirty }).await;
 }
 
+/// The saved settings, as the file's text. Empty when there is none yet.
+pub async fn read_settings() -> String {
+    call("read_settings", NoArgs {})
+        .await
+        .ok()
+        .and_then(|value| value.as_string())
+        .unwrap_or_default()
+}
+
 pub async fn frontend_ready() {
     let _ = call("frontend_ready", NoArgs {}).await;
 }
