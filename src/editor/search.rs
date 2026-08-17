@@ -1,6 +1,13 @@
 //! オプションの正規表現を使用して、モデルを検索して置換します。
 //!
-//! ブラウザー独自の正規表現が照合を行うため、不適切なパターンはコンパイルに失敗するだけで、エディターが中断されることはありません。構造も同様に行ごとに検索されます。一致とは、文書内のどこにあっても、互いに隣り合った一連の文字です。行の端にまたがることがないのと同じように、一致は構造の端にまたがることはありません。
+//! 通常の（正規表現でない）検索は Rust 側で Boyer-Moore 法を使います。
+//! 正規表現の検索だけがブラウザー独自の正規表現に依存するため、不適切なパターンは
+//! コンパイルに失敗するだけで、エディターが中断されることはありません。
+//! 構造も同様に行ごとに検索されます。一致とは、文書内のどこにあっても、
+//! 互いに隣り合った一連の文字です。行の端にまたがることがないのと同じように、
+//! 一致は構造の端にまたがることはありません。
+
+use std::collections::HashMap;
 
 use js_sys::RegExp;
 use wasm_bindgen::prelude::*;
@@ -55,6 +62,18 @@ pub struct SearchOptions {
     pub case_sensitive: bool,
 }
 
+/// コンパイル済みの検索パターン。正規表現はブラウザーに任せ、それ以外は Boyer-Moore 法で検索します。
+#[derive(Debug)]
+enum Matcher {
+    Regex(RegExp),
+    Literal {
+        pattern: Vec<char>,
+        case_sensitive: bool,
+        bad_char: HashMap<char, usize>,
+        good_suffix: Vec<usize>,
+    },
+}
+
 pub fn find_next(text: &Text, query: &str, options: SearchOptions, from: Key) -> Option<Found> {
     let all = find_all(text, query, options);
     all.iter()
@@ -64,14 +83,14 @@ pub fn find_next(text: &Text, query: &str, options: SearchOptions, from: Key) ->
 }
 
 pub fn find_all(text: &Text, query: &str, options: SearchOptions) -> Vec<Found> {
-    let Some(regex) = compile(query, options) else {
+    let Some(matcher) = compile(query, options) else {
         return Vec::new();
     };
     let mut found = Vec::new();
     for line in 0..text.line_count() {
         let items = text.line(line);
         for (start, run) in runs(items) {
-            for (from, to, groups) in matches(&regex, &run) {
+            for (from, to, groups) in matches(&matcher, &run) {
                 found.push(Found {
                     place: Place::Text(Sel::range(
                         Pos::new(line, start + from),
@@ -85,7 +104,7 @@ pub fn find_all(text: &Text, query: &str, options: SearchOptions) -> Vec<Found> 
         for (col, item) in items.iter().enumerate() {
             let Item::Math(root) = item else { continue };
             let at = Pos::new(line, col);
-            search_row(&regex, root, &mut Vec::new(), &mut |cursor, groups| {
+            search_row(&matcher, root, &mut Vec::new(), &mut |cursor, groups| {
                 found.push(Found {
                     place: Place::Inside { at, cursor },
                     groups,
@@ -99,13 +118,13 @@ pub fn find_all(text: &Text, query: &str, options: SearchOptions) -> Vec<Found> 
 
 /// 1 つの行とその中にネストされているすべての行を検索し、各一致をその行の選択として報告します。
 fn search_row(
-    regex: &RegExp,
+    matcher: &Matcher,
     row: &Row,
     path: &mut Vec<(usize, usize)>,
     report: &mut impl FnMut(Cursor, Vec<String>),
 ) {
     for (start, run) in node_runs(row) {
-        for (from, to, groups) in matches(regex, &run) {
+        for (from, to, groups) in matches(matcher, &run) {
             report(
                 Cursor {
                     path: path.clone(),
@@ -123,14 +142,21 @@ fn search_row(
                 continue;
             };
             path.push((index, slot));
-            search_row(regex, nested, path, report);
+            search_row(matcher, nested, path, report);
             path.pop();
         }
     }
 }
 
-/// 「run」内のすべての一致は、対象となる文字の範囲とグループとして報告されます。
-fn matches(regex: &RegExp, run: &str) -> Vec<(usize, usize, Vec<String>)> {
+fn matches(matcher: &Matcher, run: &str) -> Vec<(usize, usize, Vec<String>)> {
+    match matcher {
+        Matcher::Regex(regex) => regex_matches(regex, run),
+        Matcher::Literal { .. } => literal_matches(matcher, run),
+    }
+}
+
+/// ブラウザーの正規表現を使って一致を探します。
+fn regex_matches(regex: &RegExp, run: &str) -> Vec<(usize, usize, Vec<String>)> {
     let mut found = Vec::new();
     regex.set_last_index(0);
     let units: Vec<usize> = char_starts(run);
@@ -162,6 +188,67 @@ fn matches(regex: &RegExp, run: &str) -> Vec<(usize, usize, Vec<String>)> {
         found.push((from, to, groups));
         if !regex.global() {
             break;
+        }
+    }
+    found
+}
+
+/// Boyer-Moore 法でリテラル一致を探します。
+fn literal_matches(matcher: &Matcher, run: &str) -> Vec<(usize, usize, Vec<String>)> {
+    let Matcher::Literal {
+        pattern,
+        case_sensitive,
+        bad_char,
+        good_suffix,
+    } = matcher
+    else {
+        unreachable!("literal_matches called with a non-literal matcher")
+    };
+    let m = pattern.len();
+    if m == 0 {
+        return Vec::new();
+    }
+
+    let run_chars: Vec<char> = run.chars().collect();
+    let (text, mapping) = if *case_sensitive {
+        (run_chars.clone(), None)
+    } else {
+        let mut text = Vec::with_capacity(run_chars.len());
+        let mut map = Vec::with_capacity(run_chars.len());
+        for (i, c) in run_chars.iter().enumerate() {
+            for lc in c.to_lowercase() {
+                text.push(lc);
+                map.push(i);
+            }
+        }
+        (text, Some(map))
+    };
+
+    let n = text.len();
+    let mut found = Vec::new();
+    let mut s = 0;
+    while s + m <= n {
+        let mut j: isize = m as isize - 1;
+        while j >= 0 && text[(s as isize + j) as usize] == pattern[j as usize] {
+            j -= 1;
+        }
+        if j < 0 {
+            let (from, to) = if let Some(map) = &mapping {
+                let from = map[s];
+                let to = map[s + m - 1] + 1;
+                (from, to)
+            } else {
+                (s, s + m)
+            };
+            let matched = run_chars[from..to].iter().collect();
+            found.push((from, to, vec![matched]));
+            s += good_suffix[0];
+        } else {
+            let ju = j as usize;
+            let c = text[s + ju];
+            let k = bad_char.get(&c).copied().map(|k| k as isize).unwrap_or(-1);
+            let bc = ((ju as isize - k).max(1)) as usize;
+            s += bc.max(good_suffix[ju]);
         }
     }
     found
@@ -306,46 +393,102 @@ fn char_of(starts: &[usize], unit: usize) -> Option<usize> {
     starts.iter().position(|start| *start == unit)
 }
 
-/// コンパイルクエリ。プレーン クエリをリテラル テキストとして扱います。ブラウザが拒否するパターンは、エラーの代わりに「None」を返します。
-fn compile(query: &str, options: SearchOptions) -> Option<RegExp> {
+/// コンパイルクエリ。正規表現はブラウザーに、それ以外は Rust 側の Boyer-Moore 法に任せます。
+fn compile(query: &str, options: SearchOptions) -> Option<Matcher> {
     if query.is_empty() {
         return None;
     }
-    let source = if options.regex {
-        query.to_string()
+    if options.regex {
+        let source = query.to_string();
+        let flags = if options.case_sensitive { "g" } else { "gi" };
+        let make = js_sys::Function::new_with_args(
+            "source, flags",
+            "try { return new RegExp(source, flags); } catch (e) { return null; }",
+        );
+        make.call2(&JsValue::NULL, &source.into(), &flags.into())
+            .ok()?
+            .dyn_into::<RegExp>()
+            .ok()
+            .map(Matcher::Regex)
     } else {
-        escape_regex(query)
-    };
-    let flags = if options.case_sensitive { "g" } else { "gi" };
-    let make = js_sys::Function::new_with_args(
-        "source, flags",
-        "try { return new RegExp(source, flags); } catch (e) { return null; }",
-    );
-    make.call2(&JsValue::NULL, &source.into(), &flags.into())
-        .ok()?
-        .dyn_into::<RegExp>()
-        .ok()
+        let pattern: Vec<char> = if options.case_sensitive {
+            query.chars().collect()
+        } else {
+            query.to_lowercase().chars().collect()
+        };
+        let m = pattern.len();
+        if m == 0 {
+            return None;
+        }
+        let mut bad_char = HashMap::new();
+        for (i, c) in pattern.iter().enumerate() {
+            bad_char.insert(*c, i);
+        }
+        let good_suffix = build_good_suffix(&pattern);
+        Some(Matcher::Literal {
+            pattern,
+            case_sensitive: options.case_sensitive,
+            bad_char,
+            good_suffix,
+        })
+    }
 }
 
-fn escape_regex(query: &str) -> String {
-    let mut out = String::with_capacity(query.len());
-    for c in query.chars() {
-        if "\\^$.|?*+()[]{}".contains(c) {
-            out.push('\\');
+/// Z-関数に基づく suffix テーブル。good-suffix テーブルの計算に使います。
+fn suffixes(p: &[char]) -> Vec<usize> {
+    let m = p.len();
+    let mut suff = vec![0; m];
+    suff[m - 1] = m;
+    let mut g = (m - 1) as isize;
+    let mut f = (m - 1) as isize;
+    for i in (0..m - 1).rev() {
+        let i_i = i as isize;
+        let offset = i_i + m as isize - 1 - f;
+        if i_i > g && offset >= 0 && suff[offset as usize] < (i_i - g) as usize {
+            suff[i] = suff[offset as usize];
+        } else {
+            if i_i < g {
+                g = i_i;
+            }
+            f = i_i;
+            while g >= 0 && p[g as usize] == p[(g + m as isize - 1 - f) as usize] {
+                g -= 1;
+            }
+            suff[i] = (f - g) as usize;
         }
-        out.push(c);
     }
-    out
+    suff
+}
+
+/// Boyer-Moore の good-suffix シフトテーブルを構築します。
+fn build_good_suffix(p: &[char]) -> Vec<usize> {
+    let m = p.len();
+    let suff = suffixes(p);
+    let mut gs = vec![m; m];
+    let mut j = 0;
+    for i in (0..m).rev() {
+        if suff[i] == i + 1 {
+            let target = m - 1 - i;
+            while j < target {
+                if gs[j] == m {
+                    gs[j] = m - 1 - i;
+                }
+                j += 1;
+            }
+        }
+    }
+    for (i, &s) in suff.iter().enumerate().take(m - 1) {
+        let index = m - 1 - s;
+        if index < m {
+            gs[index] = m - 1 - i;
+        }
+    }
+    gs
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn plain_queries_are_escaped_into_literals() {
-        assert_eq!(escape_regex("a.b*"), "a\\.b\\*");
-    }
 
     #[test]
     fn groups_fill_the_replacement() {
@@ -442,5 +585,79 @@ mod tests {
         let starts = char_starts("あa𝑥b");
         assert_eq!(starts, vec![0, 1, 2, 4, 5]);
         assert_eq!(char_of(&starts, 2), Some(2));
+    }
+
+    /// リテラル検索は正規表現のメタ文字をただの文字として扱います。
+    #[test]
+    fn literal_queries_treat_metacharacters_as_text() {
+        let text = Text::from_lines(vec![vec![
+            Item::Char('a'),
+            Item::Char('.'),
+            Item::Char('b'),
+            Item::Char('*'),
+        ]]);
+        let found = find_all(&text, "a.b*", SearchOptions::default());
+        assert_eq!(found.len(), 1);
+        if let Place::Text(sel) = &found[0].place {
+            assert_eq!(sel.start(), Pos::new(0, 0));
+            assert_eq!(sel.end(), Pos::new(0, 4));
+        } else {
+            panic!("expected text match");
+        }
+    }
+
+    /// Boyer-Moore 法のリテラル検索は大文字小文字を区別しなくても動作します。
+    #[test]
+    fn literal_search_is_case_insensitive() {
+        let text = Text::from_lines(vec![vec![
+            Item::Char('A'),
+            Item::Char('B'),
+            Item::Char('a'),
+            Item::Char('b'),
+            Item::Char('A'),
+        ]]);
+        let found = find_all(
+            &text,
+            "ab",
+            SearchOptions {
+                regex: false,
+                case_sensitive: false,
+            },
+        );
+        assert_eq!(found.len(), 2);
+        if let (Place::Text(first), Place::Text(second)) = (&found[0].place, &found[1].place) {
+            assert_eq!(first.start(), Pos::new(0, 0));
+            assert_eq!(first.end(), Pos::new(0, 2));
+            assert_eq!(second.start(), Pos::new(0, 2));
+            assert_eq!(second.end(), Pos::new(0, 4));
+        } else {
+            panic!("expected two text matches");
+        }
+    }
+
+    /// 同じ文字が連続するときでも、すべての重なり合う一致を見つけます。
+    #[test]
+    fn boyer_moore_finds_overlapping_matches() {
+        let text = Text::from_lines(vec![vec![
+            Item::Char('a'),
+            Item::Char('a'),
+            Item::Char('a'),
+            Item::Char('a'),
+        ]]);
+        let found = find_all(&text, "aa", SearchOptions::default());
+        assert_eq!(found.len(), 3);
+    }
+
+    /// 構造内の文字もリテラル検索で見つかります。
+    #[test]
+    fn literal_search_finds_characters_inside_structures() {
+        let text = Text::from_lines(vec![vec![
+            Item::Char('a'),
+            Item::Math(vec![Node::Char('b'), Node::Char('c')]),
+            Item::Char('d'),
+        ]]);
+        let found = find_all(&text, "bc", SearchOptions::default());
+        assert_eq!(found.len(), 1);
+        assert!(matches!(found[0].place, Place::Inside { .. }));
     }
 }
