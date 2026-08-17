@@ -660,4 +660,108 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert!(matches!(found[0].place, Place::Inside { .. }));
     }
+
+    /// `regex` クレートを使って同じインターフェースで一致を探します（比較用）。
+    /// リテラル検索は内部で正規表現化され、正規表現検索と統一できます。
+    fn compile_regex_crate(query: &str, options: SearchOptions) -> Option<regex::Regex> {
+        use regex::RegexBuilder;
+        if query.is_empty() {
+            return None;
+        }
+        let pattern = if options.regex {
+            query.to_string()
+        } else {
+            regex::escape(query)
+        };
+        RegexBuilder::new(&pattern)
+            .case_insensitive(!options.case_sensitive)
+            .build()
+            .ok()
+    }
+
+    fn regex_crate_matches(re: &regex::Regex, run: &str) -> Vec<(usize, usize, Vec<String>)> {
+        let mut byte_starts = Vec::with_capacity(run.chars().count() + 1);
+        let mut at = 0;
+        for (byte, c) in run.char_indices() {
+            byte_starts.push(byte);
+            at = byte + c.len_utf8();
+        }
+        byte_starts.push(at);
+
+        let mut found = Vec::new();
+        // キャプチャグループがないリテラル検索なら find_iter の方が軽い。
+        if re.captures_len() == 1 {
+            for m in re.find_iter(run) {
+                let from = byte_starts.binary_search(&m.start()).unwrap_or(0);
+                let to = byte_starts
+                    .binary_search(&m.end())
+                    .unwrap_or(byte_starts.len() - 1);
+                found.push((from, to, vec![m.as_str().to_string()]));
+            }
+        } else {
+            for caps in re.captures_iter(run) {
+                let m = caps.get(0).expect("group 0 is always present");
+                let from = byte_starts.binary_search(&m.start()).unwrap_or(0);
+                let to = byte_starts
+                    .binary_search(&m.end())
+                    .unwrap_or(byte_starts.len() - 1);
+                let groups: Vec<String> = (0..caps.len())
+                    .map(|i| {
+                        caps.get(i)
+                            .map(|m| m.as_str().to_string())
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                found.push((from, to, groups));
+            }
+        }
+        found
+    }
+
+    /// Boyer-Moore 法と `regex` クレートの結果と速度を比較します。
+    #[test]
+    fn boyer_moore_vs_regex_crate() {
+        use std::time::Instant;
+
+        let cases = [
+            ("abc".repeat(10_000) + "findme", "findme"),
+            ("findme".to_string() + &"abc".repeat(10_000), "findme"),
+            ("abc".repeat(10_000), "xyz"),
+            ("ab".repeat(10_000), "ab"),
+        ];
+        let options = SearchOptions {
+            regex: false,
+            case_sensitive: true,
+        };
+        let rounds = 100;
+
+        for (text, query) in cases {
+            let Some(matcher) = compile(query, options) else {
+                panic!("literal pattern should compile");
+            };
+            let Some(re) = compile_regex_crate(query, options) else {
+                panic!("regex crate pattern should compile");
+            };
+
+            let t0 = Instant::now();
+            let mut bm = Vec::new();
+            for _ in 0..rounds {
+                bm = literal_matches(&matcher, &text);
+            }
+            let dt_bm = t0.elapsed();
+
+            let t1 = Instant::now();
+            let mut re_matches = Vec::new();
+            for _ in 0..rounds {
+                re_matches = regex_crate_matches(&re, &text);
+            }
+            let dt_re = t1.elapsed();
+
+            assert_eq!(bm, re_matches);
+            println!(
+                "query={query:?} text_len={} Boyer-Moore: {dt_bm:?}, regex crate: {dt_re:?}",
+                text.len()
+            );
+        }
+    }
 }

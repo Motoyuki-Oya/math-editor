@@ -42,6 +42,9 @@ features = [
   "Window",
 ]
 
+[dev-dependencies]
+regex = "1.13.1"
+
 [profile.release]
 opt-level = "z"
 lto = true
