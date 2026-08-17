@@ -155,13 +155,19 @@ impl View {
             if (settled - scroll).abs() <= 0.5 {
                 return;
             }
-            scroll = settled;
-            self.render(text, sels, caret, focused, scroll);
+            self.render(text, sels, caret, focused, settled);
+            // What the browser gave, not what was asked for: the end of the
+            // document is as far as it goes.
+            scroll = self.root.scroll_top() as f64;
         }
     }
 
     /// The scroll that shows a line whole, from the heights as measured, or
-    /// `scroll` if the line is in sight there already.
+    /// `scroll` if the line is in sight there already. A line brought into
+    /// sight is brought a line further than it needs, because a line flush with
+    /// the edge of the view reads as one that is not there; the browser trims
+    /// the extra at the end of the document, where the padding leaves room
+    /// anyway.
     fn scroll_onto(&self, line: usize, scroll: f64) -> f64 {
         let view = self.root.client_height() as f64;
         // The lines sit inside the padding of the scrolling box, so where a
@@ -172,11 +178,12 @@ impl View {
             + self.root.scroll_top() as f64;
         let heights = self.heights.borrow();
         let top = origin + heights.top_of(line);
-        let bottom = top + heights.span(line..line + 1);
+        let height = heights.span(line..line + 1);
+        let bottom = top + height;
         if top < scroll {
-            top
+            (top - height).max(0.0)
         } else if bottom > scroll + view {
-            bottom - view
+            bottom + height - view
         } else {
             scroll
         }
