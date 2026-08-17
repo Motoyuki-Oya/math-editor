@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use super::state::{self, Session};
+use super::session::{self, Session};
 use crate::structure::ast::Node as MathNode;
 use crate::structure::commands;
 use crate::structure::text::Pos;
@@ -44,7 +44,7 @@ pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
                 .borrow_mut()
                 .editor
                 .replace_range(from, sel.head, &text);
-            state::changed(session);
+            session::changed(session);
             true
         }
         seed => {
@@ -79,8 +79,8 @@ pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
                     }
                 });
             }
-            state::focus();
-            state::changed(session);
+            session::focus();
+            session::changed(session);
             true
         }
     }
