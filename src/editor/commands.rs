@@ -99,6 +99,16 @@ pub fn redo() {
     }
 }
 
+/// Selects everything where the caret is: the row of the structure it is in,
+/// or the whole document. The system's own select-all item would reach the
+/// hidden input element instead of the text, so this is an item of our own.
+pub fn select_all() {
+    let Some(session) = session() else { return };
+    session.borrow_mut().editor.select_all();
+    focus();
+    redraw(&session);
+}
+
 /// The text a selection puts on the clipboard, which is ordinary text: the
 /// piece itself is kept aside, so pasting it back into the editor keeps its
 /// shape without the notation ever leaving the file.

@@ -46,6 +46,7 @@ pub(super) fn choose(shell: Shell, name: &str, from: From) {
             shell.close(pane, pane.current.get_untracked());
         }
         "preferences" => shell.preferences.update(|open| *open = !*open),
+        "select_all" => editor::select_all(),
         "undo" => editor::undo(),
         "redo" => editor::redo(),
         "find" => shell.find(Field::Query),

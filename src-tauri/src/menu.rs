@@ -90,7 +90,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
             &PredefinedMenuItem::cut(app, Some("切り取り"))?,
             &PredefinedMenuItem::copy(app, Some("コピー"))?,
             &PredefinedMenuItem::paste(app, Some("貼り付け"))?,
-            &PredefinedMenuItem::select_all(app, Some("すべて選択"))?,
+            &item("select_all", "すべて選択", Some("CmdOrCtrl+A"))?,
             &separator()?,
             &item("find", "検索…", Some("CmdOrCtrl+F"))?,
             &item("replace", "置換…", Some("CmdOrCtrl+R"))?,
