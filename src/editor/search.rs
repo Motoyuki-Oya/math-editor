@@ -176,7 +176,11 @@ fn matches(regex: &RegExp, run: &str) -> Vec<(usize, usize, Vec<String>)> {
     found
 }
 
-/// Fills `$1`-style references in the replacement with what was captured.
+/// Fills `$1`-style references in the replacement with what was captured, and
+/// reads `\t` and `\n` as the column separator and a new line.
+///
+/// Without the regular expression box the replacement is taken literally, the
+/// way the query is.
 pub fn expand(groups: &[String], replacement: &str, options: SearchOptions) -> String {
     if !options.regex {
         return replacement.to_string();
@@ -184,6 +188,21 @@ pub fn expand(groups: &[String], replacement: &str, options: SearchOptions) -> S
     let mut out = String::new();
     let mut chars = replacement.chars().peekable();
     while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('t') => out.push('\t'),
+                Some('n') => out.push('\n'),
+                Some('\\') => out.push('\\'),
+                // A backslash before anything else stands for itself, so a
+                // Windows path can be written without doubling every one.
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+            continue;
+        }
         if c != '$' {
             out.push(c);
             continue;
@@ -210,6 +229,18 @@ pub fn expand(groups: &[String], replacement: &str, options: SearchOptions) -> S
         }
     }
     out
+}
+
+/// The replacement as items of the text: a tab is the column separator, which
+/// is what a tab is in this editor, and a new line breaks the line.
+pub fn replacement_items(text: &str) -> Vec<Vec<Item>> {
+    text.split('\n')
+        .map(|line| {
+            line.chars()
+                .map(|c| if c == '\t' { Item::Tab } else { Item::Char(c) })
+                .collect()
+        })
+        .collect()
 }
 
 /// The stretches of ordinary characters in a line, with the column each starts
@@ -345,6 +376,33 @@ mod tests {
         assert_eq!(expand(&groups, "$$1", options), "$1");
         // Without the regular expression box the replacement is literal.
         assert_eq!(expand(&groups, "$1", SearchOptions::default()), "$1");
+    }
+
+    #[test]
+    fn escapes_stand_for_a_tab_and_a_new_line() {
+        let options = SearchOptions {
+            regex: true,
+            case_sensitive: false,
+        };
+        let groups = vec!["x".to_string(), "x".to_string()];
+        assert_eq!(expand(&groups, "$1\\t=", options), "x\t=");
+        assert_eq!(expand(&groups, "a\\nb", options), "a\nb");
+        assert_eq!(expand(&groups, "a\\\\t", options), "a\\t");
+        // A literal replacement keeps its backslashes.
+        assert_eq!(expand(&groups, "a\\tb", SearchOptions::default()), "a\\tb");
+    }
+
+    /// A tab in a replacement is the column separator, which is what the Tab
+    /// key puts in: replacing `=` with `\t=` is how a column gets lined up.
+    #[test]
+    fn a_replaced_tab_is_a_column_separator() {
+        assert_eq!(
+            replacement_items("x\t=\ny"),
+            vec![
+                vec![Item::Char('x'), Item::Tab, Item::Char('=')],
+                vec![Item::Char('y')],
+            ]
+        );
     }
 
     #[test]

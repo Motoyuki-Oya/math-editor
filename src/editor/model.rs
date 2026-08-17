@@ -346,10 +346,16 @@ impl Editor {
 
     /// Replaces one range, used by search and replace.
     pub fn replace_range(&mut self, from: Pos, to: Pos, with: &str) {
+        self.replace_range_with(from, to, items_of(with));
+    }
+
+    /// Replaces a range with items, for a replacement that puts in more than
+    /// characters: a column separator is an item of its own.
+    pub fn replace_range_with(&mut self, from: Pos, to: Pos, with: Vec<Vec<Item>>) {
         self.record(Step::Other);
         self.inside = None;
         let at = self.text.remove(from, to);
-        let end = self.text.insert(at, items_of(with));
+        let end = self.text.insert(at, with);
         self.sels = vec![Sel::caret(end)];
     }
 
@@ -467,7 +473,13 @@ impl Editor {
         if !self.select_in_island(at, cursor) {
             return false;
         }
-        let nodes: Row = with.chars().map(Node::Char).collect();
+        // A structure holds one row and no column separators, so neither has
+        // anything to mean in there.
+        let nodes: Row = with
+            .chars()
+            .filter(|c| *c != '\n' && *c != '\t')
+            .map(Node::Char)
+            .collect();
         self.insert_row_in_island(nodes)
     }
 
