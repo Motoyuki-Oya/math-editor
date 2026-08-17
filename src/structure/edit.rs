@@ -1,7 +1,7 @@
 //! Cursor movement and editing commands inside an island.
 
 use super::ast::{is_arrow, row_at, row_at_mut, Between, Cursor, Delim, Node, Row};
-use super::commands;
+use super::vocabulary;
 
 /// Result of an edit that the cursor could not absorb, so the surrounding text
 /// editor has to react instead.
@@ -235,13 +235,13 @@ impl<'a> Editing<'a> {
                         _ => None,
                     })
                     .collect();
-                match commands::node_for(&name) {
+                match vocabulary::node_for(&name) {
                     Some(node) => (start, node),
                     None => return false,
                 }
             }
             None => match row.get(index.wrapping_sub(1)) {
-                Some(Node::Char(c)) => match commands::node_for_glyph(*c) {
+                Some(Node::Char(c)) => match vocabulary::node_for_glyph(*c) {
                     Some(node) => (index - 1, node),
                     None => return false,
                 },
@@ -598,7 +598,7 @@ fn builds_on(c: char) -> bool {
 fn carries_on(c: char) -> bool {
     c.is_alphanumeric()
         || matches!(c, '.' | '\\' | '^' | '_')
-        || commands::node_for_glyph(c).is_some()
+        || vocabulary::node_for_glyph(c).is_some()
 }
 
 /// Whether the row this structure opens takes one thing and then hands the

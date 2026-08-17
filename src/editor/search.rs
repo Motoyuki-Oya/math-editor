@@ -10,8 +10,8 @@ use js_sys::RegExp;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
-use super::model::{Item, Pos, Sel, Text};
 use crate::structure::ast::{Cursor, Node, Row};
+use crate::structure::text::{Item, Pos, Sel, Text};
 
 /// Where a match is.
 #[derive(Clone, Debug, PartialEq, Eq)]

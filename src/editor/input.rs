@@ -15,7 +15,8 @@ use web_sys::{
     MouseEvent,
 };
 
-use super::state::{self, Session};
+use super::session::{self, Session};
+use super::{commands, keys, mouse};
 
 pub fn build(doc: &Document, root: &HtmlElement) -> Option<HtmlTextAreaElement> {
     let textarea = doc
@@ -42,11 +43,11 @@ pub fn install(session: &Rc<RefCell<Session>>) {
         "keydown",
         session,
         |session, event: KeyboardEvent| {
-            state::on_keydown(session, event);
+            keys::on_keydown(session, event);
         },
     );
     on(&textarea, "input", session, |session, event: InputEvent| {
-        state::on_input(session, event);
+        commands::on_input(session, event);
     });
     on(
         &textarea,
@@ -55,7 +56,7 @@ pub fn install(session: &Rc<RefCell<Session>>) {
         |session, _: CompositionEvent| {
             session.borrow_mut().composing = true;
             session.borrow_mut().preedit.clear();
-            state::sync_input_box(session);
+            session::sync_input_box(session);
         },
     );
     on(
@@ -63,7 +64,7 @@ pub fn install(session: &Rc<RefCell<Session>>) {
         "compositionupdate",
         session,
         |session, event: CompositionEvent| {
-            state::update_composition(session, &event.data().unwrap_or_default());
+            commands::update_composition(session, &event.data().unwrap_or_default());
         },
     );
     on(
@@ -73,7 +74,7 @@ pub fn install(session: &Rc<RefCell<Session>>) {
         |session, event: CompositionEvent| {
             session.borrow_mut().composing = false;
             let text = event.data().unwrap_or_default();
-            state::commit_composition(session, &text);
+            commands::commit_composition(session, &text);
         },
     );
     on(
@@ -82,7 +83,7 @@ pub fn install(session: &Rc<RefCell<Session>>) {
         session,
         |session, _: web_sys::FocusEvent| {
             session.borrow_mut().focused = false;
-            state::redraw(session);
+            session::redraw(session);
         },
     );
     on(
@@ -91,20 +92,20 @@ pub fn install(session: &Rc<RefCell<Session>>) {
         session,
         |session, _: web_sys::FocusEvent| {
             session.borrow_mut().focused = true;
-            state::note_focus(session);
-            state::redraw(session);
+            session::note_focus(session);
+            session::redraw(session);
         },
     );
 
     on(&root, "mousedown", session, |session, event: MouseEvent| {
-        state::note_focus(session);
-        state::on_mousedown(session, event);
+        session::note_focus(session);
+        mouse::on_mousedown(session, event);
     });
     on(&root, "mousemove", session, |session, event: MouseEvent| {
-        state::on_mousemove(session, event);
+        mouse::on_mousemove(session, event);
     });
     on(&root, "dblclick", session, |session, event: MouseEvent| {
-        state::on_dblclick(session, event);
+        mouse::on_dblclick(session, event);
     });
     if let Some(window) = web_sys::window() {
         let target: web_sys::EventTarget = window.into();
@@ -119,7 +120,7 @@ pub fn install(session: &Rc<RefCell<Session>>) {
         |session, event: web_sys::ClipboardEvent| {
             if let Some(data) = event.clipboard_data().and_then(|d| d.get_data("text").ok()) {
                 event.prevent_default();
-                state::insert_text(session, &data);
+                commands::insert_text(session, &data);
             }
         },
     );
@@ -144,7 +145,7 @@ pub fn install(session: &Rc<RefCell<Session>>) {
 fn copy_selection(session: &Rc<RefCell<Session>>, event: &web_sys::ClipboardEvent, remove: bool) {
     // Whether there is anything to copy is a question about the selection, not
     // about the text it reads as: an empty structure reads as nothing.
-    let Some(text) = state::selected_text(session) else {
+    let Some(text) = commands::selected_text(session) else {
         return;
     };
     event.prevent_default();
@@ -152,7 +153,7 @@ fn copy_selection(session: &Rc<RefCell<Session>>, event: &web_sys::ClipboardEven
         data.set_data("text/plain", &text).ok();
     }
     if remove {
-        state::delete_selection(session);
+        commands::delete_selection(session);
     }
 }
 

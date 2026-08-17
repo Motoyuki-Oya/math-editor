@@ -10,8 +10,8 @@
 use web_sys::{Document, Element};
 
 use crate::structure::ast::{Between, Delim, MatrixKind, Node, Row};
-use crate::structure::symbols::{self, Class};
 use crate::structure::text::Item;
+use crate::structure::vocabulary::{self as vocabulary, Class};
 
 const SVG_NS: &str = "http://www.w3.org/2000/svg";
 
@@ -215,7 +215,7 @@ impl<'a> Renderer<'a> {
         match node {
             Node::Char(c) => self.span(char_class(*c, true), &c.to_string()),
             Node::Sym(name) => {
-                let symbol = symbols::lookup(name);
+                let symbol = vocabulary::lookup(name);
                 let glyph = symbol.map(|s| s.glyph).unwrap_or(name.as_str());
                 let class = match symbol.map(|s| s.class) {
                     Some(Class::Ident) => "mn-atom mn-ident",

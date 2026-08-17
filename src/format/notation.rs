@@ -4,7 +4,7 @@
 //! saved file stays plain text and no other format is involved.
 
 use crate::structure::ast::{is_arrow, Between, Delim, MatrixKind, Node, Row};
-use crate::structure::symbols;
+use crate::structure::vocabulary;
 
 pub const LIMITS_MARK: char = '↨';
 pub const ROOT_MARK: char = '√';
@@ -427,7 +427,7 @@ fn inline(node: &Node) -> String {
     match node {
         Node::Char(c) if is_special(*c) => format!("{c}{c}"),
         Node::Char(c) => c.to_string(),
-        Node::Sym(name) => symbols::lookup(name)
+        Node::Sym(name) => vocabulary::lookup(name)
             .map(|s| s.glyph.to_string())
             .unwrap_or_else(|| name.clone()),
         Node::Func(name) => name.clone(),
