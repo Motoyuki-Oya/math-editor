@@ -764,4 +764,173 @@ mod tests {
             );
         }
     }
+
+    /// WebKitGTK の JavaScriptCore エンジン上で動作するブラウザー `RegExp` と
+    /// `regex` クレートを同じ入力で比較します（テスト専用）。
+    #[cfg(target_os = "linux")]
+    mod webkitgtk_regexp {
+        use super::*;
+        use javascriptcore::{Context, ContextExt, Value, ValueExt};
+
+        #[derive(Debug, serde::Deserialize)]
+        struct JscMatch {
+            index: usize,
+            groups: Vec<String>,
+        }
+
+        fn jsc_regexp_matches(
+            ctx: &Context,
+            pattern: &str,
+            text: &str,
+            case_insensitive: bool,
+        ) -> Option<Vec<(usize, usize, Vec<String>)>> {
+            ctx.set_value("P", &Value::new_string(ctx, Some(pattern)));
+            let flags = if case_insensitive { "gi" } else { "g" };
+            ctx.set_value("F", &Value::new_string(ctx, Some(flags)));
+            ctx.set_value("T", &Value::new_string(ctx, Some(text)));
+
+            let script = r#"
+                var re = new RegExp(P, F);
+                var text = T;
+                var out = [];
+                var match;
+                var limit = 0;
+                while ((match = re.exec(text)) !== null) {
+                    var groups = [];
+                    for (var i = 0; i < match.length; i++) {
+                        groups.push(match[i] === undefined ? "" : match[i]);
+                    }
+                    out.push({ index: match.index, groups: groups });
+                    if (match[0].length === 0) {
+                        var lead = text.charCodeAt(match.index);
+                        if ((lead & 0xFC00) === 0xD800 && match.index + 1 < text.length) {
+                            re.lastIndex = match.index + 2;
+                        } else {
+                            re.lastIndex = match.index + 1;
+                        }
+                    }
+                    if (++limit > 100000) break;
+                }
+                JSON.stringify(out);
+            "#;
+
+            let value = ctx.evaluate(script).or_else(|| {
+                let msg = ctx
+                    .exception()
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "JSC evaluation failed".to_string());
+                eprintln!("JSC evaluate error: {msg}");
+                None
+            })?;
+            let json = value.to_str().to_string();
+            let matches: Vec<JscMatch> = serde_json::from_str(&json).ok()?;
+            let units = char_starts(text);
+            let mut found = Vec::new();
+            for m in matches {
+                let whole = m.groups.first().cloned().unwrap_or_default();
+                let end = m.index + whole.encode_utf16().count();
+                let from = char_of(&units, m.index)?;
+                let to = char_of(&units, end)?;
+                found.push((from, to, m.groups));
+            }
+            Some(found)
+        }
+
+        #[test]
+        fn webkitgtk_regexp_vs_regex_crate() {
+            use std::time::Instant;
+
+            let ctx = Context::new();
+            let rounds = 10;
+            let cases: [(&str, &str, SearchOptions); 6] = [
+                (
+                    "findme",
+                    &("abc".repeat(2_000) + "findme"),
+                    SearchOptions {
+                        regex: false,
+                        case_sensitive: true,
+                    },
+                ),
+                (
+                    "findme",
+                    &("findme".to_string() + &"abc".repeat(2_000)),
+                    SearchOptions {
+                        regex: false,
+                        case_sensitive: true,
+                    },
+                ),
+                (
+                    "xyz",
+                    &"abc".repeat(2_000),
+                    SearchOptions {
+                        regex: false,
+                        case_sensitive: true,
+                    },
+                ),
+                (
+                    "ab",
+                    &"ab".repeat(1_000),
+                    SearchOptions {
+                        regex: false,
+                        case_sensitive: true,
+                    },
+                ),
+                // 正規表現モードでも比較
+                (
+                    "a.c",
+                    &"abc".repeat(1_000),
+                    SearchOptions {
+                        regex: true,
+                        case_sensitive: true,
+                    },
+                ),
+                (
+                    "a+",
+                    &"a".repeat(5_000),
+                    SearchOptions {
+                        regex: true,
+                        case_sensitive: true,
+                    },
+                ),
+            ];
+
+            for (query, text, options) in cases {
+                let pattern = if options.regex {
+                    query.to_string()
+                } else {
+                    regex::escape(query)
+                };
+
+                let Some(re) = compile_regex_crate(query, options) else {
+                    panic!("regex crate should compile for {query:?}");
+                };
+
+                let t0 = Instant::now();
+                let mut js_results = Vec::new();
+                for _ in 0..rounds {
+                    js_results = jsc_regexp_matches(&ctx, &pattern, text, !options.case_sensitive)
+                        .expect("JSC RegExp should run");
+                }
+                let dt_js = t0.elapsed();
+
+                let t1 = Instant::now();
+                let mut re_results = Vec::new();
+                for _ in 0..rounds {
+                    re_results = regex_crate_matches(&re, text);
+                }
+                let dt_re = t1.elapsed();
+
+                assert_eq!(
+                    js_results, re_results,
+                    "JSC RegExp and regex crate differ for {query:?}"
+                );
+                println!(
+                    "query={query:?} regex={} text_len={} \
+                     JSC RegExp: {dt_js:?}, regex crate: {dt_re:?}",
+                    options.regex,
+                    text.len()
+                );
+            }
+        }
+    }
 }
