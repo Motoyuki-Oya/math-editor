@@ -149,6 +149,11 @@ impl View {
         self.lines.set_inner_html("");
         let above = element(&doc, "div", GAP_CLASS);
         if let Some(gap) = &above {
+            // The gaps are given their height before they are in the page: a
+            // page that is briefly shorter than the document is a page the
+            // browser trims the scroll of, which would stop the view from
+            // going any further down.
+            set_height(gap, self.heights.borrow().span(0..window.start));
             append(&self.lines, gap);
         }
         for line in window.clone() {
@@ -167,12 +172,15 @@ impl View {
         }
         let below = element(&doc, "div", GAP_CLASS);
         if let Some(gap) = &below {
+            set_height(
+                gap,
+                self.heights.borrow().span(window.end..text.line_count()),
+            );
             append(&self.lines, gap);
         }
         *self.drawn.borrow_mut() = window.clone();
-        // Measured first, so the two gaps stand for what the lines around them
-        // are really worth.
         self.measure(&window);
+        // The gaps again, now that the lines between them have been measured.
         let heights = self.heights.borrow();
         if let Some(gap) = &above {
             set_height(gap, heights.span(0..window.start));
@@ -181,11 +189,11 @@ impl View {
             set_height(gap, heights.span(window.end..text.line_count()));
         }
         drop(heights);
-        // Moved last: the browser trims a scroll to the length of what is in
-        // the page, so the gaps have to stand for the lines that are not there
-        // first. Otherwise pasting a long text would leave the view short of
-        // the caret.
-        if follow_caret && (self.root.scroll_top() as f64 - scroll).abs() > 0.5 {
+        // Where the view ends up is decided here and nowhere else. Replacing
+        // the lines can leave the scroll trimmed to a page that was shorter for
+        // a moment, and a scroll that comes back trimmed is a view that cannot
+        // be scrolled past the lines that happen to be drawn.
+        if (self.root.scroll_top() as f64 - scroll).abs() > 0.5 {
             self.root.set_scroll_top(scroll as i32);
         }
         self.align_columns(text, &window);
