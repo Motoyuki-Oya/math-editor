@@ -48,7 +48,7 @@ pub(super) fn install_shortcuts(shell: Shell) {
         };
         if let Some(item) = item {
             event.prevent_default();
-            menu::choose(shell, item);
+            menu::choose(shell, item, menu::From::Key);
             return;
         }
         // Moving between tabs has no place in the menu bar, so it stays here.
