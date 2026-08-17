@@ -12,7 +12,7 @@ use crate::settings::Settings;
 
 /// Puts `settings` into effect everywhere: on screen, in the editors that
 /// measure their own text, and in the file for the next start.
-fn change(settings: Settings) {
+pub(super) fn change(settings: Settings) {
     settings::apply(settings.clone());
     editor::redraw_all();
     spawn_local(async move {
