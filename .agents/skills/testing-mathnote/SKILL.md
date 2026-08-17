@@ -1,55 +1,112 @@
 ---
 name: testing-mathnote
-description: How to run and GUI-test the MathNote Tauri v2 + Leptos desktop editor on Linux, including workarounds for non-ASCII input and the unsaved-changes dialog.
+description: How to run and GUI-test the Planetext (formerly MathNote) Tauri v2 + Leptos desktop editor on Linux, including the WebKit inspector route, synthetic IME composition, the row/DOM contract, and workarounds for non-ASCII input.
 ---
 
-# Testing MathNote (Tauri v2 + Leptos CSR)
+# Testing Planetext (Tauri v2 + Leptos CSR)
+
+The app was renamed **MathNote → Planetext**: binary `target/debug/planetext`, frontend crate `planetext-ui`,
+window title exactly `Planetext`. Anything still saying `mathnote` (e.g. a `cargo clippy -p mathnote` lint command)
+will fail with "package not found".
 
 ## Running the app
-- `cd <repo> && cargo tauri dev` (first cold build takes ~4-6 min; `trunk` + `cargo-tauri` must be on PATH).
-- The window is titled `MathNote`. Bring it up and maximize with:
-  `wmctrl -a MathNote && wmctrl -r MathNote -b add,maximized_vert,maximized_horz`
-- **Beware: `wmctrl -a MathNote` can focus the wrong window.** The app's page title makes a Chrome tab on `localhost:1420` show up as `無題.txt — MathNote - Google Chrome for Testing`, and `wmctrl -a` matches it first. Get the real window id from `wmctrl -l` (the entry whose title is exactly `MathNote`) and use ids:
-  `xdotool windowactivate <id>; wmctrl -i -r <id> -b add,maximized_vert,maximized_horz`
-  Verify with `xdotool getactivewindow getwindowname` before trusting any screenshot.
-- **Rebuilding after a new commit:** the editor lives in the *frontend* crate, which `trunk` compiles to wasm. A fast `Finished dev profile in 0.15s` line only covers `src-tauri`; confirm the frontend really rebuilt by looking for `Compiling mathnote-ui` + `applying new distribution` + `✅ success` in the log, with a timestamp after the commit. Also `kill` any `target/debug/mathnote` process left from an earlier build (`ps -eo pid,lstart,cmd | grep target/debug/mathnote`), otherwise you may be looking at a stale window serving old wasm.
-- A harmless `dbind-WARNING ... org.a11y.Bus` line in the log is expected; it does not mean failure.
-- Logs: redirect to a file (`cargo tauri dev > /tmp/tauri.log 2>&1 &`) since there is no devtools-friendly console.
+- `cd <repo> && GDK_SCALE=2 cargo tauri dev > /tmp/tauri.log 2>&1 &`.
+  **Use `GDK_SCALE=2`**: at the default 15px font the caret, the dashed empty-slot box and fraction rules are
+  impossible to judge in a downscaled screenshot. It changes no code and no CSS.
+- Pick the window by **id**, never by name matching: a Chrome tab on `localhost:1420` shows up as
+  `無題.txt — Planetext - Google Chrome for Testing` and `wmctrl -a` matches it first.
+  `wmctrl -lG | grep -i "Planetext$"` → `xdotool windowactivate <id>; wmctrl -i -r <id> -b add,maximized_vert,maximized_horz`,
+  then verify with `xdotool getactivewindow getwindowname`.
+- **Confirm the frontend really rebuilt.** `Finished dev profile in 0.15s` only covers `src-tauri`. Look for
+  `Compiling planetext-ui` + `applying new distribution` + `✅ success` with a timestamp after the commit, and
+  kill stale `target/debug/planetext` processes (`ps -eo pid,lstart,cmd | grep target/debug/planetext`).
+- `trunk serve` watches the tree: **if anyone edits the checkout while you test, the window is replaced by a
+  "Build failure" overlay** and your evidence stops being about the revision under test. If you share a checkout
+  with another agent, ask for a separate worktree/clone (own `target`, own trunk port) before starting.
+- After a rebuild, `Ctrl+R` in the window reloads the webview; check the wasm file name in the console
+  (`planetext-ui-<hash>_bg.wasm`) to be sure you are on the new build.
 
-## Known environment limitations / workarounds
-- **Non-ASCII keyboard input does not work.** `xdotool type` silently drops Japanese (日本語), `√`, `α`, etc. — both in the contenteditable body and in the search inputs. Workarounds:
-  - Put the non-ASCII text in a file (e.g. `/tmp/x.txt`) and load it with the 開く button.
-  - To get non-ASCII into an input field: select the text in the document (a double-click selects a Japanese word cleanly), `Ctrl+C`, click the input, `Ctrl+V`. No `xclip`/`xsel` is installed, so shell-side clipboard tricks are unavailable.
-  - Keyboard triggers that require typing a non-ASCII glyph (e.g. `√` + space) may be impossible to test directly; use the equivalent `\sqrt` + space or the palette button and report the glyph trigger as untested.
-- **Do not use `window.confirm()` in this app.** It returns `false` in the Linux webkit2gtk WebView, which once made 新規 / 開く silently do nothing while unsaved. The unsaved-changes question now goes through the `confirm_discard` Tauri command (native dialog, buttons 破棄する / キャンセル); when testing 新規 / 開く while 未保存, expect that dialog and answer it.
-- **Native GTK file dialogs are usable.** In the save/open dialog, `Ctrl+A` in the name field then typing a full absolute path (e.g. `/tmp/out.txt`) and pressing `Return` works. For opening arbitrary extensions, pick the「すべてのファイル」filter from the dropdown at the bottom-right first.
+## WebKit inspector is available (this is the console/panic route)
+Right-click inside the app → **Inspect Element** → full WebKit inspector (Elements / Console / Sources / Computed).
+`console_error_panic_hook::set_once()` is installed, so **Rust/WASM panics appear in this Console**.
+- Docking the inspector shrinks the document area; **close it (the ✕ at the inspector's top-left) before taking
+  the screenshots that are meant to show the rendered formula.**
+- Clicking into the console **blurs the app**, and the app only draws carets when focused
+  (`focused && caret.composing.is_none()`), so `document.querySelector('.mn-cursor')` is `null` while you type in
+  the console. Either judge the caret from pixels, or arm a delayed measurement
+  (`ta().focus(); setTimeout(()=>{window.__m=...},3000)`) and read `window.__m` afterwards.
+- Console output is truncated in a screenshot when long: `console.log` one line per selector instead of returning
+  one big JSON string, and zoom on the console area.
 
-## Measuring the self-drawn caret and selection (VS Code-style editor core)
-The editor draws its own caret (`.mn-cursor`, 2 CSS px wide) and selection (`.mn-sel`) into `.mn-overlay`; the real focus target is an off-screen `textarea.mn-input`.
-- **The caret is easy to miss in screenshots.** On a maximized window the screenshot is downscaled to the tool's 1024x768 space, and a 2px line blends away. Zoom into a **narrow** region (roughly ≤80 tool px wide, e.g. `[8,140,80,162]`) to see it; wide regions like `[0,130,300,200]` can render the caret invisible even when it is there. Never conclude "no caret" from a wide screenshot — confirm with a tight zoom, and take 2-3 frames because it blinks (~1.1 s).
-- **Measure character boundaries instead of guessing pixels.** The body font is proportional (~5-6 tool px per ASCII char), so press `Home` then `Shift+Right` N times and zoom on the highlight's right edge to find the boundary for column N; click there. After clicking, zoom again and read the caret's position between the glyphs before pressing any key — for multi-cursor tests you can see all carets at once.
-- **Always confirm cursor positions by their effect, not only by looking.** Type one character and read the resulting string plus `N 文字 / M 行`; several different caret columns can produce the same character count (e.g. splitting `ab cd` at col 2 or col 3 both give 7 chars after typing one char per caret), so design the assertion so a wrong position yields a visibly different string.
-- **Multi-cursor drift is best caught across two operations**, since a single `edit_each` pass can look correct either way. Good adversarial cases: (1) two carets, type `X` at both, then one `Backspace` — each caret must delete its own `X` (`AAA XBBBX` → `AAA BBB`); (2) carets before each of the two spaces in `ab cd ef`, one `Delete` — correct gives `abcdef`, drifting gives `abcd f`.
-- `xdotool` double-click for word selection **registers intermittently** (sometimes handled as two single clicks). Retry, or select with `Shift+Arrow`/`Ctrl+D` when the test does not specifically target double-click.
+## The row/DOM contract (post "one row component" refactor)
+Every row at every depth is drawn by `src/view/row.rs`:
+- `span.mn-row[data-path]` — **the document's own line is the row whose `data-path` is empty**; inside a structure
+  the path is `index.slot` pairs joined by `,` (e.g. `0.0` = island at col 0, `0.0,0.1` = its fraction's
+  denominator, `0.0,0.1,0.1` = a fraction nested in that denominator).
+- Characters: `.mn-run` in prose, `.mn-atom mn-num|mn-ident|mn-word|mn-bin|mn-punct` inside formulas (so a `+g`
+  is **two** elements — never match atoms by multi-character text). Islands: `.mn-field`. Empty slot: `.mn-placeholder`.
+- Carets and selections are **overlay rectangles** `.mn-cursor` / `.mn-sel` in `.mn-overlay`, not inline spans
+  (`.mn-caret`, `.mn-placeholder-here`, `.mn-field-active` no longer exist).
+- IME preedit: `.mn-preedit` (underline + accent background) inserted **inside the row the caret is in**.
+  The assertion to write is
+  `document.querySelector('.mn-preedit').closest('.mn-row').dataset.path === '<expected path>'`,
+  plus a screenshot proving it is visible in that slot.
 
-## Clicking inside a formula lands at the wrong spot
-Clicking a fraction's numerator/denominator inserts at the *formula's* start or end rather than in the clicked slot. Root cause (as of the editor-core branch): `math::render::position_at_point` scores **every** `[data-pos]` element by `dy*4 + dx` around each element's horizontal middle, and `data-pos` is set unconditionally on every node (`src/math/render.rs`), including the **outer fraction node at root level**. That ancestor's box contains the click (so `dy == 0`) and its middle nearly coincides with the numerator's, so it wins the tie — it is evaluated first in document order and children only win on a strictly smaller score.
-- Diagnostic that needs no devtools: click the **left** half of the formula, then the **right** half. If the insertion flips from before the formula to after it, `position_at_point` is returning a root-level `Some(..)` (ancestor winning), not `None`. If it returned `None`, `enter_math(.., from_start=true)` would put the caret at the start regardless of where you click.
+## Driving IME without a real IME
+A real IBus/IME cannot be driven on this box (XTEST input never reaches IBus) — report real IME as **untested**
+and use synthetic composition events from the console:
+```js
+const ta = () => document.querySelector('textarea.mn-input');
+function comp(text){ const t=ta(); t.focus();
+  t.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true,data:''}));
+  t.value=text;
+  t.dispatchEvent(new CompositionEvent('compositionupdate',{bubbles:true,data:text}));
+  return [...document.querySelectorAll('.mn-preedit')].map(e=>e.textContent+'#'+e.closest('.mn-row').dataset.path);}
+function endComp(text){ const t=ta();
+  t.dispatchEvent(new CompositionEvent('compositionend',{bubbles:true,data:text})); t.value='';}
+```
+Pass Japanese as escapes (`comp('\u306b\u307b\u3093')`) — non-ASCII cannot be typed.
+**Always finish with the two adversarial checks**: after `endComp(text)` the characters must land in the same row,
+and a following ordinary keypress must still register — `state::on_keydown` returns early while `composing` is
+true, so a composition left open makes the app swallow every key, which users report as 「固まる」.
+Also send `endComp('')` (cancelled conversion) and check keys still work.
 
-## Useful UI facts (for locating things)
-- Row 1 toolbar: 新規 / 開く / 保存 / 名前を付けて / HTML出力 / 数式 / 数式(行) / 検索.
-- Row 2 palette group 1 = structures (½ √ ⁿ√ x² xₙ ∑ ∏ ∫ lim (⋮) {⋮) which create formula boxes; group 2 = symbols/greek and group 3 = functions (sin…), which insert **plain text**.
-- Search bar (Ctrl+F or 検索): 検索 input, 次を検索, 置換後 input, すべて置換, `Aa` (case sensitive), `.*` (regex), 閉じる.
-- Status bar (bottom): file name, 未保存/保存済み, `N 文字 / M 行`, and a status message on the right — the character counter is the most reliable objective assertion for undo/redo steps. It is updated by `changed()`, so if a key handler is wired through a non-`edit()` path the counter can lag behind the text; when a counter looks stale, cross-check the body pixels before calling it a pass or a fail.
-- To assert the dirty flag flips on an edit, save first (名前を付けて → a `/tmp` path) so the status reads `保存済み`, then press the key and check it becomes `未保存` immediately.
-- Body triggers require an alphanumeric run before them: `abc 1/` works, but `abc /` does not (a `/` after a space is prose). Note `abc1/` makes `abc1` the numerator.
-- Undo history coalesces changes within 700 ms (`COALESCE_MS` in `src/doc.rs`), so wait ~1 s between edits when you want distinct undo steps.
+## Structure editing semantics that trip tests up
+- Body triggers need an alphanumeric run: `abc 1/` makes a fraction, `abc /` stays prose, and `abc1/` uses `abc1`
+  as the numerator. `$` starts an empty island; inside an island `(`/`[` open a group, `/` stacks, `\sqrt ` and
+  `√`+space expand a root.
+- **`)` only leaves the enclosing group, never the fraction/root around it.** After `1/(2/3)` a `)` puts you back
+  in the *denominator* row, so `1/(2/3)+4` saves as `$(1/($(2/3))+4)` with `+4` **inside** the denominator. If a
+  test expects trailing text on the outer baseline, you must leave the structure with arrow keys (`Right`) instead
+  of typing `)`, otherwise you are measuring the wrong row and will misattribute a structural placement to CSS.
+- `Tab` inside an island is not a column separator (columns exist only on document lines); it moves the caret out
+  of / between slots.
+- A drag that starts inside an island resolves through `pos_at_point`, which takes an island **as a whole**: you
+  get a document selection of the whole island (Delete removes the entire formula), not an in-row selection.
+  Use `Shift+Left/Right` for a selection inside a structure.
+- Undo coalesces (~700 ms); a fraction created and typed into in one burst can undo to an empty island.
 
-## Verifying output textually
-Prefer asserting on saved files with the shell rather than only on pixels:
-- 名前を付けて → `/tmp/x.md`, then `cat /tmp/x.md` — formulas must appear as `$\frac{1}{2}$` and plain symbols (`α`, `sin`) must NOT be wrapped in `$`.
-- Round-trip: `diff` the reopened/re-saved file against the original (only a trailing-newline difference is expected).
-- HTML出力 → `grep -o "<math[^>]*" /tmp/out.html` and check for `<mfrac>`.
+## Judging pixels
+- Zoom into **narrow** regions (≤ ~120 tool px wide); a 2px caret disappears in a wide zoom. Take 2-3 frames
+  because it blinks (~1.1 s) — one frame with and one without the caret is the strongest evidence for
+  "the caret is inside the dashed empty-slot box".
+- `N 文字` counts an island as 1 character, so it cannot distinguish `1` from `$(1/)`. **Save (名前を付けて →
+  `/tmp/x.txt`) and `cat` the file** to establish what the document really contains.
+- For baselines, measure instead of eyeballing: compare `getBoundingClientRect()` of `.mn-frac-rule` with the
+  centre y of the runs around it (≤1.5px = aligned). Check `getComputedStyle` of `.mn-frac` (`inline-grid`,
+  `vertical-align: middle`), `.mn-row` (`inline`), `.mn-group` / `.mn-sqrt` (`inline-block; position: relative`).
+  If `grid-template-rows` reports equal `1fr` rows, the rule is centred and text outside the fraction should land
+  on it.
+
+## Native dialogs / non-ASCII
+- GTK file dialogs work: `Ctrl+A` in the name field, type an absolute path, `Return` (choose「すべてのファイル」
+  for odd extensions).
+- Non-ASCII keyboard input is impossible (`xdotool type` drops it) and no `xclip`/`xsel` is installed. Put the text
+  in a file, 開く it, select with `Home`/`Shift+End`, `Ctrl+C`, then paste where you need it — this is also how you
+  test the `√` glyph trigger.
+- Do not rely on `window.confirm()`; the unsaved-changes question is a native dialog (破棄する / キャンセル).
+- Harmless log noise: `dbind-WARNING ... org.a11y.Bus`, `Gtk-CRITICAL ... WIDGET_REALIZED_FOR_EVENT` (file dialogs).
+  Grep the log for real failures: `grep -iE "panic|already borrowed|RuntimeError|index out of bounds" /tmp/tauri.log`.
 
 ## Devin Secrets Needed
 None — the app is fully local with no auth or network dependency.

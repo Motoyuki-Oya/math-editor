@@ -96,9 +96,25 @@ struct Shell {
     status: RwSignal<String>,
     stats: RwSignal<(usize, usize)>,
     searching: RwSignal<bool>,
+    /// The field of the find bar waiting for the cursor, once it is on screen.
+    find_focus: RwSignal<Option<Field>>,
+}
+
+/// A field of the find bar, named so a shortcut can ask for it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Field {
+    Query,
+    Replacement,
 }
 
 impl Shell {
+    /// Opens the find bar with the cursor in `field`, which is what Ctrl+F and
+    /// Ctrl+R do.
+    fn find(&self, field: Field) {
+        self.searching.set(true);
+        self.find_focus.set(Some(field));
+    }
+
     fn new_tab(&self) -> Tab {
         self.root.with_value(|owner| owner.with(Tab::new))
     }
@@ -388,7 +404,10 @@ pub fn App() -> impl IntoView {
         status: RwSignal::new(String::new()),
         stats: RwSignal::new((0, 1)),
         searching: RwSignal::new(false),
+        find_focus: RwSignal::new(None),
     };
+    let query_field: NodeRef<leptos::html::Input> = NodeRef::new();
+    let replacement_field: NodeRef<leptos::html::Input> = NodeRef::new();
     let query = RwSignal::new(String::new());
     let replacement = RwSignal::new(String::new());
     let regex = RwSignal::new(false);
@@ -402,6 +421,21 @@ pub fn App() -> impl IntoView {
         editor::set_on_change(Box::new(move |pane| shell.mark_dirty(pane)));
         install_shortcuts(shell);
         spawn_local(ipc::frontend_ready());
+    });
+
+    // The bar is only on screen once it is open, so the cursor is put in the
+    // field it asked for as soon as the field exists.
+    Effect::new(move |_| {
+        let field = match shell.find_focus.get() {
+            Some(Field::Query) => query_field.get(),
+            Some(Field::Replacement) => replacement_field.get(),
+            None => return,
+        };
+        if let Some(field) = field {
+            field.focus().ok();
+            field.select();
+            shell.find_focus.set(None);
+        }
     });
 
     Effect::new(move |_| {
@@ -426,7 +460,7 @@ pub fn App() -> impl IntoView {
                 </div>
                 <div class="group">
                     <button class="tool" on:mousedown=hold_focus on:click=move |_| editor::insert_math() title="構造を挿入 (Ctrl+M)">"構造"</button>
-                    <button class="tool" on:mousedown=hold_focus on:click=move |_| shell.searching.update(|s| *s = !*s) title="検索と置換 (Ctrl+F)">"検索"</button>
+                    <button class="tool" on:mousedown=hold_focus on:click=move |_| shell.searching.update(|s| *s = !*s) title="検索と置換 (Ctrl+F / 置換は Ctrl+R)">"検索"</button>
                     <button
                         class="tool"
                         on:mousedown=hold_focus
@@ -444,6 +478,7 @@ pub fn App() -> impl IntoView {
                 <div class="findbar">
                     <input
                         class="find-input"
+                        node_ref=query_field
                         placeholder="検索"
                         prop:value=move || query.get()
                         on:input=move |ev| query.set(event_target_value(&ev))
@@ -456,6 +491,7 @@ pub fn App() -> impl IntoView {
                     <button class="tool" on:click=move |_| { editor::find_next(&query.get_untracked(), options()); }>"次を検索"</button>
                     <input
                         class="find-input"
+                        node_ref=replacement_field
                         placeholder="置換後"
                         prop:value=move || replacement.get()
                         on:input=move |ev| replacement.set(event_target_value(&ev))
@@ -472,7 +508,7 @@ pub fn App() -> impl IntoView {
                         />
                         "Aa"
                     </label>
-                    <label class="find-toggle" title="正規表現（置換では $1 で後方参照）">
+                    <label class="find-toggle" title="正規表現（置換では $1 で後方参照、\\t で列の区切り、\\n で改行）">
                         <input
                             type="checkbox"
                             prop:checked=move || regex.get()
@@ -725,7 +761,11 @@ fn install_shortcuts(shell: Shell) {
             }
             "f" => {
                 event.prevent_default();
-                shell.searching.set(true);
+                shell.find(Field::Query);
+            }
+            "r" => {
+                event.prevent_default();
+                shell.find(Field::Replacement);
             }
             "t" => {
                 event.prevent_default();

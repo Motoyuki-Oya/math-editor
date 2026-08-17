@@ -547,7 +547,11 @@ pub fn replace_all(query: &str, replacement: &str, options: SearchOptions) -> us
         for found in matches.iter().rev() {
             let text = search::expand(&found.groups, replacement, options);
             match &found.place {
-                Place::Text(sel) => borrowed.editor.replace_range(sel.start(), sel.end(), &text),
+                Place::Text(sel) => borrowed.editor.replace_range_with(
+                    sel.start(),
+                    sel.end(),
+                    search::replacement_items(&text),
+                ),
                 Place::Inside { at, cursor } => {
                     borrowed
                         .editor
