@@ -220,6 +220,14 @@ pub fn to_document() -> String {
         .unwrap_or_default()
 }
 
+/// The document of one pane, whichever pane has the typing. Used by the
+/// drafts, which follow the pane a change came from.
+pub fn document_of(pane: usize) -> Option<String> {
+    let session = pane_session(pane)?;
+    let text = document::write(session.borrow().editor.text());
+    Some(text)
+}
+
 pub fn stats() -> (usize, usize) {
     session()
         .map(|session| session.borrow().editor.text().stats())

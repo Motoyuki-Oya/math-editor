@@ -85,6 +85,96 @@ fn write_settings(app: tauri::AppHandle, contents: String) -> Result<(), String>
     std::fs::write(&path, contents).map_err(|e| format!("設定を保存できませんでした: {e}"))
 }
 
+/// Where the drafts live: one file per open document, next to the settings.
+///
+/// A draft is what is on screen right now, whether it has been saved or not.
+/// The document's own file is only ever written when the user saves, so a
+/// crash or a power cut costs nothing while the file itself is never touched
+/// behind the user's back.
+fn drafts_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let dir = app.path().app_config_dir().ok()?.join("drafts");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+/// A draft file is the document's path on its first line and the document
+/// itself after it, so that a restored draft knows which file it belongs to.
+#[derive(serde::Serialize)]
+struct Draft {
+    id: String,
+    path: Option<String>,
+    contents: String,
+}
+
+#[tauri::command]
+fn write_draft(
+    app: tauri::AppHandle,
+    id: String,
+    path: Option<String>,
+    contents: String,
+) -> Result<(), String> {
+    let Some(dir) = drafts_dir(&app) else {
+        return Err("下書きの保存先がありません".to_string());
+    };
+    let file = format!("{}\n{contents}", path.unwrap_or_default());
+    std::fs::write(dir.join(draft_name(&id)), file)
+        .map_err(|e| format!("下書きを保存できませんでした: {e}"))
+}
+
+#[tauri::command]
+fn remove_draft(app: tauri::AppHandle, id: String) {
+    if let Some(dir) = drafts_dir(&app) {
+        std::fs::remove_file(dir.join(draft_name(&id))).ok();
+    }
+}
+
+#[tauri::command]
+fn read_drafts(app: tauri::AppHandle) -> Vec<Draft> {
+    let Some(dir) = drafts_dir(&app) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut drafts: Vec<Draft> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let id = path.file_stem()?.to_string_lossy().into_owned();
+            let file = std::fs::read_to_string(&path).ok()?;
+            let (first, contents) = file.split_once('\n').unwrap_or(("", file.as_str()));
+            Some(Draft {
+                id,
+                path: (!first.is_empty()).then(|| first.to_string()),
+                contents: contents.to_string(),
+            })
+        })
+        .collect();
+    // The tabs come back in the order they were opened in.
+    drafts.sort_by(|a, b| a.id.cmp(&b.id));
+    drafts
+}
+
+fn clear_drafts(app: &tauri::AppHandle) {
+    if let Some(dir) = drafts_dir(app) {
+        std::fs::remove_dir_all(dir).ok();
+    }
+}
+
+/// Keeps a draft's name to digits, so that an id can never reach outside the
+/// drafts directory.
+fn draft_name(id: &str) -> String {
+    let digits: String = id.chars().filter(char::is_ascii_digit).collect();
+    format!(
+        "{}.draft",
+        if digits.is_empty() {
+            "0"
+        } else {
+            digits.as_str()
+        }
+    )
+}
+
 /// Remembers the window size across runs, next to the settings.
 fn window_size_path(app: &tauri::AppHandle) -> Option<PathBuf> {
     let dir = app.path().app_config_dir().ok()?;
@@ -186,6 +276,8 @@ fn confirm_discard_on_close(window: &tauri::Window) {
         ))
         .show(move |discard| {
             if discard {
+                // Thrown away on purpose: there is nothing to restore.
+                clear_drafts(target.app_handle());
                 if let Ok(mut dirty) = target.state::<AppState>().dirty.lock() {
                     *dirty = false;
                 }
@@ -224,7 +316,10 @@ pub fn run() {
             frontend_ready,
             confirm_discard,
             read_settings,
-            write_settings
+            write_settings,
+            write_draft,
+            remove_draft,
+            read_drafts
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

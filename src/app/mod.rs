@@ -1,6 +1,7 @@
 //! Application shell: toolbar, structure palette, search bar and status bar.
 
 mod display;
+mod drafts;
 mod find;
 mod keys;
 mod palette;
@@ -41,8 +42,11 @@ pub fn App() -> impl IntoView {
     Effect::new(move |_| {
         editor::set_on_change(Box::new(move |pane| shell.mark_dirty(pane)));
         keys::install_shortcuts(shell);
-        spawn_local(async {
+        spawn_local(async move {
             settings::apply(settings::read(&ipc::read_settings().await));
+            // The panes exist by now: reading the settings gave the effect that
+            // builds them its turn.
+            shell.restore_drafts(ipc::read_drafts().await);
             ipc::frontend_ready().await;
         });
     });
