@@ -133,6 +133,12 @@ impl View {
             true => self.scroll_for(caret.at.line, text.line_count()),
             false => self.root.scroll_top() as f64,
         };
+        // Whether the caret's line can be seen right now. A draw that follows
+        // the caret has to end with it in sight; a draw that does not must at
+        // least not lose sight of it, which measuring the lines anew can do at
+        // the end of the document, where the scroll cannot move as far as the
+        // lines it has to make room for.
+        let mut keep = follow_caret;
         if !follow_caret {
             let window = self.widen_for_blocks(text, self.window(scroll, text.line_count()));
             // Scrolling within the margin shows lines that are already there,
@@ -140,9 +146,10 @@ impl View {
             if window == *self.drawn.borrow() {
                 return;
             }
+            keep = (self.scroll_onto(caret.at.line, scroll) - scroll).abs() <= 0.5;
         }
         scroll = self.render(text, sels, caret, focused, scroll);
-        if !follow_caret {
+        if !keep {
             return;
         }
         // The scroll above was worked out from heights that were still guesses
@@ -168,7 +175,10 @@ impl View {
     fn scroll_onto(&self, line: usize, scroll: f64) -> f64 {
         let view = self.root.client_height() as f64;
         let Some(holder) = self.line_element(line) else {
-            return scroll;
+            // The line the view is being moved for is not even drawn, so the
+            // heights that chose the range were wrong about it. Aim at it once
+            // more from what has been measured since.
+            return (self.heights.borrow().top_of(line) - view / 3.0).max(0.0);
         };
         let rect = measure::box_of(&holder.get_bounding_client_rect());
         let root = measure::box_of(&self.root.get_bounding_client_rect());
