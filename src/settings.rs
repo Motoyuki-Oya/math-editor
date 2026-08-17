@@ -41,6 +41,11 @@ thread_local! {
     static CURRENT: RefCell<Settings> = RefCell::new(Settings::default());
 }
 
+/// The settings in effect right now.
+pub fn current() -> Settings {
+    CURRENT.with(|current| current.borrow().clone())
+}
+
 pub fn column_gap() -> f64 {
     CURRENT.with(|current| current.borrow().column_gap)
 }
@@ -91,6 +96,19 @@ fn show(settings: &Settings) {
         .ok();
 }
 
+/// Writes the settings as the file keeps them: one `name = value` per line,
+/// which is a small corner of TOML.
+pub fn write(settings: &Settings) -> String {
+    format!(
+        "font_size = {}\nfont_family = \"{}\"\ncaret_blink = {}\ncolumn_gap = {}\nhistory_limit = {}\n",
+        settings.font_size,
+        settings.font_family.replace('"', ""),
+        settings.caret_blink,
+        settings.column_gap,
+        settings.history_limit,
+    )
+}
+
 /// Reads the settings back, starting from the defaults: a missing or broken
 /// line keeps its default, so an old or edited file still opens.
 pub fn read(text: &str) -> Settings {
@@ -133,6 +151,18 @@ pub fn read(text: &str) -> Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_survive_a_round_trip() {
+        let settings = Settings {
+            font_size: 18.0,
+            font_family: "Serif".to_string(),
+            caret_blink: false,
+            history_limit: 100,
+            ..Settings::default()
+        };
+        assert!(read(&write(&settings)) == settings);
+    }
 
     #[test]
     fn a_file_overrides_only_what_it_names() {

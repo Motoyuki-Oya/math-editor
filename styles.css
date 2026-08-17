@@ -46,6 +46,40 @@ body {
 
 .toolbar,
 .palette,
+.prefbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.pref {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.pref-size {
+  width: 60px;
+}
+
+.pref-font {
+  width: 200px;
+}
+
+.pref-size,
+.pref-font {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 4px 6px;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 13px;
+}
+
 .findbar {
   display: flex;
   flex-wrap: wrap;

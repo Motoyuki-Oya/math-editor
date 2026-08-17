@@ -96,6 +96,14 @@ pub async fn read_settings() -> String {
         .unwrap_or_default()
 }
 
+pub async fn write_settings(contents: &str) {
+    #[derive(Serialize)]
+    struct ContentsArg<'a> {
+        contents: &'a str,
+    }
+    let _ = call("write_settings", ContentsArg { contents }).await;
+}
+
 pub async fn frontend_ready() {
     let _ = call("frontend_ready", NoArgs {}).await;
 }

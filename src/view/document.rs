@@ -5,20 +5,21 @@
 //! everything here. The only thing a line does that a row inside a structure
 //! cannot is line its column separators up with its neighbours.
 //!
+//! Where the drawn things ended up is read back by [`crate::view::measure`]:
+//! putting something on screen and measuring what is there are opposite jobs,
+//! so they are kept apart.
+//!
 //! Nothing here is editable by the browser: lines are plain spans, and every
 //! caret is a small absolutely placed element, which is how several carets can
 //! be shown at once, and how a caret inside a structure is the same caret as a
 //! caret in the text.
 
-use wasm_bindgen::JsCast;
-use web_sys::{Document, Element, HtmlElement, Range};
+use web_sys::{Document, Element, HtmlElement};
 
 use crate::structure::ast::Cursor;
 use crate::structure::text::{Item, Pos, Sel, Text};
-use crate::view::row::{
-    self, Path, Preedit, Renderer, FIELD_CLASS, PATH_ATTR, PLACEHOLDER_CLASS, ROW_CLASS, RUN_CLASS,
-    START_ATTR, TAB_CLASS,
-};
+use crate::view::measure::{self, Box2, Hit};
+use crate::view::row::{self, Path, Preedit, Renderer, FIELD_CLASS, PATH_ATTR, TAB_CLASS};
 
 pub const LINE_CLASS: &str = "mn-line";
 const LINE_ATTR: &str = "data-line";
@@ -56,13 +57,6 @@ impl Caret<'_> {
             }
         }
     }
-}
-
-/// What a click landed on: a place in the text, or a place inside the island
-/// standing there.
-pub enum Hit {
-    Text(Pos),
-    Inside(Pos, Cursor),
 }
 
 impl View {
@@ -250,17 +244,17 @@ impl View {
         to: Option<usize>,
     ) -> Option<Box2> {
         let row = self.row_element(line, path)?;
-        let left = boundary(&row, from)?;
+        let left = measure::boundary(&row, from)?;
         let right = match to {
-            Some(index) => boundary(&row, index)?,
+            Some(index) => measure::boundary(&row, index)?,
             // Selecting past the end of a line shows the newline as a gap.
             None => {
-                let mut rect = boundary(&row, usize::MAX)?;
+                let mut rect = measure::boundary(&row, usize::MAX)?;
                 rect.left += 6.0;
                 rect
             }
         };
-        Some(span_box(&row, left, right))
+        Some(measure::span_box(&row, left, right))
     }
 
     fn caret_rect(&self, at: Pos) -> Option<Box2> {
@@ -270,7 +264,7 @@ impl View {
     /// Where a place in a row is on screen. `usize::MAX` means the end of it.
     fn place_box(&self, line: usize, path: &Path, index: usize) -> Option<Box2> {
         let row = self.row_element(line, path)?;
-        boundary(&row, index)
+        measure::boundary(&row, index)
     }
 
     fn line_element(&self, line: usize) -> Option<Element> {
@@ -296,35 +290,14 @@ impl View {
             let Some(holder) = self.line_element(candidate) else {
                 continue;
             };
-            let rect = holder.get_bounding_client_rect();
-            if y < rect.bottom() {
+            if y < holder.get_bounding_client_rect().bottom() {
                 line = candidate;
                 break;
             }
         }
-        let Some(holder) = self.line_element(line) else {
-            return Hit::Text(Pos::new(line, 0));
-        };
-        let row = innermost_row(&holder, x, y);
-        let Some(row) = row else {
-            return Hit::Text(Pos::new(line, 0));
-        };
-        let index = nearest_index(&row, x);
-        let path = row
-            .get_attribute(PATH_ATTR)
-            .and_then(|encoded| row::decode_path(&encoded))
-            .unwrap_or_default();
-        match path.split_first() {
-            None => Hit::Text(Pos::new(line, index)),
-            Some(((col, _), rest)) => Hit::Inside(
-                Pos::new(line, *col),
-                Cursor {
-                    path: rest.to_vec(),
-                    index,
-                    anchor: index,
-                    fills: Vec::new(),
-                },
-            ),
+        match self.line_element(line) {
+            Some(holder) => measure::hit_in_line(&holder, line, x, y),
+            None => Hit::Text(Pos::new(line, 0)),
         }
     }
 
@@ -349,8 +322,8 @@ impl View {
             if !child.class_list().contains(FIELD_CLASS) {
                 continue;
             }
-            if start_of(&child) == Some(at.col) {
-                return Some(box_of(&child.get_bounding_client_rect()));
+            if measure::start_of(&child) == Some(at.col) {
+                return Some(measure::box_of(&child.get_bounding_client_rect()));
             }
         }
         None
@@ -367,7 +340,7 @@ impl View {
     /// the input element can follow it (which is where IME candidates appear).
     pub fn reveal(&self, caret: &Caret<'_>) -> Option<Box2> {
         let rect = self.caret_box(caret)?;
-        let view = box_of(&self.root.get_bounding_client_rect());
+        let view = measure::box_of(&self.root.get_bounding_client_rect());
         let top = rect.top - view.top + self.root.scroll_top() as f64;
         let left = rect.left - view.left + self.root.scroll_left() as f64;
         if top < self.root.scroll_top() as f64 {
@@ -386,167 +359,6 @@ impl View {
             top: rect.top - view.top,
             ..rect
         })
-    }
-}
-
-#[derive(Clone, Copy, Default)]
-pub struct Box2 {
-    pub left: f64,
-    pub top: f64,
-    pub width: f64,
-    pub height: f64,
-}
-
-impl Box2 {
-    fn fix(mut self) -> Self {
-        if self.height <= 0.0 {
-            self.height = 18.0;
-        }
-        if self.width <= 0.0 {
-            self.width = 1.0;
-        }
-        self
-    }
-}
-
-fn span_box(row: &Element, left: Box2, right: Box2) -> Box2 {
-    let mut top = left.top.min(right.top);
-    let mut bottom = (left.top + left.height).max(right.top + right.height);
-    let children = row.children();
-    for i in 0..children.length() {
-        let Some(child) = children.item(i) else {
-            continue;
-        };
-        let rect = box_of(&child.get_bounding_client_rect());
-        let middle = rect.left + rect.width / 2.0;
-        if middle > left.left && middle < right.left {
-            top = top.min(rect.top);
-            bottom = bottom.max(rect.top + rect.height);
-        }
-    }
-    Box2 {
-        left: left.left,
-        top,
-        width: (right.left - left.left).max(1.0),
-        height: bottom - top,
-    }
-    .fix()
-}
-
-/// The deepest row the point is inside of. Rows nest, so a point inside a
-/// denominator is inside the fraction's row and the line's row as well.
-fn innermost_row(holder: &Element, x: f64, y: f64) -> Option<Element> {
-    let rows = holder.query_selector_all(&format!(".{ROW_CLASS}")).ok()?;
-    let mut best: Option<(usize, Element)> = None;
-    let mut fallback: Option<Element> = None;
-    for i in 0..rows.length() {
-        let Some(row) = rows
-            .item(i)
-            .and_then(|node| node.dyn_ref::<Element>().cloned())
-        else {
-            continue;
-        };
-        let depth = row
-            .get_attribute(PATH_ATTR)
-            .and_then(|encoded| row::decode_path(&encoded))
-            .map(|path| path.len())
-            .unwrap_or(0);
-        if depth == 0 {
-            fallback = Some(row.clone());
-        }
-        let rect = row.get_bounding_client_rect();
-        let inside = y >= rect.top() && y <= rect.bottom() && x >= rect.left() && x <= rect.right();
-        if inside && best.as_ref().is_none_or(|(deepest, _)| depth > *deepest) {
-            best = Some((depth, row));
-        }
-    }
-    best.map(|(_, row)| row).or(fallback)
-}
-
-/// The place in a row nearest to a point.
-fn nearest_index(row: &Element, x: f64) -> usize {
-    let mut best = (f64::MAX, 0usize);
-    for (index, rect) in boundaries(row) {
-        let distance = (rect.left - x).abs();
-        if distance < best.0 {
-            best = (distance, index);
-        }
-    }
-    best.1
-}
-
-/// Every place in a row, and where it is on screen.
-fn boundaries(row: &Element) -> Vec<(usize, Box2)> {
-    let mut places = Vec::new();
-    let children = row.children();
-    for i in 0..children.length() {
-        let Some(child) = children.item(i) else {
-            continue;
-        };
-        let Some(start) = start_of(&child) else {
-            continue;
-        };
-        match run_length(&child) {
-            Some(len) => {
-                for offset in 0..=len {
-                    if let Some(rect) = text_boundary(&child, offset) {
-                        places.push((start + offset, rect));
-                    }
-                }
-            }
-            None => {
-                let rect = box_of(&child.get_bounding_client_rect());
-                // An empty row has a box to click on but no place after it.
-                if child.class_list().contains(PLACEHOLDER_CLASS) {
-                    places.push((start, rect));
-                    continue;
-                }
-                places.push((start, rect));
-                places.push((
-                    start + 1,
-                    Box2 {
-                        left: rect.left + rect.width,
-                        ..rect
-                    },
-                ));
-            }
-        }
-    }
-    places
-}
-
-/// The place just before the item at `index`; `usize::MAX` means the end.
-fn boundary(row: &Element, index: usize) -> Option<Box2> {
-    let places = boundaries(row);
-    if index == usize::MAX {
-        return places.last().map(|(_, rect)| *rect);
-    }
-    places
-        .iter()
-        .find(|(place, _)| *place == index)
-        .map(|(_, rect)| *rect)
-        .or_else(|| places.last().map(|(_, rect)| *rect))
-}
-
-/// How many characters a text run holds, or `None` for anything that takes one
-/// place of its own, such as an island or a structure.
-fn run_length(child: &Element) -> Option<usize> {
-    child
-        .class_list()
-        .contains(RUN_CLASS)
-        .then(|| child.text_content().unwrap_or_default().chars().count())
-}
-
-fn start_of(child: &Element) -> Option<usize> {
-    child.get_attribute(START_ATTR)?.parse().ok()
-}
-
-fn box_of(rect: &web_sys::DomRect) -> Box2 {
-    Box2 {
-        left: rect.left(),
-        top: rect.top(),
-        width: rect.width(),
-        height: rect.height(),
     }
 }
 
@@ -581,48 +393,4 @@ fn element(doc: &Document, tag: &str, class: &str) -> Option<Element> {
     let element = doc.create_element(tag).ok()?;
     element.set_class_name(class);
     Some(element)
-}
-
-/// Measures a place inside a text run with a collapsed range, which is the only
-/// way to get an offset's position for a proportional font.
-fn text_boundary(run: &Element, offset: usize) -> Option<Box2> {
-    let doc = run.owner_document()?;
-    let text = run.text_content().unwrap_or_default();
-    let Some(node) = run.first_child() else {
-        // An empty line has no text node to measure.
-        return Some(empty_run_box(run));
-    };
-    let units: u32 = text
-        .chars()
-        .take(offset)
-        .map(|c| c.len_utf16() as u32)
-        .sum();
-    let range: Range = doc.create_range().ok()?;
-    range.set_start(&node, units).ok()?;
-    range.set_end(&node, units).ok()?;
-    let rect = box_of(&range.get_bounding_client_rect());
-    if rect.height > 0.0 {
-        return Some(rect);
-    }
-    // A collapsed range in an empty text node has no box; use the run itself.
-    Some(empty_run_box(run))
-}
-
-/// An empty inline run has no height of its own, which would leave the caret
-/// invisible, so the height comes from the line the run sits on.
-fn empty_run_box(run: &Element) -> Box2 {
-    let rect = box_of(&run.get_bounding_client_rect());
-    if rect.height > 0.0 {
-        return rect;
-    }
-    let Some(line) = run.closest(&format!(".{LINE_CLASS}")).ok().flatten() else {
-        return rect;
-    };
-    let holder = box_of(&line.get_bounding_client_rect());
-    Box2 {
-        left: rect.left,
-        top: holder.top,
-        width: rect.width,
-        height: holder.height,
-    }
 }

@@ -4,6 +4,7 @@ mod find;
 mod keys;
 mod palette;
 mod panes;
+mod preferences;
 mod shell;
 
 use leptos::prelude::*;
@@ -13,6 +14,7 @@ use leptos::task::spawn_local;
 use find::FindBar;
 use palette::Palette;
 use panes::PaneView;
+use preferences::Preferences;
 use shell::{Pane, Shell};
 
 use crate::editor;
@@ -31,6 +33,7 @@ pub fn App() -> impl IntoView {
         searching: RwSignal::new(false),
         find_focus: RwSignal::new(None),
     };
+    let preferences_open = RwSignal::new(false);
 
     Effect::new(move |_| {
         editor::set_on_change(Box::new(move |pane| shell.mark_dirty(pane)));
@@ -72,6 +75,7 @@ pub fn App() -> impl IntoView {
                     >
                         {move || if shell.panes.get().len() > 1 { "分割解除" } else { "分割" }}
                     </button>
+                    <button class="tool" on:mousedown=hold_focus on:click=move |_| preferences_open.update(|open| *open = !*open)>"設定"</button>
                 </div>
             </div>
 
@@ -79,6 +83,10 @@ pub fn App() -> impl IntoView {
 
             <Show when=move || shell.searching.get()>
                 <FindBar shell=shell/>
+            </Show>
+
+            <Show when=move || preferences_open.get()>
+                <Preferences open=preferences_open/>
             </Show>
 
             <div class="panes">
