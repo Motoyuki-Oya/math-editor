@@ -127,6 +127,7 @@ impl View {
         follow_caret: bool,
     ) {
         self.heights.borrow_mut().fit(text.line_count());
+        self.fit_numbers(text.line_count());
         // Where the view is going to be: at the caret when something changed,
         // and where the user left it when they scrolled.
         let mut scroll = match follow_caret {
@@ -164,6 +165,20 @@ impl View {
             }
             scroll = self.render(text, sels, caret, focused, settled);
         }
+    }
+
+    /// Makes the room the line numbers stand in as wide as the largest number
+    /// this document has. How wide a number is is a measure of the text, so the
+    /// settings only say whether the numbers are there at all.
+    fn fit_numbers(&self, count: usize) {
+        let style = self.root.style();
+        if !crate::settings::line_numbers() {
+            style.remove_property("--setting-gutter").ok();
+            return;
+        }
+        let digits = count.max(1).to_string().len();
+        let width = format!("calc({digits}ch + 1.4em)");
+        style.set_property("--setting-gutter", &width).ok();
     }
 
     /// The scroll that shows a line whole, or `scroll` if the line is in sight

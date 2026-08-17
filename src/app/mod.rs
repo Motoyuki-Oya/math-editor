@@ -44,6 +44,10 @@ pub fn App() -> impl IntoView {
         menu::install(shell);
         spawn_local(async move {
             settings::apply(settings::read(&ipc::read_settings().await));
+            // Drawn again, because what the settings say is put into the lines
+            // while they are drawn: without this the first screen is the one the
+            // defaults would give, and the menu's check marks disagree with it.
+            editor::redraw_all();
             // The menu's check marks are put where the saved settings are.
             menu::show_state(shell);
             // The panes exist by now: reading the settings gave the effect that
