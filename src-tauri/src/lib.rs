@@ -64,8 +64,7 @@ fn write_document(path: String, contents: String) -> Result<(), String> {
     std::fs::write(&path, contents).map_err(|e| format!("{path} を保存できませんでした: {e}"))
 }
 
-/// Where the settings file lives: `settings.toml` in the app's own config
-/// directory.
+/// 設定ファイルが存在する場所: アプリ独自の構成ディレクトリ内の `settings.toml`。
 fn settings_path(app: &tauri::AppHandle) -> Option<PathBuf> {
     let dir = app.path().app_config_dir().ok()?;
     std::fs::create_dir_all(&dir).ok()?;
@@ -87,20 +86,16 @@ fn write_settings(app: tauri::AppHandle, contents: String) -> Result<(), String>
     std::fs::write(&path, contents).map_err(|e| format!("設定を保存できませんでした: {e}"))
 }
 
-/// Where the drafts live: one file per open document, next to the settings.
+/// 下書きが存在する場所: 開いているドキュメントごとに、設定の横に 1 つのファイル。
 ///
-/// A draft is what is on screen right now, whether it has been saved or not.
-/// The document's own file is only ever written when the user saves, so a
-/// crash or a power cut costs nothing while the file itself is never touched
-/// behind the user's back.
+/// 下書きは、保存されているかどうかに関係なく、現在画面上に表示されているものです。ドキュメント自体のファイルは、ユーザーが保存するときにのみ書き込まれるため、ユーザーがファイル自体に触れることがない限り、クラッシュや停電によるコストは発生しません。
 fn drafts_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     let dir = app.path().app_config_dir().ok()?.join("drafts");
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir)
 }
 
-/// A draft file is the document's path on its first line and the document
-/// itself after it, so that a restored draft knows which file it belongs to.
+/// 下書きファイルは最初の行にドキュメントのパスがあり、その後にドキュメント自体が含まれているため、復元されたドラフトではそれがどのファイルに属しているかがわかります。
 #[derive(serde::Serialize)]
 struct Draft {
     id: String,
@@ -152,7 +147,7 @@ fn read_drafts(app: tauri::AppHandle) -> Vec<Draft> {
             })
         })
         .collect();
-    // The tabs come back in the order they were opened in.
+    // タブは開かれた順序で戻ります。
     drafts.sort_by(|a, b| a.id.cmp(&b.id));
     drafts
 }
@@ -163,8 +158,7 @@ fn clear_drafts(app: &tauri::AppHandle) {
     }
 }
 
-/// Keeps a draft's name to digits, so that an id can never reach outside the
-/// drafts directory.
+/// 下書きの名前は数字に保たれるため、ID にアクセスすることはできません。
 fn draft_name(id: &str) -> String {
     let digits: String = id.chars().filter(char::is_ascii_digit).collect();
     format!(
@@ -177,7 +171,7 @@ fn draft_name(id: &str) -> String {
     )
 }
 
-/// Remembers the window size across runs, next to the settings.
+/// 設定の横に、実行全体のウィンドウ サイズを記憶します。
 fn window_size_path(app: &tauri::AppHandle) -> Option<PathBuf> {
     let dir = app.path().app_config_dir().ok()?;
     std::fs::create_dir_all(&dir).ok()?;
@@ -225,8 +219,7 @@ fn set_dirty(state: State<'_, AppState>, dirty: bool) {
     *state.dirty.lock().unwrap() = dirty;
 }
 
-/// Reports the time from process start to the first frontend paint when
-/// `PLANETEXT_STARTUP_LOG` is set. Used to keep an eye on startup cost.
+/// `PLANETEXT_STARTUP_LOG` が設定されている場合、プロセスの開始から最初のフロントエンド ペイントまでの時間を報告します。起動コストを監視するために使用されます。
 #[tauri::command]
 fn frontend_ready(state: State<'_, AppState>) {
     if std::env::var_os("PLANETEXT_STARTUP_LOG").is_some() {
@@ -237,8 +230,7 @@ fn frontend_ready(state: State<'_, AppState>) {
     }
 }
 
-/// Asks before losing unsaved work. The WebView's own `confirm()` is not
-/// usable on every platform, so the question goes through the native dialog.
+/// 保存されていない作業が失われる前に確認します。 WebView 自体の `confirm()` はすべてのプラットフォームで使用できるわけではないため、質問はネイティブ ダイアログを経由します。
 #[tauri::command]
 async fn confirm_discard(app: tauri::AppHandle, message: String) -> bool {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -278,7 +270,7 @@ fn confirm_discard_on_close(window: &tauri::Window) {
         ))
         .show(move |discard| {
             if discard {
-                // Thrown away on purpose: there is nothing to restore.
+                // 意図的に破棄されます。復元するものは何もありません。
                 clear_drafts(target.app_handle());
                 if let Ok(mut dirty) = target.state::<AppState>().dirty.lock() {
                     *dirty = false;

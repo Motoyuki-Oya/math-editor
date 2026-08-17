@@ -1,4 +1,4 @@
-//! Calls into the Tauri backend (file dialogs and disk access).
+//! Tauri バックエンド (ファイル ダイアログとディスク アクセス) を呼び出します。
 
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -12,7 +12,7 @@ extern "C" {
     async fn listen(event: &str, handler: &JsValue) -> Result<JsValue, JsValue>;
 }
 
-/// Calls `chosen` with the name of the item picked from the system's menus.
+/// システムのメニューから選択した項目の名前で `chosen` を呼び出します。
 pub fn on_menu(chosen: impl Fn(&str) + 'static) {
     let handler = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
         let name = js_sys::Reflect::get(&event, &JsValue::from_str("payload"))
@@ -24,7 +24,7 @@ pub fn on_menu(chosen: impl Fn(&str) + 'static) {
     });
     wasm_bindgen_futures::spawn_local(async move {
         let _ = listen("menu", handler.as_ref()).await;
-        // Kept alive: the listener lives as long as the window does.
+        // 維持します: リスナーはウィンドウが存続する限り存続します。
         handler.forget();
     });
 }
@@ -92,7 +92,7 @@ struct MessageArg<'a> {
     message: &'a str,
 }
 
-/// Asks the user whether unsaved work may be thrown away.
+/// 未保存の作業を破棄してもよいかどうかをユーザーに尋ねます。
 pub async fn confirm_discard(message: &str) -> bool {
     call("confirm_discard", MessageArg { message })
         .await
@@ -127,7 +127,7 @@ pub async fn set_dirty(dirty: bool) {
     let _ = call("set_dirty", DirtyArg { dirty }).await;
 }
 
-/// The saved settings, as the file's text. Empty when there is none yet.
+/// 保存された設定 (ファイルのテキストとして)。まだ何もない場合は空です。
 pub async fn read_settings() -> String {
     call("read_settings", NoArgs {})
         .await
@@ -144,7 +144,7 @@ pub async fn write_settings(contents: &str) {
     let _ = call("write_settings", ContentsArg { contents }).await;
 }
 
-/// What was on screen last time, whether it had been saved or not.
+/// 前回画面に表示されていたもの、保存されているかどうか。
 pub struct Draft {
     pub id: usize,
     pub path: Option<String>,

@@ -1,13 +1,8 @@
-//! How a document is drawn.
+//! ドキュメントの描画方法。
 //!
-//! Depends on [`crate::structure`] only. It must never reach into
-//! [`crate::format`]: nothing on screen may be derived from the notation, which
-//! is why the palette, the tooltips and the caret all work in terms of
-//! structures instead.
+//! [`crate::structure`] のみに依存します。 [`crate::format`] に到達してはなりません。画面上の何も表記法から派生することはできません。そのため、パレット、ツールチップ、およびキャレットはすべて、代わりに構造の観点から機能します。
 //!
-//! [`row`] is the one component that draws a row, at every depth; [`document`]
-//! puts the lines together, and [`measure`] reads back where they landed so a
-//! caret can be placed and a click understood.
+//! [`row`] は、あらゆる深さで行を描画する 1 つのコンポーネントです。 [`document`] は行をまとめ、[`measure`] は行が到着した位置を読み戻して、キャレットを配置してクリックを理解できるようにします。
 
 pub mod document;
 mod heights;

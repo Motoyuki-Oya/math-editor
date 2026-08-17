@@ -1,7 +1,6 @@
-//! The notation an island is written in, as described in `docs/notation.md`.
+//! `docs/notation.md` で説明されているように、アイランドが記述される表記法です。
 //!
-//! Everything inside `$(` … `)` is read here and written back out here, so the
-//! saved file stays plain text and no other format is involved.
+//! `$(` … `)` 内のすべてがここで読み取られ、ここで書き戻されるため、保存されたファイルはプレーン テキストのままであり、他の形式は関与しません。
 
 use crate::structure::ast::{is_arrow, Between, Delim, MatrixKind, Node, Row};
 use crate::structure::vocabulary;
@@ -10,8 +9,7 @@ pub const LIMITS_MARK: char = '↨';
 pub const ROOT_MARK: char = '√';
 pub const ROOT_WORD: &str = "sqrt";
 
-/// Characters that mean something structurally, so writing one as an ordinary
-/// character means writing it twice.
+/// 構造的に何かを意味する文字なので、1 つを通常の文字として書くことは 2 回書くことになります。
 const SPECIAL: [char; 7] = ['$', '/', '-', ',', ';', '[', ']'];
 
 fn is_special(c: char) -> bool {
@@ -20,7 +18,7 @@ fn is_special(c: char) -> bool {
 
 // ---------------------------------------------------------------- reading
 
-/// Reads the content of an island (the text between `$(` and its `)`).
+/// アイランドの内容を読み取ります (テキスト
 pub fn parse_island(src: &str) -> Row {
     let chars: Vec<char> = src.chars().collect();
     content(&chars)
@@ -47,8 +45,7 @@ fn starts_with(chars: &[char], word: &str) -> bool {
         .eq(word.chars())
 }
 
-/// Positions of the structural characters that sit at the top level of
-/// `chars`: not inside a nested island, group or row, and not doubled.
+/// `chars` の最上位にある構造文字の位置: ネストされたアイランド、グループ、または行内ではなく、二重化されていません。
 fn top_level(chars: &[char]) -> Vec<(usize, char)> {
     let mut out = Vec::new();
     let mut depth = 0usize;
@@ -85,8 +82,7 @@ fn top_level(chars: &[char]) -> Vec<(usize, char)> {
     out
 }
 
-/// Splits on the top level commas, so `Σ, n, x=1` becomes three arguments and
-/// `lim,, n→∞` leaves the middle one out.
+/// 最上位のカンマで分割されるため、`Σ, n, x=1` は 3 つの引数になり、`lim,, n→∞` は中央の引数を省略します。
 fn split_args(chars: &[char]) -> Vec<&[char]> {
     let mut args = Vec::new();
     let mut start = 0;
@@ -122,8 +118,7 @@ fn arg(args: &[&[char]], i: usize) -> Row {
     args.get(i).map(|a| row(a)).unwrap_or_default()
 }
 
-/// Reads a whole island: the outermost structure may be written bare, while
-/// anything nested inside it is written as an island of its own.
+/// アイランド全体を読み取ります: 最も外側の構造
 fn content(chars: &[char]) -> Row {
     let chars = trim(chars);
     if chars.is_empty() {
@@ -173,7 +168,7 @@ fn content(chars: &[char]) -> Row {
     row(chars)
 }
 
-/// The characters that separate the two rows of a stack.
+/// スタックの 2 行を区切る文字。
 fn is_stack_mark(c: char) -> bool {
     c == '/' || c == '-' || is_arrow(c)
 }
@@ -186,8 +181,7 @@ fn between(mark: char) -> Between {
     }
 }
 
-/// `√[n] x`: the index is optional, the body is the one chunk that follows,
-/// and whatever comes after it is beside the root, not under it.
+/// `√[n] x`: インデックスはオプションで、本文はそれに続く 1 つのチャンクであり、その後に来るものはルートの下ではなく横にあります。
 fn root(chars: &[char]) -> Row {
     let chars = trim(chars);
     let (index, rest) = match chars.first() {
@@ -204,8 +198,7 @@ fn root(chars: &[char]) -> Row {
     out
 }
 
-/// One chunk: a character, a group or a nested island, plus the scripts that
-/// are attached to it. Also reports how much of `chars` it used.
+/// 1 つのチャンク: 文字、グループ、またはネストされたアイランド、およびそれに関連付けられたスクリプト。また、使用した `chars` の量もレポートします。
 fn chunk(chars: &[char]) -> (Row, usize) {
     let mut out = Row::new();
     let mut i = 0;
@@ -223,7 +216,7 @@ fn chunk(chars: &[char]) -> (Row, usize) {
     (out, i)
 }
 
-/// `^ 3 _ i`: each marker takes everything up to the next one.
+/// `^ 3 _ i`: 各マーカーは次のマーカーまでのすべてを取得します。
 fn scripts(chars: &[char]) -> Row {
     let marks: Vec<usize> = chars
         .iter()
@@ -267,7 +260,7 @@ fn depth_at(chars: &[char], at: usize) -> usize {
     depth
 }
 
-/// `[a, b][c, d]`: one bracketed group per row, commas between the cells.
+/// `[a, b][c, d]`: 行ごとに 1 つの括弧で囲まれたグループ、セル間にカンマ。
 fn matrix(chars: &[char], kind: MatrixKind) -> Node {
     let mut cells: Vec<Vec<Row>> = Vec::new();
     let mut i = 0;
@@ -295,7 +288,7 @@ fn matrix(chars: &[char], kind: MatrixKind) -> Node {
     Node::Matrix { kind, cells }
 }
 
-/// The index of the bracket or parenthesis closing the one at `open`.
+/// `open` の括弧または括弧を閉じる括弧または括弧のインデックス。
 fn closing(chars: &[char], open: usize) -> Option<usize> {
     let close = match chars.get(open)? {
         '[' => ']',
@@ -329,7 +322,7 @@ fn closing(chars: &[char], open: usize) -> Option<usize> {
     None
 }
 
-/// A plain sequence: ordinary characters, groups and nested islands.
+/// 単純なシーケンス: 通常の文字、グループ、およびネストされたIslands.
 fn row(chars: &[char]) -> Row {
     let mut out = Row::new();
     let mut i = 0;
@@ -340,7 +333,7 @@ fn row(chars: &[char]) -> Row {
     out
 }
 
-/// Reads the node starting at `i`, and where reading stopped.
+/// `i` で始まるノードと、読み取りが停止した場所を読み取ります。
 fn node_at(chars: &[char], i: usize) -> Option<(Node, usize)> {
     let c = *chars.get(i)?;
     if is_special(c) && chars.get(i + 1) == Some(&c) {
@@ -381,7 +374,7 @@ fn node_at(chars: &[char], i: usize) -> Option<(Node, usize)> {
     Some((Node::Char(c), i + 1))
 }
 
-/// The index of the `)` closing the island that starts at `at`.
+/// `at` で始まるアイランドを閉じる `)` のインデックス。
 pub fn island_end(chars: &[char], at: usize) -> Option<usize> {
     let mut depth = 0usize;
     let mut i = at;
@@ -411,10 +404,9 @@ pub fn island_end(chars: &[char], at: usize) -> Option<usize> {
     None
 }
 
-// ---------------------------------------------------------------- writing
+// ---------------------------------------------------------------- 書き込み
 
-/// Writes a row as the content of an island: the single outermost structure is
-/// written bare, everything else gets an island of its own.
+/// アイランドの内容として行を書き込みます。最も外側の単一の構造は裸で書き込まれ、それ以外はすべて独自のアイランドを取得します。
 pub fn island_text(root: &Row) -> String {
     match root.as_slice() {
         [node] if node.slot_count() > 0 => bare(node),
@@ -422,7 +414,7 @@ pub fn island_text(root: &Row) -> String {
     }
 }
 
-/// A node as it appears inside a row: structures need their own island.
+/// 行内に表示されるノード: 構造には独自のアイランドが必要です。
 fn inline(node: &Node) -> String {
     match node {
         Node::Char(c) if is_special(*c) => format!("{c}{c}"),
@@ -443,7 +435,7 @@ fn text(row: &Row) -> String {
     row.iter().map(inline).collect()
 }
 
-/// A structure written without its island.
+/// A
 fn bare(node: &Node) -> String {
     match node {
         Node::Stack {
@@ -529,7 +521,7 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
-        // Doubled, it is an ordinary arrow again.
+        // 二重にすると、また普通の矢印になります。
         assert_eq!(parse_island("a→→b").len(), 3);
     }
 
@@ -537,7 +529,7 @@ mod tests {
     fn roots_take_one_chunk() {
         assert_eq!(roundtrip("√ x"), "√ x");
         assert_eq!(roundtrip("sqrt[3] x"), "√[3] x");
-        // Only the chunk right after the mark is under the root.
+        // マークの直後のチャンクだけがルートの下にあります。
         match parse_island("√ x+1").as_slice() {
             [Node::Sqrt { body, .. }, Node::Char('+'), Node::Char('1')] => {
                 assert_eq!(body, &vec![Node::Char('x')]);
@@ -580,7 +572,7 @@ mod tests {
         match parse_island("↨ lim,, n→∞").as_slice() {
             [Node::Limits { upper, lower, .. }] => {
                 assert!(upper.is_empty());
-                // The arrow is an ordinary character here, so it is doubled.
+                // ここでは矢印は普通の文字なので二重になります。
                 assert_eq!(text(lower), "n→→∞");
             }
             other => panic!("unexpected {other:?}"),

@@ -1,6 +1,4 @@
-//! The settings bar. It only shows what a writer would actually change: the
-//! size and face of the text, and whether the caret blinks. Everything else
-//! in `crate::settings` stays in the file, out of the way.
+//! 設定バー。ライターが実際に変更する内容、つまりテキストのサイズと文字面、およびキャレットが点滅するかどうかのみが表示されます。 `crate::settings` の他のすべては、邪魔にならないようにファイル内に残ります。
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -10,8 +8,7 @@ use crate::ipc;
 use crate::settings;
 use crate::settings::Settings;
 
-/// Puts `settings` into effect everywhere: on screen, in the editors that
-/// measure their own text, and in the file for the next start.
+/// 画面上、独自のテキストを測定するエディター内、および次回起動用のファイル内など、どこでも `settings` を有効にします。
 pub(super) fn change(settings: Settings) {
     settings::apply(settings.clone());
     editor::redraw_all();

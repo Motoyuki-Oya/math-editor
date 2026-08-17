@@ -1,4 +1,4 @@
-//! The search-and-replace bar.
+//! 検索と置換のバー。
 
 use leptos::prelude::*;
 use web_sys::KeyboardEvent;
@@ -19,8 +19,7 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
         case_sensitive: case_sensitive.get_untracked(),
     };
 
-    // The bar is only on screen once it is open, so the cursor is put in the
-    // field it asked for as soon as the field exists.
+    // バーは開いた後のみ画面上に表示されるため、フィールドが存在するとすぐに、カーソルは要求されたフィールドに置かれます。
     Effect::new(move |_| {
         let field = match shell.find_focus.get() {
             Some(Field::Query) => query_field.get(),

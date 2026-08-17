@@ -1,9 +1,6 @@
-//! The keys of the application: files, tabs, panes, the search bar, undo.
-//! What a keystroke means in the document itself is
-//! `crate::editor`'s own table, which handles the key before it reaches here.
+//! アプリケーションのキー: ファイル、タブ、ペイン、検索バー、元に戻す。ドキュメント自体におけるキーストロークの意味は、ここに到達する前にキーを処理する `crate::editor` 独自のテーブルです。
 //!
-//! A key that also stands in the menu bar is carried out by `super::menu`, so
-//! that the key and the menu item are never two different things.
+//! メニュー バーにもあるキーは `super::menu` によって実行されるため、キーとメニュー項目は決して別のものではありません。
 
 use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
@@ -18,8 +15,7 @@ pub(super) fn install_shortcuts(shell: Shell) {
         return;
     };
     let handler = Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
-        // The formula being edited keeps its own history, and handles the key
-        // itself before it reaches here.
+        // 編集中の式は独自の履歴を保持し、キーがここに到達する前にキー自体を処理します。
         if event.default_prevented() {
             return;
         }
@@ -30,7 +26,7 @@ pub(super) fn install_shortcuts(shell: Shell) {
             return;
         }
         let shift = event.shift_key();
-        // The items of the menu bar, by the key that stands beside them.
+        // メニュー バーの項目は、横にあるキーによって決まります。
         let item = match (event.key().to_lowercase().as_str(), shift) {
             ("n", _) | ("t", _) => Some("new"),
             ("o", _) => Some("open"),
@@ -51,7 +47,7 @@ pub(super) fn install_shortcuts(shell: Shell) {
             menu::choose(shell, item, menu::From::Key);
             return;
         }
-        // Moving between tabs has no place in the menu bar, so it stays here.
+        // メニュー バーにはタブ間の移動を行う場所がないため、ここに留まります。
         if event.key().to_lowercase() == "tab" {
             event.prevent_default();
             let pane = shell.pane_untracked();

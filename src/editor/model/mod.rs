@@ -1,10 +1,6 @@
-//! Editing a document: the selections, the commands they apply, and the undo
-//! history.
+//! ドキュメントの編集: 選択内容、適用されるコマンド、および元に戻す履歴。
 //!
-//! Every command applies to all of the selections as a single step, the way
-//! multiple cursors are expected to behave. The document itself is
-//! [`crate::structure::text`], which knows nothing about the notation or the
-//! screen.
+//! すべてのコマンドは、複数のカーソルが予期される動作として、単一のステップとしてすべての選択に適用されます。ドキュメント自体は [`crate::structural::text`] であり、表記や画面については何も知りません。
 
 mod history;
 mod island;
@@ -17,11 +13,10 @@ use super::clipboard::Clip;
 use crate::structure::ast::{Cursor, Node, Row};
 use crate::structure::text::{items_of, Item, Pos, Sel, Text};
 
-/// Where `pos` ends up once the text up to `to` has been replaced by text that
-/// now ends at `end`.
+/// `to` までのテキストが `end` で終わるテキストに置き換えられると、`p​​os` が終了します。
 fn shifted(pos: Pos, to: Pos, end: Pos) -> Pos {
     if pos <= to {
-        // Anything the edit swallowed sits at its end.
+        // 編集が飲み込んだものはすべて最後に残ります。
         return end;
     }
     let line = (pos.line + end.line).saturating_sub(to.line);
@@ -32,15 +27,14 @@ fn shifted(pos: Pos, to: Pos, end: Pos) -> Pos {
     }
 }
 
-/// What a command did, which is all the caller needs in order to react: there
-/// is no mode to ask about, only whether anything moved or changed.
+/// コマンドが何をしたか、つまり呼び出し元が反応するために必要なのはそれだけです。質問するモードはなく、何かが移動または変更されたかどうかだけを尋ねます。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Did {
-    /// The key means nothing here, so it belongs to whoever else wants it.
+    /// 鍵はここには何も意味しませんので、他の誰にも所属しています。
     Nothing,
-    /// The caret or the selection moved.
+    /// キャレットまたは選択範囲が移動しました。
     Moved,
-    /// The document changed.
+    /// 書類が変わりました。
     Changed,
 }
 
@@ -57,9 +51,7 @@ impl Did {
 pub struct Editor {
     text: Text,
     sels: Vec<Sel>,
-    /// Where the caret is inside the island it stands on, when it is in one.
-    /// The caret is one place in one document either way: this only says how
-    /// deep into that place it reaches.
+    /// ケアトが島の中にいるところ、それが1つにいるとき。 注意は、いずれかの文書の1つの場所にある: これは、それが到達するその場所の深さだけを言う.
     inside: Option<Cursor>,
     history: History,
 }
@@ -84,12 +76,12 @@ impl Editor {
         &self.sels
     }
 
-    /// The selection that keeps the focus; the one added last.
+    /// 焦点を維持する選択。最後に追加したもの。
     pub fn primary(&self) -> Sel {
         *self.sels.last().expect("at least one selection")
     }
 
-    /// Shows a document that was just read from a file, dropping the history.
+    /// ファイルから読み取られたばかりのドキュメントを表示し、履歴を削除します。
     pub fn load(&mut self, text: Text) {
         self.text = text;
         self.sels = vec![Sel::caret(Pos::default())];
@@ -122,17 +114,13 @@ impl Editor {
         self.edit_each(step, move |_, sel| (sel.start(), sel.end(), what.clone()));
     }
 
-    /// Puts text in at the caret, wherever the caret is. A single character is
-    /// typed, so the shortcuts inside a structure still run; anything longer is
-    /// a paste and goes in as it is.
+    /// キャレットがどこにあっても、そのキャレットにテキストを挿入します。単一の文字が入力されるため、構造内のショートカットは引き続き実行されます。それ以上のものはペーストなのでそのまま入ります。
     pub fn insert_text(&mut self, text: &str) -> Did {
         if self.inside.is_some() {
             let mut chars = text.chars();
             match (chars.next(), chars.next()) {
                 (Some(c), None) => self.type_in_island(c),
-                // Characters stay characters: a paste never re-runs the
-                // shortcuts that typing them would. A structure holds one row,
-                // so a line break has nothing to mean inside it.
+                // 文字は文字のままです。貼り付けでは、文字を入力したときのショートカットが再実行されることはありません。構造体は 1 行を保持するため、その内部では改行は何の意味も持ちません。
                 _ => self.insert_row_in_island(
                     text.chars()
                         .filter(|c| *c != '\n')
@@ -146,9 +134,7 @@ impl Editor {
         Did::Changed
     }
 
-    /// Puts a piece that was copied out of a document back in, with the shape it
-    /// had. Text from anywhere else arrives through [`Self::insert_text`] as the
-    /// characters it is.
+    /// ドキュメントからコピーされた部分を、元の形状のまま元に戻します。他の場所からのテキストは、[`Self::insert_text`] を介して文字として到着します。
     pub fn insert_clip(&mut self, clip: &Clip) -> Did {
         if self.inside.is_some() {
             self.insert_row_in_island(clip.row());
@@ -162,8 +148,7 @@ impl Editor {
         self.insert(vec![vec![Item::Math(row)]]);
     }
 
-    /// Tab: a column separator in the text, and a step to the next slot inside
-    /// a structure, which is what Tab means in every formula editor.
+    /// タブ: テキスト内の列の区切り文字、および構造内の次のスロットへのステップ。これがすべての数式エディターでのタブの意味です。
     pub fn tab(&mut self, back: bool) -> Did {
         if self.inside.is_some() {
             self.in_island(Inside::Move, |editing| {
@@ -179,7 +164,7 @@ impl Editor {
         Did::Changed
     }
 
-    /// Enter: a new line in the text, and the end of the formula inside one.
+    /// テキストに新しい行を入力し、その中に式の終わりを入力します。
     pub fn split_line(&mut self) -> Did {
         if self.leave_island() {
             return Did::Moved;
@@ -188,7 +173,7 @@ impl Editor {
         Did::Changed
     }
 
-    /// Escape: leaves the formula, or drops the extra cursors.
+    /// エスケープ: 式を終了するか、余分なカーソルを削除します。
     pub fn escape(&mut self) -> Did {
         Did::moved(self.leave_island() || self.collapse_sels())
     }
@@ -230,8 +215,7 @@ impl Editor {
         Did::Changed
     }
 
-    /// Grows the grid the caret is in by a row, which only means anything inside
-    /// a structure.
+    /// ケアトのグリッドは、構造内のものだけを意味し、列によって成長します。
     pub fn grow_matrix(&mut self) -> Did {
         if self.inside.is_none() {
             return Did::Nothing;
@@ -243,13 +227,12 @@ impl Editor {
         Did::Changed
     }
 
-    /// Replaces one range, used by search and replace.
+    /// 検索と置換によって使用される1つの範囲を置換します。
     pub fn replace_range(&mut self, from: Pos, to: Pos, with: &str) {
         self.replace_range_with(from, to, items_of(with));
     }
 
-    /// Replaces a range with items, for a replacement that puts in more than
-    /// characters: a column separator is an item of its own.
+    /// カラムの区切り文字よりも多くの文字を入れる置換のために、アイテムと範囲を置換します。
     pub fn replace_range_with(&mut self, from: Pos, to: Pos, with: Vec<Vec<Item>>) {
         self.record(Step::Other);
         self.inside = None;
@@ -258,8 +241,7 @@ impl Editor {
         self.sels = vec![Sel::caret(end)];
     }
 
-    /// Left and right, one place at a time. A formula is a place the caret goes
-    /// into rather than over, and inside one the places are the structure's own.
+    /// 左と右に、一度に1つの場所。 数式は、キャレットが上回るのではなく、内部の1つの場所は構造自体です。
     pub fn move_h(&mut self, forward: bool, extend: bool) -> Did {
         if self.inside.is_some() {
             let kind = if extend { Inside::Extend } else { Inside::Move };
@@ -287,9 +269,7 @@ impl Editor {
         Did::Moved
     }
 
-    /// Up and down: between the lines of the text, and between the slots of the
-    /// structure the caret is in. Leaving the top or the bottom of a formula
-    /// puts the caret back in the text.
+    /// 上下: テキストの行間と、キャレットが入っている構造のスロット間。数式の上部または下部を残すと、キャレットがテキストに戻ります。
     pub fn move_v(&mut self, down: bool, extend: bool) -> Did {
         if self.inside.is_some() {
             self.in_island(Inside::Move, |editing| {
@@ -350,8 +330,7 @@ impl Editor {
         self.history.cut();
         self.inside = None;
         for sel in &mut self.sels {
-            // Collapsing a selection without shift keeps the near edge, like
-            // every other editor.
+            // 他のエディタと同様に、Shift を使用せずに選択範囲を折りたたむと、近くの端が維持されます。
             let from = if extend || sel.is_caret() {
                 sel.head
             } else {
@@ -389,8 +368,7 @@ impl Editor {
         self.merge_sels();
     }
 
-    /// Selects everything there is to select where the caret is: the row of the
-    /// structure it is in, or the whole document.
+    /// キャレットが存在する場所を選択するために存在するものすべてを選択します (キャレットが含まれる構造の行、またはドキュメント全体)。
     pub fn select_all(&mut self) -> Did {
         if self.inside.is_some() {
             self.in_island(Inside::Extend, |editing| {
@@ -414,7 +392,7 @@ impl Editor {
         self.merge_sels();
     }
 
-    /// Drops the extra cursors, keeping the one that has the focus.
+    /// 余分なカーソルを削除し、フォーカスのあるカーソルを保持します。
     pub fn collapse_sels(&mut self) -> bool {
         if self.sels.len() == 1 {
             return false;
@@ -423,10 +401,9 @@ impl Editor {
         true
     }
 
-    /// `Ctrl+D`: selects the word at the caret, then each further press adds the
-    /// next place where the same text appears.
+    /// `Ctrl+D`: キャレットの単語を選択し、さらに押すたびに、同じテキストが表示される次の場所が追加されます。
     pub fn add_next_occurrence(&mut self) -> bool {
-        // A structure holds one caret, so there is nothing to add there.
+        // 構造体は 1 つのキャレットを保持するため、そこに追加するものは何もありません。
         if self.inside.is_some() {
             return false;
         }
@@ -456,8 +433,7 @@ impl Editor {
         true
     }
 
-    /// Keeps the selections sorted and free of overlap, so typing never applies
-    /// the same edit twice.
+    /// 選択内容がソートされ、重複がない状態が維持されるため、入力によって同じ編集が 2 回適用されることはありません。
     fn merge_sels(&mut self) {
         let primary = self.primary();
         self.sels.sort_by_key(|sel| (sel.start(), sel.end()));
@@ -472,7 +448,7 @@ impl Editor {
                 _ => merged.push(sel),
             }
         }
-        // The focused selection must stay last so `primary` keeps meaning it.
+        // 「プライマリ」がそれを意味し続けるように、フォーカスされた選択範囲は最後に残らなければなりません。
         if let Some(index) = merged
             .iter()
             .position(|sel| sel.start() <= primary.start() && primary.end() <= sel.end())
@@ -522,8 +498,7 @@ fn word_at(text: &Text, at: Pos) -> Option<Sel> {
     (start < end).then(|| Sel::range(Pos::new(at.line, start), Pos::new(at.line, end)))
 }
 
-/// Looks for the items after `from`, wrapping around, skipping places that are
-/// already selected.
+/// 既に選択した場所をスキップして、 `from` からアイテムを探します。
 fn find_after(text: &Text, needle: &[Item], from: Pos, taken: &[Pos]) -> Option<Sel> {
     let mut at = from;
     for _ in 0..text.line_count() + 1 {
@@ -555,8 +530,7 @@ fn find_after(text: &Text, needle: &[Item], from: Pos, taken: &[Pos]) -> Option<
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    /// Nothing here goes through the notation: the model is only ever handed
-    /// items, so these tests cannot start depending on the file format.
+    /// ここでは、表記を通過するものは何もありません。モデルは渡されるアイテムのみであるため、ファイル形式によってはこれらのテストを開始できません。
     pub(crate) fn editor(source: &str) -> Editor {
         with_items(items_of(source))
     }
@@ -567,7 +541,7 @@ pub(crate) mod tests {
         editor
     }
 
-    /// The text of the document, with each island standing in as one character.
+    /// 文書のテキストは、各島が1つの文字として立っています。
     pub(crate) fn plain(editor: &Editor) -> String {
         (0..editor.text().line_count())
             .map(|line| {
@@ -609,7 +583,7 @@ pub(crate) mod tests {
         editor.add_caret(Pos::new(0, 7));
         editor.insert_text("X");
         assert_eq!(plain(&editor), "AAAX BBBX");
-        // Each caret must delete the character it just typed.
+        // 各キャレットは、入力したばかりの文字を削除する必要があります。
         editor.backspace();
         assert_eq!(plain(&editor), "AAA BBB");
     }
@@ -632,7 +606,7 @@ pub(crate) mod tests {
         editor.insert_text("X");
         editor.insert_text("Y");
         assert_eq!(plain(&editor), "aXYb\naXYb");
-        // Typing joins into one step, so one undo clears both characters.
+        // 入力は 1 つのステップに結合されるため、1 回元に戻すと両方の文字が消去されます。
         assert!(editor.undo());
         assert_eq!(plain(&editor), "ab\nab");
         assert!(editor.redo());

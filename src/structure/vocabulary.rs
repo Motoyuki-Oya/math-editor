@@ -1,20 +1,16 @@
-//! The vocabulary: every name and glyph the editor knows, and what each one
-//! stands for. The symbol tables and the `\name` shortcuts live together,
-//! since a shortcut is only a name from the same vocabulary. The same table
-//! serves the text editor and the island editor, so `\sqrt` behaves
-//! identically wherever it is typed.
+//! 語彙: 編集者が知っているすべての名前とグリフ、およびそれぞれが何を表すか。ショートカットは同じ語彙からの名前にすぎないため、シンボル テーブルと `\name` ショートカットは一緒に存在します。同じテーブルがテキスト エディタとアイランド エディタに機能するため、`\sqrt` はどこに入力しても同じように動作します。
 
 use super::ast::{self, Between, MatrixKind, Node};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Class {
-    /// Variable-like, drawn tight against what is beside it.
+    /// 変数のようなもの、横にあるものに対してぴったりと描画されます。
     Ident,
-    /// Binary operator, drawn with space on both sides.
+    /// 二項演算子、両側にスペースをあけて描画されます。
     Bin,
-    /// Relation, drawn with wider space on both sides.
+    /// 関係、両側に広いスペースを使って描画されます。
     Rel,
-    /// Punctuation and everything else, drawn upright without extra space.
+    /// 句読点とその他すべて、余分なスペースを入れずに直立して描画されます。
     Plain,
 }
 
@@ -143,14 +139,14 @@ pub fn lookup(name: &str) -> Option<&'static Symbol> {
     SYMBOLS.iter().find(|s| s.name == name)
 }
 
-/// Function names typeset upright, e.g. `\sin x`.
+/// 関数名は直立してタイプセットされます。例: `\sin x`。
 pub const FUNCTIONS: &[&str] = &[
     "sin", "cos", "tan", "sec", "csc", "cot", "arcsin", "arccos", "arctan", "sinh", "cosh", "tanh",
     "log", "ln", "lg", "exp", "det", "dim", "gcd", "max", "min", "sup", "inf", "arg", "deg", "ker",
     "mod",
 ];
 
-/// Symbols that are usually written with something above and below them.
+/// 通常、上下に何かを付けて書かれたシンボル。
 pub struct BigOp {
     pub name: &'static str,
     pub glyph: &'static str,
@@ -203,7 +199,7 @@ pub fn is_function(name: &str) -> bool {
     FUNCTIONS.contains(&name)
 }
 
-/// The node a `\name` shortcut expands to, if the name is known.
+/// 名前がわかっている場合、`\name` ショートカットが展開されるノード。
 pub fn node_for(name: &str) -> Option<Node> {
     match name {
         "stack" | "frac" => Some(ast::stack(Between::Rule)),
@@ -221,14 +217,13 @@ pub fn node_for(name: &str) -> Option<Node> {
     }
 }
 
-/// A symbol with room above and below it, using the glyph a name stands for.
+/// 名前が表すグリフを使用した、上下にスペースのあるシンボル。
 fn limits_for(name: &str) -> Node {
     let glyph = big_op(name).map(|op| op.glyph).unwrap_or(name);
     ast::limits(glyph)
 }
 
-/// The structure a directly typed glyph expands to, so `√` works like
-/// `\sqrt`. Glyphs that need no structure (`α`, `×`) stay plain text.
+/// 直接入力されたグリフが展開される構造。したがって、`√` は `\sqrt` と同様に機能します。構造を必要としないグリフ (`α`、`×`) はプレーン テキストのままです。
 pub fn node_for_glyph(glyph: char) -> Option<Node> {
     if glyph == '√' {
         return Some(ast::sqrt());
@@ -240,7 +235,7 @@ pub fn node_for_glyph(glyph: char) -> Option<Node> {
         .map(|op| ast::limits(op.glyph))
 }
 
-/// The glyph a symbol name prints as, for inserting it as plain text.
+/// シンボル名をプレーン テキストとして挿入するために印刷されるグリフ。
 pub fn glyph_for(name: &str) -> Option<&'static str> {
     lookup(name).map(|symbol| symbol.glyph)
 }

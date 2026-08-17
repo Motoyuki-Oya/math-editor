@@ -1,9 +1,6 @@
-//! The keys of the editor itself: what a keystroke in the document means.
+//! エディタ自体のキー: ドキュメント内のキーストロークが何を意味するか。
 //!
-//! There is one table: what a key means inside a structure is the model's
-//! business, not the keyboard's, so the caret being in one changes nothing
-//! here. Keys that drive the application around the editor (files, tabs,
-//! panes, the search bar) live in `crate::app`'s own table.
+//! テーブルが 1 つあります。構造体内のキーが何を意味するかは、モデルのビジネスであり、キーボードのビジネスではありません。そのため、その中にあるキャレットはここでは何も変更しません。エディター周辺でアプリケーションを駆動するキー (ファイル、タブ、ペイン、検索バー) は、`crate::app` の独自のテーブルに存在します。
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -28,7 +25,7 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
             (_, "ArrowRight") => editor.move_h(true, shift),
             (false, "ArrowUp") => editor.move_v(false, shift),
             (false, "ArrowDown") => editor.move_v(true, shift),
-            // Alt+Up/Down would move lines; Ctrl adds a caret above or below.
+            // Alt+Up/Down は行を移動します。 Ctrl を押すと上または下にキャレットが追加されます。
             (true, "ArrowUp") | (true, "ArrowDown") => Did::Nothing,
             (false, "Home") => editor.move_line_edge(false, shift),
             (false, "End") => editor.move_line_edge(true, shift),
@@ -36,7 +33,7 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
             (true, "End") => editor.move_document_edge(true, shift),
             (false, "Backspace") => editor.backspace(),
             (false, "Delete") => editor.delete_forward(),
-            // A grid grows by a row on Alt+Enter or Ctrl+Enter.
+            // Alt+Enter または Ctrl+Enter でグリッドが 1 行ずつ拡大します。
             (_, "Enter") if event.alt_key() || ctrl => editor.grow_matrix(),
             (false, "Enter") => editor.split_line(),
             (false, "Escape") => editor.escape(),
@@ -48,13 +45,11 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
                     Did::Nothing
                 }
             }
-            // Undo, redo and the clipboard are handled once, by the window
-            // shortcuts, in the text and in a structure alike.
+            // 元に戻す、やり直し、およびクリップボードは、テキスト内でも構造内でも同様にウィンドウ ショートカットによって 1 回処理されます。
             (true, _) => Did::Nothing,
-            // Tab is the column separator in the text and the next slot inside
-            // a structure.
+            // タブはテキスト内の列区切り文字であり、構造内の次のスロットです。
             (false, "Tab") => editor.tab(shift),
-            // Printable keys arrive as input events, which also covers the IME.
+            // 印刷可能なキーは入力イベントとして到着し、IME もカバーします。
             (false, _) => Did::Nothing,
         }
     };

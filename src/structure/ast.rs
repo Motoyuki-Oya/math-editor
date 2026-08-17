@@ -1,13 +1,10 @@
-//! Structure of an island and the cursor that walks through it.
+//! アイランドの構造とその中を移動するカーソル。
 //!
-//! An island is a [`Row`]: a flat sequence of [`Node`]s. Nodes that contain
-//! sub-rows (a stack, a root, ...) expose them as numbered *slots*, so
-//! navigation and editing can treat every container uniformly.
+//! アイランドは [`Row`]、つまり [`Node`] のフラットなシーケンスです。サブ行 (スタック、ルートなど) を含むノードは、それらを番号付きの *スロット* として公開するため、ナビゲーションと編集ですべてのコンテナを均一に扱うことができます。
 
 pub type Row = Vec<Node>;
 
-/// Arrows that can be drawn between the two rows of a stack, stretched to fit
-/// them, the way a rule is.
+/// スタックの 2 つの行の間に描画できる矢印は、ルールに従って、それらに合わせて引き伸ばされます。
 const ARROWS: [char; 8] = ['→', '←', '↔', '⇒', '⇐', '⇔', '⇄', '↦'];
 
 pub fn is_arrow(c: char) -> bool {
@@ -43,34 +40,33 @@ impl Delim {
     }
 }
 
-/// A grid `[a, b][c, d]`, on its own or behind the brace of a case split.
+/// グリッド `[a, b][c, d]` は、単独で、またはケース分割の中括弧の後ろにあります。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MatrixKind {
     Grid,
     Cases,
 }
 
-/// What is drawn between the two rows of a [`Node::Stack`].
+/// 2 つの間に描画されるもの[`Node::Stack`] の行。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Between {
-    /// A rule the width of the wider row.
+    /// 幅の広い行の幅を決定します。
     Rule,
-    /// Nothing: the rows are simply piled up.
+    /// 何もありません: 行は単に積み上げられます。
     Nothing,
-    /// An arrow, stretched to the width of the wider row.
+    /// 幅の広い行の幅まで引き伸ばされた矢印。
     Arrow(char),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Node {
-    /// A directly typed character: a variable, a digit or an operator.
+    /// 直接入力された文字: 変数、数字、または演算子。
     Char(char),
-    /// A named symbol such as `\alpha` or `\leq`, stored without the backslash.
+    /// `\alpha` や `\leq` などの名前付きシンボル。バックスラッシュ。
     Sym(String),
-    /// An upright function name such as `\sin`, stored without the backslash.
+    /// バックスラッシュなしで保存される、`\sin` などの直立関数名。
     Func(String),
-    /// Something above and something below, with a rule, an arrow or nothing
-    /// drawn between them.
+    /// 上と下に、ルール、矢印、または何も描かれていないもの。
     Stack {
         above: Row,
         below: Row,
@@ -80,15 +76,15 @@ pub enum Node {
         index: Option<Row>,
         body: Row,
     },
-    /// Superscript attached to whatever precedes it in the row.
+    /// 行内でその前にあるものに付けられた上付き文字。
     Sup(Row),
-    /// Subscript attached to whatever precedes it in the row.
+    /// 行内でその前に付けられた下付き文字。
     Sub(Row),
     Group {
         delim: Delim,
         body: Row,
     },
-    /// Any symbol with something written above and below it.
+    /// 上下に何か書かれたシンボル。
     Limits {
         sym: String,
         lower: Row,
@@ -168,21 +164,21 @@ impl Node {
         }
     }
 
-    /// Slot the cursor should land in when entering the node from the left.
+    /// カーソルが着地するスロット左からノードに入るとき。
     pub fn entry_slot(&self) -> usize {
         0
     }
 
-    /// Slot the cursor should land in when entering the node from the right.
+    /// 右からノードに入るとき、カーソルが着地するスロット。
     pub fn exit_slot(&self) -> usize {
         match self {
-            // A stack is entered from the right through its lower row.
+            // スタックは右からその下の行に入る。
             Node::Stack { .. } => 1,
             other => other.slot_count().saturating_sub(1),
         }
     }
 
-    /// Matrix dimensions, if the node is a matrix.
+    /// ノードが行列の場合、行列の次元。
     pub fn matrix_shape(&self) -> Option<(usize, usize)> {
         match self {
             Node::Matrix { cells, .. } => {
@@ -193,23 +189,15 @@ impl Node {
     }
 }
 
-/// A position inside a formula: the chain of (node, slot) hops taken from the
-/// root row, plus the offset within the row that chain leads to.
+/// 式内の位置: ルート行から取得した (ノード、スロット) ホップのチェーンと、そのチェーンがつながる行内のオフセット。
 ///
-/// It doubles as a selection, the same way a caret in text does: `anchor` is
-/// where selecting started. A selection stays inside the row it started in;
-/// reaching past either end selects the structure that row belongs to instead,
-/// which is how a whole structure gets picked up.
+/// 選択としても機能する。テキスト内のキャレットは次のようになります: `anchor` が選択を開始する場所です。選択範囲は、それが開始された行内に残ります。どちらかの端を越えて到達すると、その行が属する構造が代わりに選択されます。これにより、構造全体が取得されます。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Cursor {
     pub path: Vec<(usize, usize)>,
     pub index: usize,
     pub anchor: usize,
-    /// Depths of the rows that are waiting for the one thing written into
-    /// them. Typing `/` opens a lower row that takes the next thing written
-    /// and then hands the caret back, so `a/b + 1` reads the way it is typed;
-    /// a longer lower row is bracketed, as in `a/(b + 1)`. Moving the caret
-    /// ends the wait, because from then on the user is editing, not writing on.
+    /// 行に書き込まれる 1 つの内容を待機している行の深さ。 `/` を入力すると下の行が開き、次に書き込まれた内容が取り込まれてからキャレットが戻されるため、 `a/b + 1` は入力されたとおりに読み取ります。 'a/(b + 1)' のように、長い下の行は括弧で囲まれます。キャレットを移動すると待機が終了します。これ以降、ユーザーは書き込みではなく編集を行うためです。
     pub fills: Vec<usize>,
 }
 

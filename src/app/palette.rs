@@ -1,5 +1,4 @@
-//! The structure palette: only what plain text cannot hold. Everything else
-//! is typed as usual.
+//! 構造パレット: プレーン テキストでは保持できないもののみ。それ以外はすべて通常どおりに入力されます。
 
 use leptos::prelude::*;
 
@@ -9,7 +8,7 @@ use crate::structure::ast::{self, Between, MatrixKind, Node};
 
 #[component]
 pub(super) fn Palette() -> impl IntoView {
-    // Only what plain text cannot hold: everything else is typed as usual.
+    // プレーン テキストで保持できないもののみです。他のすべては通常どおりに入力されます。
     let structures = [
         ("½", "分数", Structure::Stack),
         ("ⁿ", "線のない上下", Structure::Bare),

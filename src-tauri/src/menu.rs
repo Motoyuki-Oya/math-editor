@@ -1,11 +1,6 @@
-//! The application's menus, as the operating system's own menus: a menu bar in
-//! the window on Windows and Linux, and the menu bar at the top of the screen
-//! on macOS.
+//! オペレーティング システム独自のメニューとしてのアプリケーションのメニュー: Windows および Linux ではウィンドウ内のメニュー バー、macOS では画面上部のメニュー バー。
 //!
-//! What a menu item means lives in the frontend, next to the keys that do the
-//! same things, so choosing an item only sends its name across as a `menu`
-//! event. Cutting, copying and pasting are the system's own items, which reach
-//! the text the same way the keys do.
+//! メニュー項目の意味は、同じことを行うキーの隣のフロントエンドに存在するため、項目を選択すると、その名前が「menu」イベントとして送信されるだけです。切り取り、コピー、貼り付けはシステム独自の項目で、キーと同じようにテキストにアクセスできます。
 
 #[cfg(target_os = "macos")]
 use tauri::menu::WINDOW_SUBMENU_ID;
@@ -14,8 +9,7 @@ use tauri::menu::{
 };
 use tauri::{AppHandle, Emitter, Manager, Runtime, State, Wry};
 
-/// The items that show whether something is on, kept so that the frontend can
-/// tell the menu what the settings say.
+/// 何かがオンになっているかどうかを示す項目は、フロントエンドが設定内容をメニューに伝えることができるように保持されます。
 pub struct Checks<R: Runtime> {
     wrap: CheckMenuItem<R>,
     line_numbers: CheckMenuItem<R>,
@@ -32,7 +26,7 @@ pub fn sync_view_menu(state: State<'_, Checks<Wry>>, wrap: bool, line_numbers: b
     state.split.set_checked(split).ok();
 }
 
-/// Builds the menu bar and starts sending what is chosen to the frontend.
+/// メニュー バーを作成し、選択された内容をフロントエンドに送信し始めます。
 pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let item = |id: &str, text: &str, accelerator: Option<&str>| {
         MenuItem::with_id(app, id, text, true, accelerator)
@@ -68,7 +62,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
             &item("close_tab", "タブを閉じる", Some("CmdOrCtrl+W"))?,
         ],
     )?;
-    // On macOS the settings and quitting belong in the application's own menu.
+    // macOS では、設定と終了はアプリケーション独自のメニューに属します。
     #[cfg(not(target_os = "macos"))]
     {
         file.append_items(&[
@@ -162,7 +156,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Windows and Linux redo with Ctrl+Y; macOS with ⇧⌘Z.
+/// Windows と Linux では、Ctrl+Y でやり直します。 ⇧⌘Z.
 fn redo_accelerator() -> &'static str {
     #[cfg(target_os = "macos")]
     {
@@ -174,8 +168,7 @@ fn redo_accelerator() -> &'static str {
     }
 }
 
-/// Quitting goes through the window's own closing, so that unsaved work is
-/// still asked about. Everything else is the frontend's to carry out.
+/// を備えた macOS では、終了はウィンドウ自体を閉じることによって行われるため、保存されていない作業内容が引き続き確認されます。それ以外はすべてフロントエンドが実行します。
 fn chosen(app: &AppHandle, id: &str) {
     if id == "quit" {
         if let Some(window) = app.get_webview_window("main") {

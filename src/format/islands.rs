@@ -1,18 +1,17 @@
-//! The file format: ordinary text, with the parts that need a two dimensional
-//! layout written as islands `$( ... )`. A plain dollar sign is written `$$`.
+//! ファイル形式: 通常のテキスト。2 次元レイアウトが必要な部分はアイランド `$( ... )` として記述されます。普通のドル記号は `$$` と書かれます。
 
 use super::notation;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Segment {
     Text(String),
-    /// The content of an island, without the surrounding `$(` and `)`.
+    /// 島の内容。周囲の `$(` と `)` はありません。
     Island(String),
 }
 
 pub type Line = Vec<Segment>;
 
-/// Writes text so that reading it back gives the same characters.
+/// 戻って読むと同じ文字が得られるようにテキストを書き込みます。
 pub fn escape_text(text: &str) -> String {
     text.replace('$', "$$")
 }
@@ -40,7 +39,7 @@ fn parse_line(line: &str) -> Line {
                     segments.push(Segment::Island(chars[i + 2..end].iter().collect()));
                     i = end + 1;
                 }
-                // An island that is never closed is only text.
+                // 決して閉じられない島はテキストだけです。
                 None => {
                     text.push('$');
                     i += 1;
@@ -58,7 +57,7 @@ fn parse_line(line: &str) -> Line {
     segments
 }
 
-/// Writes lines back out in the form `parse` reads.
+/// `parse` が読み取った形式で行を書き戻します。
 pub fn serialize(lines: &[Line]) -> String {
     lines
         .iter()

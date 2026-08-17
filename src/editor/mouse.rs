@@ -1,4 +1,4 @@
-//! The mouse: clicks, drags and double clicks, in the text and in a structure.
+//! マウス: テキスト内および構造内でクリック、ドラッグ、およびダブルクリックします。
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -10,15 +10,13 @@ use super::input;
 use super::session::{focus, redraw, Session};
 use crate::view::measure::Hit;
 
-/// Where a point in the view is, at whatever depth: the same question is asked
-/// of the text and of a structure, and one answer covers both.
+/// ビュー内の点の位置、深さに関係なく: テキストと構造について同じ質問が行われ、1 つの答えで両方がカバーされます。
 fn hit_at(session: &Rc<RefCell<Session>>, x: f64, y: f64) -> Hit {
     let borrowed = session.borrow();
     borrowed.view.hit(borrowed.editor.text(), x, y)
 }
 
-/// Puts the caret, or the far end of the selection, where a click landed inside
-/// a formula. Returns whether the click was in one.
+/// クリックが数式内に到達した場所、つまり選択範囲の遠端にキャレットを置きます。クリックが 1 つのクリックであったかどうかを返します。
 fn click_in_math(session: &Rc<RefCell<Session>>, hit: &Hit, extend: bool) -> bool {
     let Hit::Inside(at, cursor) = hit else {
         return false;
@@ -27,7 +25,7 @@ fn click_in_math(session: &Rc<RefCell<Session>>, hit: &Hit, extend: bool) -> boo
     if !extend {
         return borrowed.editor.enter_island_at(*at, cursor);
     }
-    // Widening a selection only stays inside the formula it started in.
+    // 選択範囲を広げると、それが開始された数式内にのみ留まります。
     if borrowed.editor.inside().is_none() || borrowed.editor.primary().head != *at {
         return false;
     }
@@ -73,8 +71,7 @@ pub fn on_mousemove(session: &Rc<RefCell<Session>>, event: MouseEvent) {
     }
     let (x, y) = (event.client_x() as f64, event.client_y() as f64);
     if session.borrow().editor.inside().is_some() {
-        // Dragging inside a formula selects inside it; dragging out of it takes
-        // the formula as a whole, which is one item of the text.
+        // 数式内をドラッグすると、数式内が選択されます。そこからドラッグすると、数式全体がテキストの 1 つの項目になります。
         let hit = hit_at(session, x, y);
         if !click_in_math(session, &hit, true) {
             session.borrow_mut().editor.select_island();
@@ -95,7 +92,7 @@ pub fn on_mousemove(session: &Rc<RefCell<Session>>, event: MouseEvent) {
 }
 
 pub fn on_dblclick(session: &Rc<RefCell<Session>>, event: MouseEvent) {
-    // Inside a formula there are no words to take, so the row is the unit.
+    // 数式内には取得する単語がないため、行が単位となります。
     if session.borrow().editor.inside().is_some() {
         session.borrow_mut().editor.select_all();
         redraw(session);

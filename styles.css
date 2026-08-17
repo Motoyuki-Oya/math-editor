@@ -29,7 +29,7 @@ html,
 body {
   margin: 0;
   height: 100%;
-  /* Only the editor scrolls; the window itself never does. */
+  /* エディターのみがスクロールします。ウィンドウ自体は決して動作しません。 */
   overflow: hidden;
   background: var(--bg);
   color: var(--fg);
@@ -140,7 +140,7 @@ body {
   color: var(--fg);
 }
 
-/* One button per open file. */
+/* 開いているファイルごとにボタンが 1 つあります。 */
 .tabbar {
   display: flex;
   align-items: stretch;
@@ -195,7 +195,7 @@ body {
   color: var(--fg);
 }
 
-/* Split view: the panes sit side by side. */
+/* 分割ビュー: ペインは横に並んでいます。 */
 .panes {
   display: flex;
   flex: 1;
@@ -214,7 +214,7 @@ body {
   border-left: none;
 }
 
-/* The pane that does not take the typing reads as the quieter one. */
+/* 入力の必要のないペインは、より静かなペインとして読み取られます。 */
 .pane:not(.pane-focused) .tabbar {
   opacity: 0.6;
 }
@@ -234,8 +234,7 @@ body {
 .mn-content {
   position: relative;
   min-height: 100%;
-  /* Without wrapping the content is as wide as the longest line, which is
-     what gives the editor something to scroll sideways. */
+  /* コンテンツは折り返されない場合、最も長い行と同じ幅になります。これは、 エディターに横にスクロールする機能を提供します。 */
   width: var(--setting-line-width, 100%);
   min-width: 100%;
 }
@@ -243,10 +242,9 @@ body {
 .mn-lines {
   position: relative;
   white-space: var(--setting-wrap, pre-wrap);
-  /* A line carried on underneath breaks wherever it has to: a long word is
-     still a long word. */
+  /* 必要な箇所で下に続く行: 長い単語は のままです長い単語。 */
   overflow-wrap: anywhere;
-  /* Room for the line numbers, when they are shown. */
+  /* 行番号が表示される場合、そのスペース。 */
   padding-left: var(--setting-gutter, 0px);
 }
 
@@ -255,14 +253,12 @@ body {
   min-height: 1.6em;
 }
 
-/* Stands for the lines that are not in the page, above and below the ones that
-   are, so the document scrolls its full length. */
+/* がある行の上下にある、ページ内にない行を表す。そのため、文書は全長でスクロールする。 */
 .mn-gap {
   pointer-events: none;
 }
 
-/* The number of a line, in the margin. It belongs to the line but not to its
-   text, so it sits outside the row and never takes the mouse. */
+/* マージン内の行番号。これは行に属しますが、 テキストには属さないため、行の外側に位置し、マウスを使用することはありません。 */
 .mn-number {
   position: absolute;
   left: calc(-1 * var(--setting-gutter, 0px));
@@ -274,8 +270,7 @@ body {
   pointer-events: none;
 }
 
-/* A column separator, $(t). Its width is set while drawing so that the
-   separators of neighbouring lines line up. */
+/* 列区切り文字、$(t)。その幅は、隣接する行の 区切り文字が揃うように描画中に設定されます。 */
 .mn-tab {
   display: inline-block;
   width: 1em;
@@ -286,14 +281,14 @@ body {
   content: "\200B";
 }
 
-/* Text an IME has not committed yet. */
+/* IME がまだコミットしていないテキストです。 */
 .mn-preedit {
   text-decoration: underline;
   text-underline-offset: 2px;
   background: color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
-/* Selections and carets are drawn here, under the text. */
+/* テキストの下のここに選択範囲とキャレットが描画されます。 */
 .mn-overlay {
   position: absolute;
   inset: 0;
@@ -317,8 +312,7 @@ body {
   background: var(--fg);
 }
 
-/* Takes the keystrokes and the IME, and follows the caret so the candidate
-   window shows up in the right place. */
+/* キーストロークと IME を受け取り、候補 ウィンドウが適切な場所に表示されるようにキャレットに従います。 */
 .mn-input {
   position: absolute;
   z-index: 1;
@@ -356,10 +350,9 @@ body {
   color: var(--accent);
 }
 
-/* ---- formulas ---- */
+/* ---- 数式 ---- */
 
-/* An island stays part of the line: it is a piece of the text, so it sits on
-   the same baseline as the words around it. */
+/* 島は、行: それはテキストの一部であるため、周囲の単語と同じベースライン にあります。 */
 .mn-field {
   font-family: var(--font-text);
   outline: none;
@@ -380,9 +373,7 @@ body {
   font-size: 1.15em;
 }
 
-/* A row is ordinary inline text, at every depth: what is in it lines up on the
-   baseline, the way text does, and a structure says where its own baseline is
-   rather than being centred on the box it happens to need. */
+/* 行は、あらゆる深さの通常のインライン テキストです。その中にあるものは、テキストと同じように ベースラインに並び、構造は、必要なボックスの中央に配置されるのではなく、独自のベースラインがどこにあるのかを示します。 */
 .mn-row {
   display: inline;
 }
@@ -391,8 +382,7 @@ body {
   display: inline-block;
 }
 
-/* Letters read the same in a formula as in the text around it: the same face,
-   upright. Only the shape of a structure says it is one. */
+/* 文字は、数式内でも周囲のテキストと同じように読み取られます。同じです。顔、 直立。構造体の形状だけがそれが 1 であることを示します。 */
 .mn-ident,
 .mn-word {
   font-family: var(--font-text);
@@ -430,10 +420,7 @@ body {
   }
 }
 
-/* Equal halves above and below: whatever the two rows are, the rule ends up in
-   the middle of the box, and `vertical-align: middle` puts that middle on the
-   axis of the row the fraction sits in. So a fraction lines up with the letters
-   beside it, and with the rule of a fraction it is nested in. */
+/* 上下が等しい: 2 つの行が何であれ、ルールはボックスの中央の に収まり、`vertical-align: middle` はその中央を分数が入る行の 軸に置きます。そのため、分数は文字 の横に並び、分数のルールでネストされます。 */
 .mn-frac {
   display: inline-grid;
   grid-template-rows: 1fr auto 1fr;
@@ -452,14 +439,14 @@ body {
   padding: 0.26em 0.32em 0;
 }
 
-/* As wide as the wider of the two rows. */
+/* 幅の広い方と同じ幅です。 */
 .mn-frac-rule {
   justify-self: stretch;
   align-self: center;
   border-top: 1px solid currentColor;
 }
 
-/* An arrow between the rows, as wide as the wider of the two. */
+/* 行間の矢印。2 つの行のうち広い方と同じ幅です。 */
 .mn-arrow {
   display: flex;
   align-items: center;
@@ -472,11 +459,11 @@ body {
   flex: 1;
   min-width: 0.5em;
   border-top: 1px solid currentColor;
-  /* Meets the shaft the glyph draws for its head. */
+  /* グリフが頭に描くシャフトと一致します。 */
   margin-bottom: 0.06em;
 }
 
-/* Two stretched arrows facing each other, one above the other. */
+/* 2 つの引き伸ばされた矢印が互いに向き合い、上下に配置されます。 */
 .mn-arrow-pair {
   display: flex;
   flex-direction: column;
@@ -485,16 +472,15 @@ body {
 }
 
 .mn-arrow-head {
-  /* Hides the glyph's own short shaft behind the flexible one. */
+  /* 柔軟な矢印の後ろにグリフ自体の短いシャフトが隠れます。 */
   margin: 0 -0.12em;
 }
 
-/* The sign is drawn over the box, which leaves the body in the text: what is
-   under the root sits on the baseline of the row the root is in. */
+/* 記号はボックス上に描画され、テキストの本体が残ります。ルートの下にある は上にあります。ルートが存在する行のベースライン。 */
 .mn-sqrt {
   display: inline-block;
   position: relative;
-  /* Room for the sign, which is drawn in this padding. */
+  /* このパディングに描画される記号用のスペース。 */
   padding-left: 0.82em;
   margin: 0 0.14em;
 }
@@ -511,8 +497,7 @@ body {
   position: absolute;
   left: 0;
   top: 0;
-  /* As wide as the padding it sits in, so its tip meets the bar over the
-     body exactly. */
+  /* それが収まるパディングと同じ幅なので、その先端は 本体上のバーに正確に接触する。 */
   width: 0.8em;
   height: 100%;
   overflow: visible;
@@ -521,8 +506,7 @@ body {
 .mn-sqrt-body {
   display: inline-block;
   border-top: 1px solid currentColor;
-  /* Air on every side: under the bar, and between the sign and the first
-     letter, so the sign never touches what is under the root. */
+  /* バーの下、および記号と最初の 文字の間のすべての面に空気があるため、記号はルートの下にあるものに触れることは決してない。 */
   padding: 0.2em 0.3em 0.08em 0.22em;
 }
 
@@ -541,8 +525,7 @@ body {
   vertical-align: sub;
 }
 
-/* Brackets are drawn over the sides, so what is between them keeps the
-   baseline it would have had without them. */
+/* 括弧は側面上に描画されるため、その間にあるものは何なのか ベースラインを保持します。 */
 .mn-group {
   display: inline-block;
   position: relative;
@@ -609,7 +592,7 @@ body {
   display: none;
 }
 
-/* A grid has no line of text to sit on, so it is centred on the axis. */
+/* グリッドには配置するテキスト行がないため、軸の中央に配置されます。 */
 .mn-matrix {
   display: inline-block;
   position: relative;

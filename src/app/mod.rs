@@ -1,5 +1,4 @@
-//! Application shell: structure palette, search bar and status bar. The menus
-//! themselves are the operating system's own (see `menu` and `src-tauri`).
+//! アプリケーション シェル: 構造パレット、検索バー、ステータス バー。メニュー自体はオペレーティング システム独自のものです (`menu` および `src-tauri` を参照)。
 
 mod drafts;
 mod find;
@@ -44,14 +43,11 @@ pub fn App() -> impl IntoView {
         menu::install(shell);
         spawn_local(async move {
             settings::apply(settings::read(&ipc::read_settings().await));
-            // Drawn again, because what the settings say is put into the lines
-            // while they are drawn: without this the first screen is the one the
-            // defaults would give, and the menu's check marks disagree with it.
+            // 設定が言うことは行を描くときに行へ入るので、描き直します。これがないと最初の画面は既定値のままのものになり、メニューのチェックと食い違います。
             editor::redraw_all();
-            // The menu's check marks are put where the saved settings are.
+            // 保存された設定がある場所にメニューのチェック マークが付けられます。
             menu::show_state(shell);
-            // The panes exist by now: reading the settings gave the effect that
-            // builds them its turn.
+            // ペインはすでに存在しています。設定を読み取ると、その順番を構築する効果が与えられます。
             shell.restore_drafts(ipc::read_drafts().await);
             ipc::frontend_ready().await;
         });
@@ -99,7 +95,7 @@ pub fn App() -> impl IntoView {
     }
 }
 
-/// Keeps the caret inside the formula when a toolbar button is pressed.
+/// ツールバー ボタンが押されたときに、数式内にキャレットを保持します。
 pub(super) fn hold_focus(event: web_sys::MouseEvent) {
     event.prevent_default();
 }
