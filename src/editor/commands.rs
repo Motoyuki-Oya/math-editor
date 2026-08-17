@@ -1,5 +1,4 @@
-//! The commands of the editor: what typing, the IME, the clipboard, the
-//! palette and search-and-replace do to the document.
+//! エディターのコマンド: 入力、IME、クリップボード、パレット、検索と置換がドキュメントに対して行うこと。
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -16,7 +15,7 @@ pub fn on_input(session: &Rc<RefCell<Session>>, event: InputEvent) {
     let textarea = session.borrow().textarea.clone();
     let text = textarea.value();
     if session.borrow().composing {
-        // Still being composed; `compositionupdate` draws it until it is done.
+        // まだ作成中。 `compositionupdate` は完了するまで描画します。
         event.stop_propagation();
         return;
     }
@@ -27,7 +26,7 @@ pub fn on_input(session: &Rc<RefCell<Session>>, event: InputEvent) {
     insert_text(session, &text);
 }
 
-/// Shows what the IME is composing before it is committed.
+/// コミットされる前に IME が何を構成しているかを表示します。
 pub fn update_composition(session: &Rc<RefCell<Session>>, text: &str) {
     session.borrow_mut().preedit = text.to_string();
     redraw(session);
@@ -42,15 +41,14 @@ pub fn commit_composition(session: &Rc<RefCell<Session>>, text: &str) {
 }
 
 pub fn insert_text(session: &Rc<RefCell<Session>>, text: &str) {
-    // Single characters may start a formula; pasted text never does.
+    // 単一の文字で数式を開始することもできます。
     let mut chars = text.chars();
     if let (Some(c), None) = (chars.next(), chars.next()) {
         if trigger::type_char(session, c) {
             return;
         }
     }
-    // A piece copied out of a document goes back in with the shape it had;
-    // text from anywhere else is the characters it is.
+    // ドキュメントからコピーされた部分は、元の形状で戻ります。それ以外のテキストは、そのままの文字です。
     match clipboard::pasted(text) {
         Some(clip) => session.borrow_mut().editor.insert_clip(&clip),
         None => session.borrow_mut().editor.insert_text(text),
@@ -58,7 +56,7 @@ pub fn insert_text(session: &Rc<RefCell<Session>>, text: &str) {
     changed(session);
 }
 
-/// Puts an island at the caret and starts editing it.
+/// キャレットにアイランドを配置し、編集を開始します。
 pub fn insert_math() {
     let Some(session) = session() else { return };
     session.borrow_mut().editor.insert_island();
@@ -66,13 +64,11 @@ pub fn insert_math() {
     changed(&session);
 }
 
-/// Puts a structure from the palette into the formula at the caret, starting a
-/// formula when the caret is in ordinary text.
+/// パレットから構造をキャレットの数式に配置し、キャレットが通常のテキスト内にあるときに数式を開始します。
 pub fn insert_node(node: Node) {
     let Some(session) = session() else { return };
     {
-        // Starting a formula and putting the structure in it is one step, so one
-        // undo takes the whole thing back.
+        // 数式を開始してその中に構造を追加するのは 1 つのステップなので、1 回元に戻すとすべてが元に戻ります。
         let mut borrowed = session.borrow_mut();
         borrowed.editor.one_step(|editor| {
             if editor.inside().is_none() {
@@ -99,9 +95,7 @@ pub fn redo() {
     }
 }
 
-/// Selects everything where the caret is: the row of the structure it is in,
-/// or the whole document. The system's own select-all item would reach the
-/// hidden input element instead of the text, so this is an item of our own.
+/// キャレットがある場所すべてを選択します。キャレットが含まれる構造の行、または全体文書。システム独自の全選択アイテムは、テキストではなく非表示の入力要素に到達するため、これは独自のアイテムです。
 pub fn select_all() {
     let Some(session) = session() else { return };
     session.borrow_mut().editor.select_all();
@@ -109,16 +103,12 @@ pub fn select_all() {
     redraw(&session);
 }
 
-/// The text a selection puts on the clipboard, which is ordinary text: the
-/// piece itself is kept aside, so pasting it back into the editor keeps its
-/// shape without the notation ever leaving the file.
+/// 選択によってクリップボードに置かれるテキストは、通常のテキストです。部分自体は保存されるため、エディタに貼り付けて戻すと、表記がファイルから離れることなく形状が維持されます。
 ///
-/// `None` means nothing is selected. A selection whose text is empty, such as
-/// an empty structure, is still a selection and can still be cut.
+/// 「なし」は、何も選択されていないことを意味します。空の構造など、テキストが空の選択範囲は依然として選択範囲であり、切り取ることができます。
 pub fn selected_text(session: &Rc<RefCell<Session>>) -> Option<String> {
     let borrowed = session.borrow();
-    // A selection inside a structure copies that piece of the structure; the
-    // clipboard is the same one either way.
+    // 構造内の選択範囲は、構造のその部分をコピーします。クリップボードはどちらの方法でも同じです。
     if let Some(row) = borrowed.editor.island_selection() {
         return Some(clipboard::keep(Clip::Row(row)));
     }
@@ -135,7 +125,7 @@ pub fn delete_selection(session: &Rc<RefCell<Session>>) {
     changed(session);
 }
 
-/// Stops editing a formula, leaving the caret just after it.
+/// 数式の編集を停止し、その直後にキャレットを残します。
 pub fn leave_math(session: &Rc<RefCell<Session>>) {
     session.borrow_mut().editor.leave_island();
 }
@@ -158,8 +148,7 @@ pub fn find_next(query: &str, options: SearchOptions) -> bool {
         let mut borrowed = session.borrow_mut();
         borrowed.search_from = Some(found.place.end());
         match found.place {
-            // A match in a structure is shown inside it, so what is found is
-            // what is selected either way.
+            // 構造内の一致がその中に表示されるため、どちらの方法でも見つかったものが選択されたものになります。
             Place::Text(sel) => borrowed.editor.set_sels(vec![sel]),
             Place::Inside { at, cursor } => {
                 borrowed.editor.select_in_island(at, cursor);
@@ -183,7 +172,7 @@ pub fn replace_all(query: &str, replacement: &str, options: SearchOptions) -> us
     }
     {
         let mut borrowed = session.borrow_mut();
-        // Replacing back to front keeps the earlier places valid.
+        // 後ろから前に置き換えると、以前の位置が有効になります。
         for found in matches.iter().rev() {
             let text = search::expand(&found.groups, replacement, options);
             match &found.place {

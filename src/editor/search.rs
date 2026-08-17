@@ -1,10 +1,6 @@
-//! Search and replace over the model, with an optional regular expression.
+//! オプションの正規表現を使用して、モデルを検索して置換します。
 //!
-//! The browser's own regular expressions do the matching, so a bad pattern can
-//! only fail to compile, never break the editor. Structures are searched as
-//! well, row by row: a match is a stretch of characters that sit next to each
-//! other, wherever in the document they are. A match never spans a structure's
-//! edge, the same way it never spans a line's.
+//! ブラウザー独自の正規表現が照合を行うため、不適切なパターンはコンパイルに失敗するだけで、エディターが中断されることはありません。構造も同様に行ごとに検索されます。一致とは、文書内のどこにあっても、互いに隣り合った一連の文字です。行の端にまたがることがないのと同じように、一致は構造の端にまたがることはありません。
 
 use js_sys::RegExp;
 use wasm_bindgen::prelude::*;
@@ -13,24 +9,23 @@ use wasm_bindgen::JsCast;
 use crate::structure::ast::{Cursor, Node, Row};
 use crate::structure::text::{Item, Pos, Sel, Text};
 
-/// Where a match is.
+/// 一致の場所。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Place {
-    /// A stretch of ordinary text.
+    /// 通常のテキストのストレッチ。
     Text(Sel),
-    /// A stretch of one row inside the structure standing at `at`.
+    /// 構造内の `at` にある 1 行のストレッチ。
     Inside { at: Pos, cursor: Cursor },
 }
 
-/// A match: where it is, and the groups it captured.
+/// 一致: 一致の場所と、キャプチャされたグループ。
 #[derive(Clone, Debug)]
 pub struct Found {
     pub place: Place,
     pub groups: Vec<String>,
 }
 
-/// A place in reading order, which is how "find next" carries on from the last
-/// match: the item in the text, then how deep into the structure there it goes.
+/// 読み取り順序の場所。これは、「次を検索」が最後の一致から引き継ぐ方法です。テキスト内のアイテム、その後
 pub type Key = (Pos, Option<(Vec<(usize, usize)>, usize)>);
 
 impl Place {
@@ -49,8 +44,7 @@ impl Place {
     }
 }
 
-/// Where searching starts when nothing has been found yet: the caret, be it in
-/// the text or inside a structure.
+/// まだ何も見つからないときに検索が開始される場所: テキスト内であっても構造内であっても、キャレットです。
 pub fn key_at(at: Pos, inside: Option<&Cursor>) -> Key {
     (at, inside.map(|cursor| (cursor.path.clone(), cursor.end())))
 }
@@ -87,8 +81,7 @@ pub fn find_all(text: &Text, query: &str, options: SearchOptions) -> Vec<Found> 
                 });
             }
         }
-        // The rows inside a structure are searched too, so a name buried in a
-        // fraction is found like any other.
+        // 構造内の行も検索されるため、分数に埋もれた名前も他の行と同様に検索されます。
         for (col, item) in items.iter().enumerate() {
             let Item::Math(root) = item else { continue };
             let at = Pos::new(line, col);
@@ -104,8 +97,7 @@ pub fn find_all(text: &Text, query: &str, options: SearchOptions) -> Vec<Found> 
     found
 }
 
-/// Searches one row and every row nested inside it, reporting each match as a
-/// selection of that row.
+/// 1 つの行とその中にネストされているすべての行を検索し、各一致をその行の選択として報告します。
 fn search_row(
     regex: &RegExp,
     row: &Row,
@@ -137,8 +129,7 @@ fn search_row(
     }
 }
 
-/// Every match in `run`, as the range of characters it covers and the groups it
-/// captured.
+/// 「run」内のすべての一致は、対象となる文字の範囲とグループとして報告されます。
 fn matches(regex: &RegExp, run: &str) -> Vec<(usize, usize, Vec<String>)> {
     let mut found = Vec::new();
     regex.set_last_index(0);
@@ -155,7 +146,7 @@ fn matches(regex: &RegExp, run: &str) -> Vec<(usize, usize, Vec<String>)> {
         };
         let end = at + whole.encode_utf16().count();
         if whole.is_empty() {
-            // An empty match would loop for ever.
+            // 空の一致は永遠にループします。
             regex.set_last_index(regex.last_index() + 1);
             if regex.last_index() as usize > run.encode_utf16().count() {
                 break;
@@ -176,11 +167,9 @@ fn matches(regex: &RegExp, run: &str) -> Vec<(usize, usize, Vec<String>)> {
     found
 }
 
-/// Fills `$1`-style references in the replacement with what was captured, and
-/// reads `\t` and `\n` as the column separator and a new line.
+/// 置換内の `$1` スタイルの参照をキャプチャされたもので埋め、列の区切り文字および改行として `\t` と `\n` を読み取ります。
 ///
-/// Without the regular expression box the replacement is taken literally, the
-/// way the query is.
+/// 正規表現ボックスを使用しない場合、置換はクエリと同じように文字通りに解釈されます。
 pub fn expand(groups: &[String], replacement: &str, options: SearchOptions) -> String {
     if !options.regex {
         return replacement.to_string();
@@ -193,8 +182,7 @@ pub fn expand(groups: &[String], replacement: &str, options: SearchOptions) -> S
                 Some('t') => out.push('\t'),
                 Some('n') => out.push('\n'),
                 Some('\\') => out.push('\\'),
-                // A backslash before anything else stands for itself, so a
-                // Windows path can be written without doubling every one.
+                // 他のものの前にあるバックスラッシュはそれ自体を表すため、Windows パスはすべてを 2 倍にすることなく書き込むことができます。 one.
                 Some(other) => {
                     out.push('\\');
                     out.push(other);
@@ -231,8 +219,7 @@ pub fn expand(groups: &[String], replacement: &str, options: SearchOptions) -> S
     out
 }
 
-/// The replacement as items of the text: a tab is the column separator, which
-/// is what a tab is in this editor, and a new line breaks the line.
+/// テキストの項目としての置換: タブは列の区切り文字であり、このエディターでのタブのようなもので、改行で改行されます。
 pub fn replacement_items(text: &str) -> Vec<Vec<Item>> {
     text.split('\n')
         .map(|line| {
@@ -243,8 +230,7 @@ pub fn replacement_items(text: &str) -> Vec<Vec<Item>> {
         .collect()
 }
 
-/// The stretches of ordinary characters in a line, with the column each starts
-/// at. Formulas split them, so no match can span one.
+/// 行内の通常の文字のストレッチ。それぞれの列が開始されます。数式はそれらを分割するため、一致は 1 つにまたがることはできません。
 fn runs(items: &[Item]) -> Vec<(usize, String)> {
     let mut runs = Vec::new();
     let mut run = String::new();
@@ -270,8 +256,7 @@ fn runs(items: &[Item]) -> Vec<(usize, String)> {
     runs
 }
 
-/// The same as `runs`, for a row of a structure: only plain characters can be
-/// matched, so anything with a shape of its own breaks the run.
+/// 構造の行の場合は「runs」と同じです。単純な文字のみが一致するため、独自の形状を持つものはすべて実行を中断します。
 fn node_runs(row: &Row) -> Vec<(usize, String)> {
     let mut runs = Vec::new();
     let mut run = String::new();
@@ -297,8 +282,7 @@ fn node_runs(row: &Row) -> Vec<(usize, String)> {
     runs
 }
 
-/// The UTF-16 index each character starts at, since that is what the browser's
-/// regular expressions count in.
+/// ブラウザの正規表現でカウントされるため、各文字の UTF-16 インデックスが始まります。
 fn char_starts(text: &str) -> Vec<usize> {
     let mut units = Vec::with_capacity(text.chars().count() + 1);
     let mut at = 0;
@@ -310,7 +294,7 @@ fn char_starts(text: &str) -> Vec<usize> {
     units
 }
 
-/// Where a match starts, in UTF-16 units, as the browser reports it.
+/// 一致の開始位置は、ブラウザが報告する UTF-16 単位です。
 fn match_index(result: &js_sys::Array<js_sys::JsString>) -> Option<usize> {
     js_sys::Reflect::get(result, &JsValue::from_str("index"))
         .ok()?
@@ -322,8 +306,7 @@ fn char_of(starts: &[usize], unit: usize) -> Option<usize> {
     starts.iter().position(|start| *start == unit)
 }
 
-/// Compiles the query, treating a plain query as literal text. A pattern the
-/// browser rejects gives `None` instead of an error.
+/// コンパイルクエリ。プレーン クエリをリテラル テキストとして扱います。ブラウザが拒否するパターンは、エラーの代わりに「None」を返します。
 fn compile(query: &str, options: SearchOptions) -> Option<RegExp> {
     if query.is_empty() {
         return None;
@@ -374,7 +357,7 @@ mod tests {
         assert_eq!(expand(&groups, "$2:$1", options), "b:a");
         assert_eq!(expand(&groups, "[$&]", options), "[a@b]");
         assert_eq!(expand(&groups, "$$1", options), "$1");
-        // Without the regular expression box the replacement is literal.
+        // 正規表現ボックスを使用しない場合、置換はリテラルです。
         assert_eq!(expand(&groups, "$1", SearchOptions::default()), "$1");
     }
 
@@ -388,12 +371,11 @@ mod tests {
         assert_eq!(expand(&groups, "$1\\t=", options), "x\t=");
         assert_eq!(expand(&groups, "a\\nb", options), "a\nb");
         assert_eq!(expand(&groups, "a\\\\t", options), "a\\t");
-        // A literal replacement keeps its backslashes.
+        // リテラル置換はバックスラッシュを保持します。
         assert_eq!(expand(&groups, "a\\tb", SearchOptions::default()), "a\\tb");
     }
 
-    /// A tab in a replacement is the column separator, which is what the Tab
-    /// key puts in: replacing `=` with `\t=` is how a column gets lined up.
+    /// 置換内のタブは列の区切り文字であり、Tab キーで挿入されます。'=' を '\t=` に置換すると、列が整列されます。
     #[test]
     fn a_replaced_tab_is_a_column_separator() {
         assert_eq!(
@@ -418,8 +400,7 @@ mod tests {
         assert_eq!(runs, vec![(0, "ab".to_string()), (3, "cd".to_string())]);
     }
 
-    /// Only plain characters can be matched inside a structure, so a shape of
-    /// its own breaks the run the same way a formula breaks a line.
+    /// 構造内で一致できるのはプレーン文字のみです。独自の形状は、数式が改行するのと同じように、行を分割します。
     #[test]
     fn a_row_of_a_structure_is_searched_as_its_characters() {
         let row = vec![
@@ -434,8 +415,7 @@ mod tests {
         );
     }
 
-    /// Reading order: the text before a structure, then what is inside it, then
-    /// the deeper rows, so finding the next match walks the document once.
+    /// 読み取り順序: 構造の前のテキスト、次にその内部にあるもの、その後に深い行となるため、次の一致を見つけると、ドキュメントを 1 回探索します。
     #[test]
     fn matches_are_ordered_by_where_they_are() {
         let text = Place::Text(Sel::range(Pos::new(0, 0), Pos::new(0, 1)));

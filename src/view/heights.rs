@@ -1,25 +1,16 @@
-//! How tall every line is, and where a line therefore sits.
+//! どのラインが背が高いか、そのラインが座っているか。
 //!
-//! Only the lines that can be seen are drawn, so which lines those are has to
-//! be worked out from heights rather than from the page. A line that has been
-//! drawn has a measured height; a line never drawn is taken to be worth what
-//! the measured ones are on average.
+//! 目に見える線だけが描かれているため、どの線であるかはページからではなく高さから判断する必要があります。描かれた線には測定された高さがあります。決して引かれなかった線は、測定された線の平均値と見なされます。
 //!
-//! Both questions — "how tall are lines `a..b`" and "which line is at `y`" —
-//! have to be cheap, because they are asked on every scroll of a document that
-//! may have millions of lines. Answering them by walking the lines would make
-//! drawing cost the whole document, which is what this file exists to avoid, so
-//! the sums are kept in two prefix trees: one of measured heights, one of how
-//! many lines have been measured. What is not measured is `unit` each, and the
-//! number of those is a subtraction.
+//! 「a..b行の高さはどのくらいですか」と「y行はどの行ですか」という両方の質問は、何百万行もある文書をスクロールするたびに尋ねられるため、質問の負担が少なくなければなりません。線をたどることでそれらに答えると、ドキュメント全体の描画にコストがかかります。このファイルはそれを避けるために存在します。そのため、合計は 2 つのプレフィックス ツリーに保持されます。1 つは測定された高さ、もう 1 つは測定された行数です。測定しないものはそれぞれ「単位」であり、その数は引き算です。
 
-/// What a line is taken to be worth before anything has been measured.
+/// 何も測定される前に価値があるために行が取られます。
 const GUESS: f64 = 20.0;
 
 pub(super) struct Heights {
-    /// Every line's height as measured; `0.0` for a line never drawn.
+    /// 各行の測定された高さ。 '0.0' は一度も描かれていない線を表します。
     each: Vec<f64>,
-    /// Prefix sums of `each`, and of how many lines are measured.
+    /// 「each」のプレフィックスの合計と、測定される行数。
     sum: Tree,
     seen: Tree,
 }
@@ -33,9 +24,7 @@ impl Heights {
         }
     }
 
-    /// Keeps one height per line. A measurement outlives the time its line
-    /// spends off screen; lines added or removed in the middle shift the ones
-    /// after them, whose heights are then stale until they are drawn again.
+    /// 1 行につき 1 つの高さを維持します。測定値は、そのラインが画面外で費やした時間よりも長く存続します。途中で追加または削除された線はその後の線に移動し、再度描画されるまでその高さは失われます。
     pub(super) fn fit(&mut self, count: usize) {
         if self.each.len() == count {
             return;
@@ -59,9 +48,7 @@ impl Heights {
         }
     }
 
-    /// What an unmeasured line is taken to be worth: what the measured ones
-    /// are, on average, so a document of tall lines is not guessed at as short
-    /// ones.
+    /// 測定されていない線の価値は、測定された線の平均値とみなされるため、長い線の文書は短い線として推測されません。
     fn unit(&self) -> f64 {
         let seen = self.seen.total();
         if seen <= 0.0 {
@@ -70,31 +57,30 @@ impl Heights {
         self.sum.total() / seen
     }
 
-    /// How tall the first `lines` lines are together.
+    /// 最初の「行」の行を合わせた高さ。
     fn upto(&self, lines: usize) -> f64 {
         let lines = lines.min(self.each.len());
         let measured = self.seen.upto(lines);
         self.sum.upto(lines) + (lines as f64 - measured) * self.unit()
     }
 
-    /// Where a line starts, measured from the top of the document.
+    /// 文書の上部から測った線の開始位置。
     pub(super) fn top_of(&self, line: usize) -> f64 {
         self.upto(line)
     }
 
-    /// How tall a stretch of lines is.
+    /// 一連の線の高さ。
     pub(super) fn span(&self, lines: std::ops::Range<usize>) -> f64 {
         (self.upto(lines.end) - self.upto(lines.start)).max(0.0)
     }
 
-    /// The first line reaching down to `y`, which is where drawing starts.
+    /// 最初の行は「y」まで続き、そこから描画が始まります。
     pub(super) fn line_at(&self, y: f64) -> usize {
         let count = self.each.len();
         if y <= 0.0 || count == 0 {
             return 0;
         }
-        // The document only grows downwards, so the line at a depth can be
-        // looked for by halving rather than by walking.
+        // 原稿は下に向かってしか伸びないので、奥の線は歩くのではなく半分に切ることで探すことができます。
         let (mut low, mut high) = (0, count - 1);
         while low < high {
             let middle = (low + high) / 2;
@@ -119,9 +105,7 @@ impl Heights {
     }
 }
 
-/// Prefix sums that can be changed one place at a time, both in logarithmic
-/// time (a Fenwick tree). A plain running total would have to be added up again
-/// on every measurement.
+/// 両方とも対数時間で、一度に 1 か所ずつ変更できるプレフィックスの合計 (フェンウィック ツリー)。単純な現在までの合計は、測定ごとに再度合計する必要があります。
 struct Tree {
     slots: Vec<f64>,
 }
@@ -141,7 +125,7 @@ impl Tree {
         }
     }
 
-    /// The sum of the first `count` places.
+    /// 最初の「count」桁の合計。
     fn upto(&self, count: usize) -> f64 {
         let mut at = count.min(self.slots.len() - 1);
         let mut total = 0.0;
@@ -168,7 +152,7 @@ mod tests {
         assert_eq!(heights.span(0..4), GUESS * 4.0);
         heights.set(0, 30.0);
         heights.set(1, 30.0);
-        // The two unmeasured lines are worth what the measured ones are.
+        // 測定されていない 2 つの線は、測定された線と同じ価値があります。
         assert_eq!(heights.span(0..4), 120.0);
         assert_eq!(heights.top_of(2), 60.0);
     }
@@ -184,7 +168,7 @@ mod tests {
         assert_eq!(heights.line_at(9.0), 0);
         assert_eq!(heights.line_at(10.0), 1);
         assert_eq!(heights.line_at(45.0), 4);
-        // Past the end is the last line, not a line that is not there.
+        // 終わりを越えたところは最後の行であり、そこにない行ではありません。
         assert_eq!(heights.line_at(1000.0), 4);
     }
 
@@ -195,7 +179,7 @@ mod tests {
         heights.set(0, 10.0);
         heights.set(0, 40.0);
         assert_eq!(heights.span(0..1), 40.0);
-        // One line measured at 40 makes the other one worth 40 as well.
+        // 1 つの線が 40 で測定されると、もう 1 つの線も同様に 40 の価値があります。
         assert_eq!(heights.span(0..2), 80.0);
     }
 }

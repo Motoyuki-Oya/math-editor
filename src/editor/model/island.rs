@@ -1,10 +1,6 @@
-//! The bridge into an island: stepping in and out, and handing commands to
-//! [`crate::structure::edit`], which does the editing inside.
+//! 島への橋: 出入りし、内部で編集を行う [`crate::structural::edit`] にコマンドを渡します。
 //!
-//! The caret is one place in one document either way; `inside` only says how
-//! deep into that place it reaches. Commands that mean something different
-//! inside a structure (Tab, Enter, the arrows) stay in
-//! [`super::Editor`]'s own methods and call in here.
+//! キャレットはどちらの場合でも 1 つのドキュメント内で 1 か所です。 「内部」は、それがその場所の深さまで到達することを示すだけです。構造内で別の意味を持つコマンド (Tab、Enter、矢印) は、[`super::Editor`] 独自のメソッドに留まり、ここで呼び出します。
 
 use super::history::Step;
 use super::Editor;
@@ -12,38 +8,36 @@ use crate::structure::ast::{row_at, Cursor, Node, Row};
 use crate::structure::edit::{Editing, Escape};
 use crate::structure::text::{before_col, before_pos, Item, Pos, Sel};
 
-/// What a command inside an island does to the document, which decides both
-/// how it joins the undo history and whether the file became dirty.
+/// アイランド内のコマンドがドキュメントに対して行うことは、元に戻す履歴への結合方法とファイルがダーティになったかどうかの両方を決定します。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Inside {
-    /// Only the caret moved.
+    /// キャレットのみが移動しました。
     Move,
-    /// The selection grew or shrank; the anchor stays where it is.
+    /// 選択範囲は拡大または縮小されました。アンカーはその場に留まります。
     Extend,
-    /// A character was typed, joining the step before it.
+    /// 文字が入力され、その前のステップに結合されました。
     Type,
-    /// The structure changed some other way.
+    /// 構造が別の方法で変更されました。
     Change,
 }
 
 impl Editor {
-    /// Where the caret is inside the island it stands on, if it is in one.
+    /// キャレットが島内にある場合は、その島の中にあります。
     pub fn inside(&self) -> Option<&Cursor> {
         self.inside.as_ref()
     }
 
-    /// Puts an empty island at the caret and steps into it.
+    /// キャレットに空の島を置き、そこにステップインします。
     pub fn insert_island(&mut self) {
         self.insert_math(Row::new());
         let at = before_pos(self.primary().head);
         self.sels = vec![Sel::caret(at)];
         self.inside = Some(Cursor::root(0));
-        // Starting a formula is a step of its own, so undoing what was typed
-        // into it does not take the formula away as well.
+        // 式の開始はそれ自体が独立したステップであるため、式に入力した内容を元に戻しても式は削除されません。
         self.history.cut();
     }
 
-    /// Steps into the island at `at`, from the left or from the right.
+    /// 左または右から、`at` のアイランドにステップインします。
     pub fn enter_island(&mut self, at: Pos, from_start: bool) -> bool {
         if !matches!(self.text.item_at(at), Some(Item::Math(_))) {
             return false;
@@ -60,7 +54,7 @@ impl Editor {
         })
     }
 
-    /// Steps into the island at `at`, with the caret where a click landed.
+    /// クリックが着いたキャレットとともに、`at` のアイランドにステップインします。
     pub fn enter_island_at(&mut self, at: Pos, cursor: &Cursor) -> bool {
         if !self.enter_island(at, true) {
             return false;
@@ -72,7 +66,7 @@ impl Editor {
         })
     }
 
-    /// Steps back out of the island, leaving the caret beside it.
+    /// キャレットをその横に残して、アイランドから戻ります。
     pub fn leave_island(&mut self) -> bool {
         if self.inside.take().is_none() {
             return false;
@@ -83,15 +77,13 @@ impl Editor {
         true
     }
 
-    /// Runs a command on the island the caret is in. The island is edited where
-    /// it lives, so the command is a step of the document's own history.
+    /// キャレットが存在するアイランドでコマンドを実行します。アイランドは存在する場所で編集されるため、コマンドはドキュメント自体のステップになります。履歴。
     pub fn in_island(
         &mut self,
         kind: Inside,
         command: impl FnOnce(&mut Editing<'_>) -> Option<Escape>,
     ) -> bool {
-        // The cursor is copied out, not taken: the history is written before the
-        // command runs, and it has to remember where the caret was inside.
+        // カーソルは取得されず、コピーされます。履歴はコマンドが実行される前に書き込まれ、キャレットが内部にあった場所を記憶する必要があります。
         let Some(mut cursor) = self.inside.clone() else {
             return false;
         };
@@ -107,8 +99,7 @@ impl Editor {
         let escape = command(&mut Editing::new(root, &mut cursor));
         self.inside = Some(cursor);
         match escape {
-            // A selection that outgrew the formula becomes a selection of the
-            // formula, which is one item of the text like any other.
+            // 数式を超えた選択範囲は、他のものと同様にテキストの 1 つの項目である数式の選択範囲になります。
             Some(_) if kind == Inside::Extend => {
                 self.inside = None;
                 let after = self.text.clamp(Pos::new(at.line, at.col + 1));
@@ -122,8 +113,7 @@ impl Editor {
         }
     }
 
-    /// Shows a stretch of a row inside the island at `at`, which is how a match
-    /// found in a structure is selected.
+    /// アイランド内の行の範囲を `at` で表示します。これにより、構造内で見つかった一致が選択される方法が示されます。
     pub fn select_in_island(&mut self, at: Pos, cursor: Cursor) -> bool {
         if !matches!(self.text.item_at(at), Some(Item::Math(_))) {
             return false;
@@ -134,15 +124,12 @@ impl Editor {
         true
     }
 
-    /// Replaces a stretch of a row inside the island at `at`. The replacement
-    /// goes in as plain characters, so replacing never builds a structure by
-    /// accident.
+    /// アイランド内の行の範囲を置き換えます。 「で」で。置換は単純な文字として入力されるため、置換によって誤って構造が構築されることはありません。
     pub fn replace_in_island(&mut self, at: Pos, cursor: Cursor, with: &str) -> bool {
         if !self.select_in_island(at, cursor) {
             return false;
         }
-        // A structure holds one row and no column separators, so neither has
-        // anything to mean in there.
+        // 構造には 1 つの行が保持され、列の区切り文字が含まれないため、どちらも意味を持ちません。
         let nodes: Row = with
             .chars()
             .filter(|c| *c != '\n' && *c != '\t')
@@ -151,8 +138,7 @@ impl Editor {
         self.insert_row_in_island(nodes)
     }
 
-    /// Selects the island the caret is inside as one item of the text, which is
-    /// what a selection that outgrew the structure means.
+    /// キャレットが内側にある島をテキストの 1 つの項目として選択します。これが構造を超えた選択を意味します。
     pub fn select_island(&mut self) -> bool {
         if self.inside.take().is_none() {
             return false;
@@ -164,7 +150,7 @@ impl Editor {
         true
     }
 
-    /// Drags the selection inside a formula out to `cursor`, keeping the anchor.
+    /// アンカーを維持したまま、数式内の選択範囲を `カーソル` にドラッグします。
     pub fn extend_in_island(&mut self, cursor: &Cursor) -> bool {
         let to = cursor.clone();
         self.in_island(Inside::Extend, move |editing| {
@@ -173,7 +159,7 @@ impl Editor {
         })
     }
 
-    /// The structures the selection inside a formula covers, for a copy.
+    /// 数式内の選択を構造化します。
     pub fn island_selection(&self) -> Option<Row> {
         let cursor = self.inside.as_ref()?;
         if cursor.is_caret() {
@@ -203,8 +189,7 @@ impl Editor {
     pub(super) fn type_in_island(&mut self, c: char) -> bool {
         let mut left = false;
         let done = self.in_island(Inside::Type, |editing| {
-            // A space finishes a name that was typed as a command; the shortcuts
-            // belong to the structure, not to the keyboard handler.
+            // コマンドとして入力された名前の最後にはスペースが入ります。ショートカットは、キーボード ハンドラーではなく構造体に属します。
             if c == ' ' && editing.commit_command() {
                 return None;
             }
@@ -212,9 +197,7 @@ impl Editor {
             left = escape.is_some();
             escape
         });
-        // A formula that was started by typing `1/` is over once the fraction
-        // is written, so what comes after it is text again and is written
-        // there, not inside the formula.
+        // `1/` を入力して開始された数式は、分数が書き込まれると終了します。そのため、その後に続くものは再びテキストになり、数式内ではなくそこに書き込まれます。
         if done && left {
             let mut buffer = [0u8; 4];
             self.insert_text(c.encode_utf8(&mut buffer));
@@ -222,18 +205,14 @@ impl Editor {
         done
     }
 
-    /// Marks the formula as lasting only until the structure being typed is
-    /// written, which is what a formula started by a trigger such as `1/` is
-    /// for. Anything typed after it goes back into the text.
+    /// 入力されている構造体が書き込まれるまでのみ持続するものとして数式をマークします。これが、`1/` などのトリガーによって開始される数式の目的です。テキストに戻った後に入力されたものはすべてテキストに戻ります。
     pub fn island_lasts_one_structure(&mut self) {
         if let Some(cursor) = self.inside.as_mut() {
             cursor.fills.insert(0, 0);
         }
     }
 
-    /// Leaves an island the caret walked out of, taking an empty one with it:
-    /// backspacing out of the front of a formula that has nothing left in it
-    /// removes the formula.
+    /// キャレットが出た島を残し、空の島を持ち出します。何も残っていない数式の先頭からバックスペースで移動すると、数式が削除されます。
     pub(super) fn escape_island(&mut self, at: Pos, escape: Escape, recorded: bool) -> bool {
         let empty = matches!(self.text.item_at(at), Some(Item::Math(row)) if row.is_empty());
         self.inside = None;
@@ -252,7 +231,7 @@ impl Editor {
         true
     }
 
-    /// Steps into the formula the caret is about to move across, if there is one.
+    /// キャレットが移動しようとしている数式がある場合は、その数式にステップインします。
     pub(super) fn enter_island_beside(&mut self, forward: bool) -> bool {
         let sel = self.primary();
         if !sel.is_caret() || self.sels.len() != 1 {
@@ -273,7 +252,7 @@ mod tests {
     use super::*;
     use crate::editor::clipboard::Clip;
 
-    /// The island the caret stands on, as its structure.
+    /// 構造としてキャレットが立っている島。
     fn island(editor: &Editor) -> Row {
         match editor.text().item_at(editor.primary().head) {
             Some(Item::Math(row)) => row.clone(),
@@ -296,8 +275,7 @@ mod tests {
         assert_eq!(plain(&editor), "a\u{fffc}");
     }
 
-    /// Typing inside a formula is a step of the document's history, so one undo
-    /// takes it back and the caret returns into the formula.
+    /// 数式内の入力は、ドキュメントの履歴なので、1 回元に戻すとキャレットが数式に戻ります。
     #[test]
     fn undo_takes_back_typing_inside_a_formula() {
         let mut editor = started_in_an_island();
@@ -310,8 +288,7 @@ mod tests {
         assert_eq!(island(&editor).len(), 2);
     }
 
-    /// The caret moves into the lower row of the fraction it just made, which is
-    /// the empty slot the next character belongs in.
+    /// キャレットは、作成したばかりの分数の下の行に移動します。これは、次の文字が属する空のスロットです。
     #[test]
     fn the_caret_lands_in_the_empty_slot_of_a_new_fraction() {
         let mut editor = started_in_an_island();
@@ -330,7 +307,7 @@ mod tests {
         for c in "1/2".chars() {
             editor.type_in_island(c);
         }
-        // Inside the lower row: selecting the `2`, then the fraction itself.
+        // 下の行内: `2` を選択し、次に分数そのものを選択します。
         editor.in_island(Inside::Extend, |editing| editing.extend(false));
         assert_eq!(editor.island_selection(), Some(vec![Node::Char('2')]));
         editor.in_island(Inside::Extend, |editing| editing.extend(false));
@@ -338,8 +315,7 @@ mod tests {
         assert!(matches!(selected.as_slice(), [Node::Stack { .. }]));
     }
 
-    /// Once a selection has taken everything in the formula, it becomes a
-    /// selection of the formula: one item of the text, like a character.
+    /// 数式内のすべてを選択すると、数式の選択になります。文字などのテキストの 1 項目です。
     #[test]
     fn a_selection_that_outgrows_a_formula_selects_the_formula() {
         let mut editor = started_in_an_island();
@@ -374,8 +350,7 @@ mod tests {
         assert_eq!(cursor.index, 1);
     }
 
-    /// Walking out of the front of a formula that has nothing left in it takes
-    /// the formula with it, in one undo step.
+    /// 終了何も残っていない数式の先頭に、1 回の元に戻す手順で数式も取り込まれます。
     #[test]
     fn backspacing_out_of_an_empty_formula_removes_it() {
         let mut editor = started_in_an_island();
@@ -400,8 +375,7 @@ mod tests {
         assert_eq!(editor.inside().expect("inside the formula").index, 0);
     }
 
-    /// Moving the caret in the text leaves the formula behind: there is one
-    /// caret, not one per place it could be.
+    /// テキスト内でキャレットを移動すると、数式は残ります。キャレットは 1 つあり、各場所に 1 つずつあるわけではありません。
     #[test]
     fn moving_in_the_text_leaves_the_formula() {
         let mut editor = started_in_an_island();
@@ -409,8 +383,7 @@ mod tests {
         assert!(editor.inside().is_none());
     }
 
-    /// Moving right across a formula steps into it rather than over it, so the
-    /// same key does the same thing all the way through.
+    /// 数式を横切って右に移動すると、上ではなく数式内にステップインするため、同じキーで最後まで同じ動作が行われます。
     #[test]
     fn moving_across_a_formula_steps_inside_it() {
         let mut editor = started_in_an_island();
@@ -421,13 +394,13 @@ mod tests {
         assert_eq!(editor.inside().expect("inside the formula").index, 0);
         editor.move_h(true, false);
         assert_eq!(editor.inside().expect("inside the formula").index, 1);
-        // One more step takes the caret out the far side.
+        // もう 1 ステップでキャレットが反対側に移動します。
         editor.move_h(true, false);
         assert!(editor.inside().is_none());
         assert_eq!(editor.primary().head, Pos::new(0, 2));
     }
 
-    /// Typing goes through one command wherever the caret is.
+    /// どこに入力しても 1 つのコマンドが実行されます。キャレットはです。
     #[test]
     fn typing_reaches_whichever_place_the_caret_is_in() {
         let mut editor = started_in_an_island();
@@ -440,8 +413,7 @@ mod tests {
         assert_eq!(plain(&editor), "a\u{fffc}b");
     }
 
-    /// A paste inside a formula is text, not typing: `a/b` stays three
-    /// characters instead of becoming a fraction.
+    /// 数式内の貼り付けは、入力ではなくテキストです。「a/b」は分数になる代わりに 3 文字のままです。
     #[test]
     fn a_paste_inside_a_formula_stays_plain() {
         let mut editor = started_in_an_island();
@@ -452,14 +424,13 @@ mod tests {
         );
     }
 
-    /// Tab is the column separator in the text and the next slot in a formula.
+    /// タブはテキスト内の列の区切り文字であり、数式内の次のスロットです。
     #[test]
     fn tab_steps_to_the_next_slot_inside_a_formula() {
         let mut editor = started_in_an_island();
         editor.insert_text("1");
         editor.insert_text("/");
-        // In the lower row of the fraction; Tab leaves it for the row that holds
-        // the fraction rather than putting a separator in.
+        // 分数の下の行。 Tab キーを押すと、区切り文字を入れるのではなく、分数を保持する行がそのまま残ります。
         editor.tab(false);
         assert!(island(&editor)
             .iter()
@@ -470,8 +441,7 @@ mod tests {
         );
     }
 
-    /// The lower row of a fraction takes one run and hands the caret back, so
-    /// what is typed next lands beside the fraction, not underneath it.
+    /// 分数の下の行は 1 回実行され、キャレットが戻されます。そのため、次に入力された内容は分数の下ではなく横に配置されます。
     #[test]
     fn typing_on_past_a_fraction_leaves_it_behind() {
         let mut editor = started_in_an_island();
@@ -494,8 +464,7 @@ mod tests {
         assert_eq!(after, " + 3");
     }
 
-    /// A formula that a trigger put there holds the structure that called it
-    /// up and nothing more: what is typed after it is text again.
+    /// トリガーがそこに置いた式は、それを呼び出した構造を保持するだけで、それ以上は何も保持しません。テキストになった後に再度入力されるものです。
     #[test]
     fn a_formula_a_trigger_made_ends_with_its_structure() {
         let mut editor = started_in_an_island();
@@ -510,7 +479,7 @@ mod tests {
         assert_eq!(plain(&editor), "a\u{fffc} + 3");
     }
 
-    /// Enter and Escape end the formula instead of splitting the line.
+    /// Enter キーと Escape キーを押すと、行を分割する代わりに数式が終了します。
     #[test]
     fn enter_and_escape_leave_a_formula() {
         let mut editor = started_in_an_island();
@@ -523,8 +492,7 @@ mod tests {
         assert!(editor.inside().is_none());
     }
 
-    /// A match found inside a structure is replaced where it was found, and the
-    /// replacement stays plain characters.
+    /// 一致構造体内で見つかったものは、見つかった場所に置き換えられ、置換された文字はプレーンな文字のままです。
     #[test]
     fn a_replacement_reaches_inside_a_formula() {
         let mut editor = started_in_an_island();
@@ -554,8 +522,7 @@ mod tests {
         assert_eq!(island(&editor), vec![Node::Char('a'), Node::Char('b')]);
     }
 
-    /// A structure copied out of the text goes back in as a structure, not as
-    /// the characters it reads as.
+    /// テキストからコピーされた構造は、読み取られる文字としてではなく、構造として戻されます。
     #[test]
     fn a_copied_structure_pastes_back_as_itself() {
         let fraction = vec![Node::Stack {
@@ -573,8 +540,7 @@ mod tests {
         );
     }
 
-    /// A structure is one row, so a pasted line break is dropped rather than
-    /// put in as a character the file could not hold.
+    /// 構造は 1 行なので、ファイルに保持できなかった文字として挿入されるのではなく、貼り付けられた改行が削除されます。
     #[test]
     fn pasting_lines_inside_a_structure_keeps_one_row() {
         let mut editor = started_in_an_island();
@@ -590,8 +556,7 @@ mod tests {
         );
     }
 
-    /// Pasting into a structure puts the copied pieces in that row, so a
-    /// fraction pasted into a denominator is a fraction there too.
+    /// 構造に貼り付けると、コピーされた部分がその行に配置されるため、分母に貼り付けられた分数はそこにある分数になります。
     #[test]
     fn a_copied_piece_pastes_inside_a_structure() {
         let mut editor = started_in_an_island();
@@ -600,8 +565,7 @@ mod tests {
         assert_eq!(island(&editor), vec![Node::Char('a'), Node::Char('b')]);
     }
 
-    /// Inside a structure there is one caret, so Ctrl+D does nothing rather
-    /// than selecting a word of the text the caret is standing on.
+    /// 構造内にはキャレットが 1 つあるため、Ctrl+D はキャレットが置かれているテキストの単語を選択する以外に何もしません。
     #[test]
     fn ctrl_d_does_nothing_inside_a_formula() {
         let mut editor = started_in_an_island();
@@ -610,7 +574,7 @@ mod tests {
         assert!(!editor.add_next_occurrence());
         assert_eq!(editor.sels().len(), 1);
         assert!(editor.inside().is_some());
-        // Typing still goes into the structure.
+        // 入力は構造内に進みます。
         editor.insert_text("c");
         assert_eq!(
             island(&editor),
@@ -618,8 +582,7 @@ mod tests {
         );
     }
 
-    /// Turning typed text into a structure is one step of the history: undo
-    /// gives back the characters, not the formula they went into.
+    /// 入力されたテキストを構造に変換することは歴史の 1 ステップです。元に戻すと、入力された数式ではなく文字が戻ります。
     #[test]
     fn a_shortcut_that_builds_a_structure_is_one_undo() {
         let mut editor = editor("x1");
@@ -634,14 +597,13 @@ mod tests {
         assert!(matches!(island(&editor).as_slice(), [Node::Stack { .. }]));
         assert!(editor.undo());
         assert_eq!(plain(&editor), "x1");
-        // Nothing in between: the half-built formula was never a step.
+        // その間には何もありません。構築途中の数式は決してステップではありません。
         assert!(!editor.undo());
         assert!(editor.redo());
         assert!(matches!(island(&editor).as_slice(), [Node::Stack { .. }]));
     }
 
-    /// A selection inside a formula can be dragged, which is the same selection
-    /// the keyboard makes.
+    /// 内部の選択範囲数式はドラッグできます。これはキーボードによる選択と同じです。
     #[test]
     fn dragging_inside_a_formula_selects_the_same_way() {
         let mut editor = started_in_an_island();
@@ -662,7 +624,7 @@ mod tests {
             editor.island_selection(),
             Some(vec![Node::Char('a'), Node::Char('b')])
         );
-        // Dragging out of the formula takes it whole.
+        // 数式の外にドラッグすると、全体が取り出されます。
         assert!(editor.select_island());
         assert_eq!(editor.primary(), Sel::range(Pos::new(0, 1), Pos::new(0, 2)));
     }

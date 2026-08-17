@@ -1,32 +1,27 @@
-//! The user's settings: one place for every default, and the file that
-//! overrides them.
+//! ユーザーの設定: すべてのデフォルトに対して 1 つの場所、およびそれらをオーバーライドするファイル。
 //!
-//! The saved notation is not a setting — it is the file format itself, and
-//! making it configurable would make files unreadable elsewhere. The DOM
-//! classes the view uses are not settings either; they are its own contract.
+//! 保存された表記法は設定ではありません。これはファイル形式そのものであり、これを構成可能にすると、他の場所ではファイルが読み取れなくなります。ビューが使用する DOM クラスも設定ではありません。
 
 use std::cell::RefCell;
 
 use wasm_bindgen::JsCast;
 
-/// Everything the user can change. What the settings window shows is a
-/// subset: values the user has no reason to touch stay in the file only.
+/// ユーザーが変更できるすべてのもの。設定ウィンドウに表示されるのはサブセットです。ユーザーが触れる必要のない値はファイル内にのみ残ります。
 #[derive(Clone, PartialEq)]
 pub struct Settings {
-    /// The size of the text in the editor, in pixels.
+    /// エディター内のテキストのサイズ (ピクセル単位)。
     pub font_size: f64,
-    /// The font of the text. Empty means the built-in default.
+    /// テキストのフォント。空は組み込みのデフォルトを意味します。
     pub font_family: String,
-    /// Whether the caret blinks.
+    /// キャレットが点滅するかどうか。
     pub caret_blink: bool,
-    /// Whether a line too long for the window is carried on underneath
-    /// instead of running off the side.
+    /// ウィンドウに対して長すぎる行が横からはみ出さずに下に引き継がれるかどうか。
     pub wrap: bool,
-    /// Whether each line shows its number.
+    /// 各行にその番号が表示されるかどうか。
     pub line_numbers: bool,
-    /// The gap between aligned columns, in pixels. File only.
+    /// 整列された列間のギャップ (ピクセル単位)。ファイルのみ。
     pub column_gap: f64,
-    /// How many steps the undo history keeps. File only.
+    /// 元に戻す履歴が保持されるステップ数。ファイルのみ。
     pub history_limit: usize,
 }
 
@@ -48,7 +43,7 @@ thread_local! {
     static CURRENT: RefCell<Settings> = RefCell::new(Settings::default());
 }
 
-/// The settings in effect right now.
+/// 現在有効な設定。
 pub fn current() -> Settings {
     CURRENT.with(|current| current.borrow().clone())
 }
@@ -65,14 +60,13 @@ pub fn history_limit() -> usize {
     CURRENT.with(|current| current.borrow().history_limit)
 }
 
-/// Makes `settings` the ones in effect, showing the visual ones on screen.
+/// 「設定」を有効にし、視覚的な設定を画面に表示します。
 pub fn apply(settings: Settings) {
     show(&settings);
     CURRENT.with(|current| *current.borrow_mut() = settings);
 }
 
-/// Visual settings reach the screen as CSS variables on the document root,
-/// so the stylesheet stays the only place that decides how things look.
+/// 視覚的な設定はドキュメント ルートの CSS 変数として画面に到達するため、スタイルシートは見た目を決定する唯一の場所のままです。
 fn show(settings: &Settings) {
     let Some(root) = web_sys::window()
         .and_then(|window| window.document())
@@ -111,8 +105,7 @@ fn show(settings: &Settings) {
             if settings.wrap { "pre-wrap" } else { "pre" },
         )
         .ok();
-    // A wrapped line is as wide as the window; an unwrapped one is as wide as
-    // it needs, which is what gives the editor something to scroll sideways.
+    // 折り返された行はウィンドウと同じ幅です。ラップされていないものは必要なだけ幅があり、エディターに横にスクロールする機能を与えます。
     style
         .set_property(
             "--setting-line-width",
@@ -131,8 +124,7 @@ fn show(settings: &Settings) {
         .ok();
 }
 
-/// Writes the settings as the file keeps them: one `name = value` per line,
-/// which is a small corner of TOML.
+/// ファイルに保存されている設定を書き込みます。1 行に 1 つの `name = value` で、これは TOML の小さなコーナーです。
 pub fn write(settings: &Settings) -> String {
     format!(
         "font_size = {}\nfont_family = \"{}\"\ncaret_blink = {}\nwrap = {}\nline_numbers = {}\ncolumn_gap = {}\nhistory_limit = {}\n",

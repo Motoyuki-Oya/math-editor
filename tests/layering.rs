@@ -1,20 +1,15 @@
-//! Keeps the layers apart, by reading the source instead of trusting review.
+//! レビューを信頼するのではなくソースを読み取ることによって、レイヤーを分離したままにします。
 //!
-//! The display and the file format must never know about each other: the
-//! notation has to be readable without a screen, and nothing drawn may be
-//! derived from the way it is written. Both are allowed to know `structure`,
-//! which is the meaning they share.
+//! 表示とファイル形式は決して相互に認識してはなりません。表記は画面なしで読める必要があり、描画方法から派生したものは何もありません。どちらも「構造」を知ることができます。これは、それらが共有する意味です。
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// A layer, the things it may not mention, and whether its tests are held to
-/// the same rule.
+/// レイヤー、そのレイヤーで言及してはいけないこと、およびそのテストが同じルールに従うかどうか。
 struct Rule {
     dir: &'static str,
     forbidden: &'static [&'static str],
-    /// Fixtures in tests may reach for the notation, since writing a structure
-    /// out is the clearest way to write one down.
+    /// 構造を書き出すことが構造を書き留める最も明確な方法であるため、テスト内のフィクスチャは表記法に到達する可能性があります。
     tests_too: bool,
 }
 
@@ -64,7 +59,7 @@ fn sources(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// The source without its tests, which sit at the end of the file by convention.
+/// テストのないソース。慣例によりファイルの最後に配置されます。
 fn without_tests(source: &str) -> &str {
     match source.find("#[cfg(test)]") {
         Some(at) => &source[..at],
@@ -72,8 +67,7 @@ fn without_tests(source: &str) -> &str {
     }
 }
 
-/// The code alone: comments name the other layers when they explain why they
-/// are out of reach, which is not a dependency.
+/// コードのみ: コメントは、その理由を説明するときに他のレイヤーに名前を付けます。
 fn without_comments(source: &str) -> String {
     source
         .lines()
@@ -85,7 +79,7 @@ fn without_comments(source: &str) -> String {
         .join("\n")
 }
 
-/// The text of every string literal, which is where notation would show up.
+/// すべての文字列リテラルのテキスト。これが表記法が表示される場所です。
 fn string_literals(source: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut chars = source.chars();
@@ -134,12 +128,9 @@ fn the_layers_do_not_reach_into_each_other() {
     }
 }
 
-/// The format turns whole documents into files and back, and nothing else.
+/// この形式はドキュメント全体をファイルに変換し、それ以外は何も変換しません。
 ///
-/// Copying used to go through it, which put the notation on the clipboard: a
-/// fraction came out as `$(a/b)`, in another program and in this one. Keeping
-/// the entry points to `read` and `write` is what stops that from coming back —
-/// there is nothing here for anything but a file to call.
+/// 以前はコピーがそれを通過し、表記法がクリップボードに置かれていました。別のプログラムでもこのプログラムでも、分数は `$(a/b)` として出力されました。エントリ ポイントを `read` と `write` に維持することが、この問題の再発を防ぐ方法です。ここには、呼び出すファイル以外に何もありません。
 #[test]
 fn the_format_only_converts_whole_documents() {
     let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/format/document.rs");
@@ -157,7 +148,7 @@ fn the_format_only_converts_whole_documents() {
     );
 }
 
-/// The format is the only place the notation `$( … )` is written or read.
+/// この形式は、表記法 `$( … )` が書き込まれたり読み取られたりする唯一の場所です。
 #[test]
 fn only_the_format_knows_the_notation() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");

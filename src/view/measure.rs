@@ -1,14 +1,8 @@
-//! Reads the page back: where a place in a row ended up, and what a point is
-//! on.
+//! ページを元に戻します。行内の場所がどこで終わったのか、その点は何なのかを示します。
 //!
-//! Drawing puts things on screen; this measures what was drawn. Both directions
-//! are needed because the text is laid out by the browser with a proportional
-//! font, so where a caret goes is only known after the row exists. Keeping the
-//! two apart means a caret in the wrong place is either put wrong or measured
-//! wrong, never both at once.
+//! 描画では、画面上に物事が表示されます。これは描かれたものを測定します。テキストはブラウザによってプロポーショナル フォントを使用してレイアウトされるため、両方向が必要です。そのため、キャレットがどこに移動するかは行が存在した後でのみわかります。 2 つを離しておくと、間違った場所にあるキャレットは、配置が間違っているか、測定が間違っていることを意味します。両方を一度に行うことはできません。
 //!
-//! Nothing here knows what is being edited — it takes elements and points and
-//! gives back rectangles and places.
+//! ここでは、何が編集されているかはわかりません。要素と点を取得し、四角形と場所を返します。
 
 use wasm_bindgen::JsCast;
 use web_sys::{Element, Range};
@@ -19,7 +13,7 @@ use crate::view::row::{self, PATH_ATTR, PLACEHOLDER_CLASS, ROW_CLASS, RUN_CLASS,
 
 use super::document::LINE_CLASS;
 
-/// A rectangle on screen, in the page's own coordinates.
+/// ページ独自の座標で画面上の四角形を返します。
 #[derive(Clone, Copy, Default)]
 pub struct Box2 {
     pub left: f64,
@@ -29,8 +23,7 @@ pub struct Box2 {
 }
 
 impl Box2 {
-    /// Gives a rectangle that measured as nothing something to show, so a caret
-    /// on an empty row is still visible.
+    /// 表示するものがないとして測定された四角形を与えるので、空の行のキャレットはまだ表示されます。
     pub(super) fn fix(mut self) -> Self {
         if self.height <= 0.0 {
             self.height = 18.0;
@@ -42,8 +35,7 @@ impl Box2 {
     }
 }
 
-/// What a click landed on: a place in the text, or a place inside the island
-/// standing there.
+/// すごいクリックです。着地: テキスト内の場所、またはそこに立っている島内の場所。
 pub enum Hit {
     Text(Pos),
     Inside(Pos, Cursor),
@@ -58,9 +50,7 @@ pub(super) fn box_of(rect: &web_sys::DomRect) -> Box2 {
     }
 }
 
-/// The rectangle between two places of a row, as tall as what it spans rather
-/// than as tall as a line: selecting a fraction covers the whole fraction, the
-/// way selecting a word covers the whole word.
+/// 行の 2 つの場所の間にある長方形。行と同じ高さではなく、その範囲にまたがる高さと同じです。分数を選択すると分数全体がカバーされ、単語を選択すると単語全体がカバーされます。
 pub(super) fn span_box(row: &Element, left: Box2, right: Box2) -> Box2 {
     let mut top = left.top.min(right.top);
     let mut bottom = (left.top + left.height).max(right.top + right.height);
@@ -85,10 +75,7 @@ pub(super) fn span_box(row: &Element, left: Box2, right: Box2) -> Box2 {
     .fix()
 }
 
-/// The rectangles a stretch of a row covers, a piece at a time: one when the
-/// row is on a single line, one per carried line when it is wrapped. `to` may
-/// be `usize::MAX` for the end of the row, and `past_end` widens the last piece
-/// so that a selection reaching past a line shows the newline as a gap.
+/// 長方形は、行のストレッチを一度に 1 つずつカバーします。行が 1 行にある場合は 1 つ、折り返される場合は繰り上げ行ごとに 1 つです。 `to` は行の終わりの `usize::MAX` にすることができ、`past_end` は最後の部分を広げて、行を越えた選択範囲で改行がギャップとして表示されるようにします。
 pub(super) fn span_boxes(row: &Element, from: usize, to: usize, past_end: bool) -> Vec<Box2> {
     let mut pieces: Vec<Vec<Box2>> = Vec::new();
     let mut piece: Vec<Box2> = Vec::new();
@@ -96,8 +83,7 @@ pub(super) fn span_boxes(row: &Element, from: usize, to: usize, past_end: bool) 
         if index < from || (to != usize::MAX && index > to) {
             continue;
         }
-        // A place that dropped to another line starts a new piece: it is where
-        // the browser carried the row on.
+        // 別の行に落ちた場所から新しい部分が始まります。ブラウザが行を転送した場所です。
         if piece
             .last()
             .is_some_and(|last| (last.top - rect.top).abs() > 1.0)
@@ -124,9 +110,7 @@ pub(super) fn span_boxes(row: &Element, from: usize, to: usize, past_end: bool) 
         .collect()
 }
 
-/// The place in a row a point is nearest to, at whatever depth: the innermost
-/// row the point is in decides, so clicking a denominator lands in the
-/// denominator and not beside the fraction.
+/// 任意の深さで点が最も近い行内の場所。点が入っている最も内側の行が決定するため、分母をクリックすると着地します。
 pub(super) fn hit_in_line(holder: &Element, line: usize, x: f64, y: f64) -> Hit {
     let Some(row) = innermost_row(holder, x, y) else {
         return Hit::Text(Pos::new(line, 0));
@@ -150,8 +134,7 @@ pub(super) fn hit_in_line(holder: &Element, line: usize, x: f64, y: f64) -> Hit 
     }
 }
 
-/// The deepest row the point is inside of. Rows nest, so a point inside a
-/// denominator is inside the fraction's row and the line's row as well.
+/// ポイントが内側にある最も深い行。行は入れ子になっているため、分母内の点は分数の行内と直線の行内にもあります。
 fn innermost_row(holder: &Element, x: f64, y: f64) -> Option<Element> {
     let rows = holder.query_selector_all(&format!(".{ROW_CLASS}")).ok()?;
     let mut best: Option<(usize, Element)> = None;
@@ -180,9 +163,7 @@ fn innermost_row(holder: &Element, x: f64, y: f64) -> Option<Element> {
     best.map(|(_, row)| row).or(fallback)
 }
 
-/// The place in a row nearest to a point. The line the point is on counts
-/// before the place along it, so clicking the second line of a wrapped row
-/// lands there and not on the same column of the first.
+/// 点に最も近い行内の場所。ポイントが置かれている行は、その行に沿った場所より前にカウントされるため、折り返された行の 2 行目をクリックすると、最初の行と同じ列ではなく、そこに移動します。
 fn nearest_index(row: &Element, x: f64, y: f64) -> usize {
     let mut best = (f64::MAX, 0usize);
     for (index, rect) in boundaries(row) {
@@ -197,7 +178,7 @@ fn nearest_index(row: &Element, x: f64, y: f64) -> usize {
     best.1
 }
 
-/// Every place in a row, and where it is on screen.
+/// 行内のすべての場所と、それが画面上のどこにあるか。
 fn boundaries(row: &Element) -> Vec<(usize, Box2)> {
     let mut places = Vec::new();
     let children = row.children();
@@ -218,7 +199,7 @@ fn boundaries(row: &Element) -> Vec<(usize, Box2)> {
             }
             None => {
                 let rect = box_of(&child.get_bounding_client_rect());
-                // An empty row has a box to click on but no place after it.
+                // 空の行には、クリックするボックスがありますが、その後に場所はありません。
                 if child.class_list().contains(PLACEHOLDER_CLASS) {
                     places.push((start, rect));
                     continue;
@@ -237,7 +218,7 @@ fn boundaries(row: &Element) -> Vec<(usize, Box2)> {
     places
 }
 
-/// The place just before the item at `index`; `usize::MAX` means the end.
+/// `index` の項目の直前の場所。 `usize::MAX` は終了を意味します。
 pub(super) fn boundary(row: &Element, index: usize) -> Option<Box2> {
     let places = boundaries(row);
     if index == usize::MAX {
@@ -250,8 +231,7 @@ pub(super) fn boundary(row: &Element, index: usize) -> Option<Box2> {
         .or_else(|| places.last().map(|(_, rect)| *rect))
 }
 
-/// How many characters a text run holds, or `None` for anything that takes one
-/// place of its own, such as an island or a structure.
+/// テキスト ランが保持する文字数、または島や構造物など、独自の 1 つの場所を占めるものについては `None` を表します。
 fn run_length(child: &Element) -> Option<usize> {
     child
         .class_list()
@@ -263,13 +243,12 @@ pub(super) fn start_of(child: &Element) -> Option<usize> {
     child.get_attribute(START_ATTR)?.parse().ok()
 }
 
-/// Measures a place inside a text run with a collapsed range, which is the only
-/// way to get an offset's position for a proportional font.
+/// 折りたたまれた範囲でテキスト ラン内の場所を測定します。これが、プロポーショナル フォントのオフセットの位置を取得する唯一の方法です。
 fn text_boundary(run: &Element, offset: usize) -> Option<Box2> {
     let doc = run.owner_document()?;
     let text = run.text_content().unwrap_or_default();
     let Some(node) = run.first_child() else {
-        // An empty line has no text node to measure.
+        // 空の行には、測定するテキスト ノードがありません。
         return Some(empty_run_box(run));
     };
     let units: u32 = text
@@ -284,12 +263,11 @@ fn text_boundary(run: &Element, offset: usize) -> Option<Box2> {
     if rect.height > 0.0 {
         return Some(rect);
     }
-    // A collapsed range in an empty text node has no box; use the run itself.
+    // 空のテキスト ノード内の折りたたまれた範囲には、何もありません。ボックス;実行自体を使用します。
     Some(empty_run_box(run))
 }
 
-/// An empty inline run has no height of its own, which would leave the caret
-/// invisible, so the height comes from the line the run sits on.
+/// 空のインライン実行にはそれ自体の高さがなく、キャレットが非表示のままになるため、高さは実行が配置されている行から取得されます。
 fn empty_run_box(run: &Element) -> Box2 {
     let rect = box_of(&run.get_bounding_client_rect());
     if rect.height > 0.0 {

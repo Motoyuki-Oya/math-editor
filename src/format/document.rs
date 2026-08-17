@@ -1,12 +1,12 @@
-//! Reading a whole document from a file and writing it back.
+//! ファイルからドキュメント全体を読み取り、それを書き戻します。
 //!
-//! This is the only place that knows a document ever becomes text.
+//! これは、ドキュメントがテキストになることを知る唯一の場所です。
 
 use super::islands::{self, Segment};
 use super::notation::{island_text, parse_island};
 use crate::structure::text::{Item, Text};
 
-/// The island that means a column separator rather than a structure.
+/// 構造ではなく列の区切り文字を意味するアイランド。
 pub const TAB_SOURCE: &str = "t";
 
 pub fn read(source: &str) -> Text {

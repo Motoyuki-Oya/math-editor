@@ -1,6 +1,4 @@
-//! Starting a formula straight from the text, the way Markdown shortcuts work:
-//! `1/`, `x^`, `\sqrt ` and `$` switch into a formula, while `\alpha ` and
-//! `\sin ` only put ordinary characters in the text.
+//! テキストから直接数式を開始する、Markdown ショートカットの仕組み: `1/`、`x^`、`\sqrt `、および `$` は数式に切り替わりますが、`\alpha ` と `\sin ` はテキストに通常の文字のみを入れます。
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -11,25 +9,23 @@ use crate::structure::text::Pos;
 use crate::structure::vocabulary;
 
 enum Seed {
-    /// `$`: an empty formula.
+    /// `$`: 空の数式。
     Empty,
-    /// `1/`, `x^`: text that was already typed, then the trigger.
+    /// `1/`、`x^`: すでに入力されているテキスト、その後、 trigger.
     Typed(String, char),
-    /// `\sqrt `: the structure the command names.
+    /// `\sqrt `: コマンド名の構造体。
     Node(MathNode),
-    /// `\alpha `, `\sin `: ordinary text, no formula needed.
+    /// `\alpha `、`\sin `: 通常のテキスト。数式は必要ありません。
     Text(String),
 }
 
-/// Handles a typed character that may start a formula. Returns whether it did,
-/// in which case the caller must not insert the character itself.
+/// 数式を開始する可能性がある入力文字を処理します。挿入したかどうかを返します。挿入した場合、呼び出し元は文字自体を挿入してはなりません。
 pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
     let sel = session.borrow().editor.primary();
     if !sel.is_caret() || session.borrow().editor.sels().len() > 1 {
         return false;
     }
-    // Inside a formula the structure has shortcuts of its own; these only turn
-    // ordinary text into a formula.
+    // 式の内部には、構造体自体のショートカットがあります。これらは、通常のテキストを数式に変換するだけです。
     if session.borrow().editor.inside().is_some() {
         return false;
     }
@@ -50,24 +46,18 @@ pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
         seed => {
             {
                 let mut borrowed = session.borrow_mut();
-                // Taking the typed text and making a structure of it is one step
-                // of the history: undoing `1/` gives back the characters, not the
-                // empty formula they went into.
+                // 入力されたテキストを取得してその構造を作成することは、歴史の 1 ステップです。`1/` を元に戻すと、入力した空の数式ではなく、文字が戻ります。
                 borrowed.editor.one_step(|editor| {
                     editor.replace_range(from, sel.head, "");
                     editor.insert_island();
-                    // A formula nobody asked for lasts as long as the structure
-                    // that called it up: `1/2 + 3` puts the fraction in a
-                    // formula and the `+ 3` back in the text.
+                    // 誰も求めなかった数式は、それを呼び出した構造が続く限り持続します。つまり、`1/2 + 3` は分数を数式に入れ、`+ 3` をテキストに戻します。
                     if !matches!(seed, Seed::Empty) {
                         editor.island_lasts_one_structure();
                     }
                     match seed {
                         Seed::Empty | Seed::Text(_) => {}
                         Seed::Typed(run, trigger) => {
-                            // One character at a time, through the same door
-                            // typing uses, so `1/` builds the structure it would
-                            // have built by hand.
+                            // 一度に 1 文字ずつ、同じドアタイピングが使用するため、`1/` は手動で構築する構造を構築します。
                             let mut buffer = [0u8; 4];
                             for c in run.chars().chain(std::iter::once(trigger)) {
                                 editor.insert_text(c.encode_utf8(&mut buffer));
@@ -86,7 +76,7 @@ pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
     }
 }
 
-/// The characters on the line before the caret, formulas left out.
+/// キャレットの前の行の文字、省略された数式。
 fn text_before(session: &Rc<RefCell<Session>>, at: Pos) -> String {
     let borrowed = session.borrow();
     borrowed
@@ -99,14 +89,13 @@ fn text_before(session: &Rc<RefCell<Session>>, at: Pos) -> String {
         .collect()
 }
 
-/// What a trigger character produces, and how many characters before the caret
-/// it takes with it.
+/// トリガー文字が生成するもの、およびそれに伴うキャレットの前の文字数。
 fn seed_for(c: char, before: &str) -> Option<(usize, Seed)> {
     match c {
         '$' => Some((0, Seed::Empty)),
         '/' | '^' | '_' => {
             let run = trailing_run(before);
-            // `and/or` should stay prose; `1/`, `x/` and `x^` are formulas.
+            // `and/or` は散文のままである必要があります。 `1/`、`x/`、および `x^` は数式です。
             let mathlike = !run.is_empty()
                 && (c != '/'
                     || run.chars().any(|c| c.is_ascii_digit())
@@ -127,8 +116,7 @@ fn trailing_run(text: &str) -> String {
     run.chars().rev().collect()
 }
 
-/// A `\name` or a directly typed glyph such as `√`. Names that only stand for a
-/// character stay text.
+/// `\name` または `√` などの直接入力されたグリフ。文字を表すだけの名前はテキストのままです。
 fn trailing_shortcut(text: &str) -> Option<(usize, Seed)> {
     if let Some(name) = trailing_command(text) {
         if let Some(node) = vocabulary::node_for(&name) {

@@ -1,28 +1,24 @@
-//! Cursor movement and editing commands inside an island.
+//! アイランド内のカーソル移動と編集コマンド。
 
 use super::ast::{is_arrow, row_at, row_at_mut, Between, Cursor, Delim, Node, Row};
 use super::vocabulary;
 
-/// Result of an edit that the cursor could not absorb, so the surrounding text
-/// editor has to react instead.
+/// カーソルが吸収できなかった編集の結果。そのため、周囲のテキスト エディタが代わりに反応する必要があります。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Escape {
-    /// The caret walked off the left edge of the formula.
+    /// キャレットが数式の左端から外れました。
     Left,
-    /// The caret walked off the right edge of the formula.
+    /// キャレットが数式の右端から外れました。
     Right,
-    /// The formula is empty and the user pressed backspace again.
+    /// 数式は空で、ユーザーが再度 Backspace キーを押しました。
     Delete,
-    /// The user asked to leave the formula (Escape / Enter).
+    /// ユーザーは数式を終了するよう要求しました (Escape / Enter)。
     Done,
 }
 
-/// An island being edited: the structure itself, borrowed from the document,
-/// and the cursor walking through it.
+/// アイランドは、編集済み: ドキュメントから借用した構造自体、およびその中を移動するカーソル。
 ///
-/// Nothing is copied and no history is kept here. The island belongs to the
-/// document, so an edit inside one is an edit of the document, undone by the
-/// same history as any other.
+/// ここには何もコピーされず、履歴も保持されません。アイランドはドキュメントに属しているため、アイランド内の編集はドキュメントの編集となり、他の編集と同じ履歴によって元に戻されます。
 pub struct Editing<'a> {
     pub root: &'a mut Row,
     pub cursor: &'a mut Cursor,
@@ -56,14 +52,12 @@ impl<'a> Editing<'a> {
         row_at(self.root, path)?.get(index)
     }
 
-    /// Inserts a node at the caret; when the node has slots the caret moves
-    /// into the first one, which is what makes palette buttons feel natural.
+    /// キャレットにノードを挿入します。ノードにスロットがある場合、キャレットは最初のスロットに移動します。これにより、パレット ボタンが自然になります。
     pub fn insert(&mut self, node: Node) {
         self.place(node);
     }
 
-    /// Grows the selection by one place, or takes the whole structure the
-    /// selection sits in once it reaches the end of its row.
+    /// 選択範囲を 1 つずつ拡大するか、行の最後に達すると選択範囲が含まれる構造全体を取得します。
     pub fn extend(&mut self, forward: bool) -> Option<Escape> {
         self.stop_waiting();
         let index = self.cursor.index;
@@ -81,9 +75,7 @@ impl<'a> Editing<'a> {
         }
     }
 
-    /// Moves the head of the selection to `to`, which is how dragging selects.
-    /// A place in another row is not part of the same selection, so it is left
-    /// alone rather than guessed at.
+    /// 選択範囲の先頭を `to` に移動します。これが選択範囲のドラッグの方法です。別の行の場所は同じ選択の一部ではないため、推測されずにそのまま残されます。
     pub fn extend_to(&mut self, to: &Cursor) {
         self.stop_waiting();
         if to.path != self.cursor.path {
@@ -92,10 +84,7 @@ impl<'a> Editing<'a> {
         self.cursor.index = to.index.min(self.current_row().len());
     }
 
-    /// Selects the structure the caret is inside, in the row that holds it.
-    /// Selecting therefore keeps widening: character, the structure around it,
-    /// the structure around that one, and finally the whole formula, which is
-    /// where the surrounding text takes over.
+    /// キャレットを保持する行内で、キャレットが含まれる構造を選択します。したがって、選択すると文字、その周囲の構造、その周囲の構造、そして最後に数式全体が広がり、周囲のテキストが引き継ぎます。
     fn select_around(&mut self, forward: bool) -> Option<Escape> {
         let Some((node, _)) = self.cursor.path.pop() else {
             return Some(if forward { Escape::Right } else { Escape::Left });
@@ -110,22 +99,20 @@ impl<'a> Editing<'a> {
         None
     }
 
-    /// Selects the whole row the caret is in, for Select All.
+    /// すべて選択の場合は、キャレットが含まれる行全体を選択します。
     pub fn select_row(&mut self) {
         self.stop_waiting();
         self.cursor.anchor = 0;
         self.cursor.index = self.current_row().len();
     }
 
-    /// Puts a plain caret at `index`. Everything except selecting ends this
-    /// way, so a selection never outlives the command that made it.
+    /// 単純なキャレットを `index` に配置します。選択以外のすべてがこの方法で終了するため、選択がその選択を行ったコマンドよりも長く存続することはありません。
     fn caret_at(&mut self, index: usize) {
         self.cursor.index = index;
         self.cursor.anchor = index;
     }
 
-    /// A selection collapses when the caret moves, the way it does in text: to
-    /// the side the move goes towards.
+    /// キャレットが移動すると、テキスト内で行われるように、移動が進む側に選択が折りたたまれます。
     fn collapse(&mut self, forward: bool) -> bool {
         if self.cursor.is_caret() {
             return false;
@@ -139,7 +126,7 @@ impl<'a> Editing<'a> {
         true
     }
 
-    /// Drops the selected structures, so typing over a selection replaces it.
+    /// 選択した構造を削除するため、選択の上に入力すると、それが置き換えられます。
     fn take_selection(&mut self) -> bool {
         if self.cursor.is_caret() {
             return false;
@@ -150,7 +137,7 @@ impl<'a> Editing<'a> {
         true
     }
 
-    /// Puts a whole row of structures in at the caret, for a paste.
+    /// 貼り付けのために、構造の行全体をキャレットに配置します。
     pub fn insert_row(&mut self, nodes: Row) {
         self.stop_waiting();
         self.take_selection();
@@ -180,21 +167,17 @@ impl<'a> Editing<'a> {
         }
     }
 
-    /// Whether the row the caret is in is waiting for the one thing it takes.
+    /// キャレットが存在する行がその 1 つのことを待っているかどうかtake.
     fn waiting(&self) -> bool {
         self.cursor.fills.last() == Some(&self.cursor.path.len())
     }
 
-    /// Marks the row the caret just entered as taking one thing only.
+    /// キャレットが入力した行を 1 つのものだけを取るものとしてマークします。
     fn wait_for_one(&mut self) {
         self.cursor.fills.push(self.cursor.path.len());
     }
 
-    /// Hands the caret back out of every row that was waiting for the one
-    /// thing now written into it, so writing goes on after the structure. The
-    /// formula itself can be waiting — one that was started by typing `1/`
-    /// exists only for that fraction — and then the caret goes back to the
-    /// text, which only the caller can do.
+    /// そこに書き込まれる 1 つのものを待機していたすべての行からキャレットを戻します。これにより、構造体の後に書き込みが続行されます。数式自体は待機状態になる可能性があります。つまり、「1/」と入力して開始された数式は、その分数に対してのみ存在します。その後、キャレットはテキストに戻りますが、これは呼び出し元だけが行うことができます。
     #[must_use]
     fn settle(&mut self, leave_formula: bool) -> Option<Escape> {
         while self.cursor.fills.last() == Some(&self.cursor.path.len()) {
@@ -203,8 +186,7 @@ impl<'a> Editing<'a> {
                     self.cursor.fills.pop();
                     self.caret_at(node + 1);
                 }
-                // The formula goes on holding what is built on it, so `a/b/c`
-                // stacks; it is only over once ordinary text follows.
+                // 数式は、その上に構築されたものを保持し続けるため、「a/b/c」はスタックされます。通常のテキストが続いて初めて終了します。
                 None if !leave_formula => return None,
                 None => {
                     self.cursor.fills.pop();
@@ -215,14 +197,12 @@ impl<'a> Editing<'a> {
         None
     }
 
-    /// Moving the caret is editing rather than writing on, so no row is left
-    /// waiting for its one thing.
+    /// キャレットの移動は書き込みではなく編集であるため、その 1 つの処理を待つ行はありません。
     fn stop_waiting(&mut self) {
         self.cursor.fills.clear();
     }
 
-    /// Turns a just-typed `\name` (or a typed glyph such as `√`) into the
-    /// structure it names, the way a Markdown editor expands a shortcut.
+    /// マークダウン エディタがショートカットを展開する方法と同じように、入力したばかりの `\name` (または入力された `√` などのグリフ) を、その名前の構造に変換します。
     pub fn commit_command(&mut self) -> bool {
         let index = self.cursor.index;
         let row = self.current_row();
@@ -254,13 +234,9 @@ impl<'a> Editing<'a> {
         true
     }
 
-    /// Reports an escape when the character belongs outside the formula: the
-    /// caller writes it in the text there, unwritten here.
+    /// 文字が数式の外に属する場合、エスケープを報告します。呼び出し側は、その文字をテキストに書き込みます。ここには書かれていません。
     pub fn insert_char(&mut self, c: char) -> Option<Escape> {
-        // A row that is waiting takes the same run of characters `/` would have
-        // lifted into the upper row; writing anything else carries on outside
-        // the structure, so `a/b + 1` reads the way it is typed. Brackets
-        // opened straight away are that one thing instead: `a/(b + 1)`.
+        // 待機中の行には、上の行に持ち上げられる文字 `/` と同じ文字列が含まれます。それ以外の書き込みは構造体の外側で行われるため、「a/b + 1」は入力されたとおりに読み取られます。すぐに開いた括弧は、代わりに `a/(b + 1)` という 1 つのことです。
         if self.waiting()
             && !carries_on(c)
             && !(self.current_row().is_empty() && matches!(c, '(' | '['))
@@ -279,8 +255,7 @@ impl<'a> Editing<'a> {
                 body: Row::new(),
             }),
             ')' | ']' => return self.leave_group(),
-            // A grid grows by a column where the caret is; anywhere else `&` is
-            // just a character.
+            // グリッドは、キャレットがある列ごとに拡大します。それ以外の `&` は単なる文字です。
             '&' => {
                 if !self.grow_matrix(false) {
                     self.insert(Node::Char('&'));
@@ -291,8 +266,7 @@ impl<'a> Editing<'a> {
         None
     }
 
-    /// Typing `/` (or an arrow) puts whatever was just typed above it, the way
-    /// a person would write it on paper.
+    /// `/` (または矢印) を入力すると、紙に書くときと同じように、入力した内容がその上に配置されます。
     pub fn insert_stack(&mut self, between: Between) {
         self.take_selection();
         let index = self.cursor.index;
@@ -312,10 +286,7 @@ impl<'a> Editing<'a> {
         self.wait_for_one();
     }
 
-    /// Closing a delimiter moves the caret just past the group it closes, which
-    /// is the innermost bracket the caret is anywhere inside of: closing from a
-    /// denominator inside the brackets closes them all the same, the way it
-    /// would if the whole thing had been typed on one line.
+    /// 区切り文字を閉じると、キャレットが閉じたグループのすぐ前に移動します。これは、キャレットがその内側にある最も内側の括弧です。括弧内の分母から閉じると、すべてが同じように閉じられます。すべてが入力された場合と同様です。 1 行です。
     fn leave_group(&mut self) -> Option<Escape> {
         let mut depth = self.cursor.path.len();
         while depth > 0 {
@@ -325,8 +296,7 @@ impl<'a> Editing<'a> {
                 self.cursor.path.truncate(depth - 1);
                 self.cursor.fills.retain(|&at| at <= self.cursor.path.len());
                 self.caret_at(node + 1);
-                // The brackets were the one thing the row outside was waiting
-                // for, so `a/(b + c) + 1` goes on outside the fraction.
+                // 外側の行が待っていたのは括弧だけでした。そのため、分数の外側では `a/(b + c) + 1` が続きます。
                 return self.settle(true);
             }
             depth -= 1;
@@ -344,8 +314,7 @@ impl<'a> Editing<'a> {
             let row = self.current_row_mut();
             let node = row[index].clone();
             match node.slot_count() {
-                // Deleting a container keeps its content: the structure is
-                // peeled away instead of the user's work being thrown out.
+                // コンテナを削除すると、その内容が保持されます。ユーザーの作業が破棄されるのではなく、構造が剥がされます。
                 0 => {
                     row.remove(index);
                     self.caret_at(index);
@@ -367,7 +336,7 @@ impl<'a> Editing<'a> {
             }
             return None;
         }
-        // At the start of a slot: step out of the container to its left edge.
+        // スロットの開始時: コンテナの左端まで出ます。
         match self.cursor.path.pop() {
             Some((node, _)) => {
                 self.caret_at(node);
@@ -397,7 +366,7 @@ impl<'a> Editing<'a> {
 
     pub fn move_left(&mut self) -> Option<Escape> {
         self.stop_waiting();
-        // Moving off a selection just puts the caret at its edge.
+        // 選択範囲を離れると、キャレットがその端に配置されるだけです。
         if self.collapse(false) {
             return None;
         }
@@ -478,9 +447,7 @@ impl<'a> Editing<'a> {
         self.move_vertically(false)
     }
 
-    /// Walks up the path looking for a container with a slot above (or below)
-    /// the current one: numerator vs denominator, upper vs lower limit, or the
-    /// neighbouring row of a matrix.
+    /// 現在のスロットより上 (または下) にスロットがあるコンテナを探してパスを上っていきます: 分子と分母、上限と下限、または行列の隣接する行。
     fn move_vertically(&mut self, up: bool) -> bool {
         self.stop_waiting();
         self.collapse(!up);
@@ -538,8 +505,7 @@ impl<'a> Editing<'a> {
         self.caret_at(self.current_row().len());
     }
 
-    /// Places the caret at the very end of the formula, used when the caret
-    /// enters the field from the surrounding text on the right.
+    /// 右側の周囲のテキストからフィールドにキャレットが入るときに使用される、数式の最後にキャレットを配置します。
     pub fn move_to_end(&mut self) {
         *self.cursor = Cursor::root(self.root.len());
     }
@@ -548,7 +514,7 @@ impl<'a> Editing<'a> {
         *self.cursor = Cursor::root(0);
     }
 
-    /// Adds a row (or column) to the matrix the caret is currently inside.
+    /// 現在キャレットが入っている行列に行 (または列) を追加します。
     pub fn grow_matrix(&mut self, add_row: bool) -> bool {
         for depth in (0..self.cursor.path.len()).rev() {
             let (node_index, slot) = self.cursor.path[depth];
@@ -585,26 +551,19 @@ impl<'a> Editing<'a> {
     }
 }
 
-/// Whether a typed character builds on the structure just written instead of
-/// following it: `a/b/c` stacks, `a/b^2` gets a script.
+/// 入力された文字が基になるかどうかそれに従うのではなく、書き込まれたばかりの構造: `a/b/c` はスタックし、`a/b^2` はスクリプトを取得します。
 fn builds_on(c: char) -> bool {
     matches!(c, '/' | '^' | '_') || is_arrow(c)
 }
 
-/// Whether a typed character is part of the one thing a waiting row takes: the
-/// run `/` itself would have lifted into the upper row, a command being written
-/// (`\alpha`, `√`), or a script, which binds to the run it follows. These keep
-/// the formula going where anything else ends it.
+/// 入力された文字が待機行の一部であるかどうか: 実行 `/` 自体が上の行に移動するか、書き込まれているコマンド (`\alpha`、`√`)、またはそれに続く実行にバインドされるスクリプトです。これらは、他の何かが終了しても数式を継続します。
 fn carries_on(c: char) -> bool {
     c.is_alphanumeric()
         || matches!(c, '.' | '\\' | '^' | '_')
         || vocabulary::node_for_glyph(c).is_some()
 }
 
-/// Whether the row this structure opens takes one thing and then hands the
-/// caret back. These are the structures a one-dimensional reading writes
-/// without brackets — `√2 + 1`, `x^2 + 1` — so writing them has to end the
-/// same way. Anything longer is bracketed: `√(a + b)`.
+/// この構造体が開く行が 1 つのことを実行してからキャレットを戻すかどうか。これらは、1 次元の読み取りで括弧なしで書き込まれる構造 (`√2 + 1`、`x^2 + 1`) なので、書き込みは同じ方法で終了する必要があります。それより長いものは括弧で囲まれます: `√(a + b)`。
 fn waits_for_one(node: &Node) -> bool {
     matches!(
         node,
@@ -612,8 +571,7 @@ fn waits_for_one(node: &Node) -> bool {
     )
 }
 
-/// Finds where the implicit upper row starts when `/` is typed: the run of
-/// characters (or the single group) immediately before the caret.
+/// `/` が入力されたときに暗黙的に上の行が始まる場所を見つけます。つまり、キャレットの直前の一連の文字 (または単一のグループ) です。
 fn above_start(row: &Row, index: usize) -> usize {
     if index == 0 {
         return 0;
@@ -633,7 +591,7 @@ fn above_start(row: &Row, index: usize) -> usize {
     }
 }
 
-/// Finds the `\` that starts the command word ending at the caret.
+/// キャレットで終わるコマンド ワードを開始する `\` を見つけます。
 fn command_start(row: &Row, index: usize) -> Option<usize> {
     let mut start = index;
     while start > 0 {
@@ -649,11 +607,10 @@ fn command_start(row: &Row, index: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// Only the fixtures here go through the notation; nothing outside a test
-    /// in this layer may know how a structure is written.
+    /// ここでのフィクスチャのみが表記法を通過します。この層のテスト以外には、構造体がどのように書かれているかを知るものは何もありません。
     use crate::format::notation;
 
-    /// An island on its own, standing in for the document that would hold it.
+    /// 独立したアイランドで、それを保持するドキュメントの代わりをします。
     struct Island {
         root: Row,
         cursor: Cursor,
@@ -732,12 +689,11 @@ mod tests {
     fn a_closing_bracket_leaves_the_brackets_from_inside_a_fraction() {
         let mut island = Island::new();
         island.type_in("1/(2/3)+4");
-        // `+4` follows the fraction instead of falling into its lower row.
+        // `+4` は、その下の行に落ちずに分数をたどります。
         assert_eq!(island.to_notation(), "$(1/($(2/3)))+4");
     }
 
-    /// The lower row takes the run `/` itself would have lifted up, and hands
-    /// the caret back, so what is typed reads the way it is written on a line.
+    /// 下の行は、`/` 自体が持ち上げられてキャレットを戻すので、入力された内容は、行に書かれたとおりに読み取られます。
     #[test]
     fn a_lower_row_takes_one_run_and_then_hands_the_caret_back() {
         let mut island = Island::new();
@@ -853,15 +809,15 @@ mod tests {
         let mut island = Island::from_notation("1/2");
         island.edit().move_to_end();
         island.edit().move_left();
-        // Moving into the fraction from the right lands in its lower row.
+        // 右から分数に移動すると、その分数に移動します。
         assert_eq!(island.cursor.path, vec![(0, 1)]);
         assert_eq!(island.edit().extend(false), None);
         assert_eq!((island.cursor.start(), island.cursor.end()), (0, 1));
-        // Reaching past the row selects the fraction, in the row above it.
+        // その行を越えると、その上の行にある分数が選択されます。
         assert_eq!(island.edit().extend(false), None);
         assert_eq!(island.cursor.path, Vec::new());
         assert_eq!((island.cursor.start(), island.cursor.end()), (0, 1));
-        // And past the outermost row, the selection leaves the formula.
+        // 最も外側の行を超えると、選択は数式から外れます。
         assert_eq!(island.edit().extend(false), Some(Escape::Left));
     }
 
@@ -875,7 +831,7 @@ mod tests {
         assert!(island.cursor.is_caret());
     }
 
-    /// A paste puts structures in as they are: no shortcut runs again.
+    /// ペーストすると、構造がそのまま挿入されます。ショートカットは再度実行されません。
     #[test]
     fn a_pasted_row_goes_in_at_the_caret() {
         let mut island = Island::from_notation("x");
