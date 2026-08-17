@@ -585,16 +585,16 @@ impl<'a> Editing<'a> {
     }
 }
 
-/// Whether a typed character is part of the one thing a waiting row takes:
-/// the run `/` itself would have lifted into the upper row, a command being
-/// written (`\alpha`, `√`), or a script, which binds to the run it follows.
 /// Whether a typed character builds on the structure just written instead of
-/// following it: `a/b/c` stacks, `a/b^2` gets a script. These keep the formula
-/// going where anything else ends it.
+/// following it: `a/b/c` stacks, `a/b^2` gets a script.
 fn builds_on(c: char) -> bool {
     matches!(c, '/' | '^' | '_') || is_arrow(c)
 }
 
+/// Whether a typed character is part of the one thing a waiting row takes: the
+/// run `/` itself would have lifted into the upper row, a command being written
+/// (`\alpha`, `√`), or a script, which binds to the run it follows. These keep
+/// the formula going where anything else ends it.
 fn carries_on(c: char) -> bool {
     c.is_alphanumeric()
         || matches!(c, '.' | '\\' | '^' | '_')

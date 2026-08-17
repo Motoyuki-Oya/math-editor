@@ -8,7 +8,7 @@ use web_sys::MouseEvent;
 use super::commands::leave_math;
 use super::input;
 use super::session::{focus, redraw, Session};
-use crate::view::document::Hit;
+use crate::view::measure::Hit;
 
 /// Where a point in the view is, at whatever depth: the same question is asked
 /// of the text and of a structure, and one answer covers both.

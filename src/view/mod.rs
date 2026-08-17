@@ -6,7 +6,9 @@
 //! structures instead.
 //!
 //! [`row`] is the one component that draws a row, at every depth; [`document`]
-//! puts the lines together and measures what it drew.
+//! puts the lines together, and [`measure`] reads back where they landed so a
+//! caret can be placed and a click understood.
 
 pub mod document;
+pub mod measure;
 pub mod row;
