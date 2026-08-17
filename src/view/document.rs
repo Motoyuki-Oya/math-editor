@@ -13,6 +13,15 @@
 //! caret is a small absolutely placed element, which is how several carets can
 //! be shown at once, and how a caret inside a structure is the same caret as a
 //! caret in the text.
+//!
+//! Only the lines that can be seen are in the page. Above and below them sit
+//! two empty elements as tall as the lines they stand for, so the document
+//! scrolls its full length while the page holds a screenful of it. A line's
+//! height is kept once measured; a line never drawn is guessed at, which is why
+//! the scrollbar settles as the document is scrolled through.
+
+use std::cell::RefCell;
+use std::ops::Range;
 
 use web_sys::{Document, Element, HtmlElement};
 
@@ -26,12 +35,29 @@ const LINE_ATTR: &str = "data-line";
 /// The number shown beside a line. It sits in the margin, outside the row, so
 /// that nothing measuring the text can mistake it for part of the line.
 const NUMBER_CLASS: &str = "mn-number";
+/// Stands for the lines that are not in the page, so the document keeps its
+/// full length.
+const GAP_CLASS: &str = "mn-gap";
+
+/// How far past the screen lines are drawn, in screens. Scrolling by less than
+/// this shows lines that are already there.
+const MARGIN_SCREENS: f64 = 1.0;
+/// What a line is taken to be worth before it has ever been measured.
+const GUESS: f64 = 20.0;
+/// How far a block of column separators may pull the drawn range past the
+/// screen. Lining columns up needs the whole block, but not at any price.
+const BLOCK_LIMIT: usize = 200;
 
 pub struct View {
     /// Scrolls, and receives the mouse.
     pub root: HtmlElement,
     lines: Element,
     overlay: Element,
+    /// Every line's height as last measured; `0.0` for a line never drawn.
+    heights: RefCell<Vec<f64>>,
+    /// The lines that are in the page right now. Everything that measures the
+    /// page can only speak about these.
+    drawn: RefCell<Range<usize>>,
 }
 
 /// Where the caret is, which is all the drawing needs to know about it: a place
@@ -77,19 +103,48 @@ impl View {
             root,
             lines,
             overlay,
+            heights: RefCell::new(Vec::new()),
+            drawn: RefCell::new(0..0),
         })
     }
 
+    /// Draws after a change, bringing the caret's line into the page.
     pub fn draw(&self, text: &Text, sels: &[Sel], caret: &Caret<'_>, focused: bool) {
+        self.paint(text, sels, caret, focused, true);
+    }
+
+    /// Draws after a scroll, which must not move the view to the caret: the
+    /// scrollbar is the user's, not the caret's.
+    pub fn repaint(&self, text: &Text, sels: &[Sel], caret: &Caret<'_>, focused: bool) {
+        self.paint(text, sels, caret, focused, false);
+    }
+
+    fn paint(
+        &self,
+        text: &Text,
+        sels: &[Sel],
+        caret: &Caret<'_>,
+        focused: bool,
+        follow_caret: bool,
+    ) {
         let Some(doc) = self.lines.owner_document() else {
             return;
         };
+        self.fit_heights(text.line_count());
+        if follow_caret {
+            self.scroll_to_line(caret.at.line);
+        }
+        let window = self.widen_for_blocks(text, self.window(text));
         // Text an IME is composing belongs at the caret, whichever row that is
         // in: the component that draws the row puts it there.
         let (path, index) = caret.place();
         let preedit = caret.composing.map(|text| Preedit { path, index, text });
         self.lines.set_inner_html("");
-        for line in 0..text.line_count() {
+        let above = element(&doc, "div", GAP_CLASS);
+        if let Some(gap) = &above {
+            append(&self.lines, gap);
+        }
+        for line in window.clone() {
             // Only the line the caret is on shows what is being composed.
             let here = preedit
                 .as_ref()
@@ -103,8 +158,119 @@ impl View {
                 append(&self.lines, &element);
             }
         }
-        self.align_columns(text);
+        let below = element(&doc, "div", GAP_CLASS);
+        if let Some(gap) = &below {
+            append(&self.lines, gap);
+        }
+        *self.drawn.borrow_mut() = window.clone();
+        // Measured first, so the two gaps stand for what the lines around them
+        // are really worth.
+        self.measure(&window);
+        if let Some(gap) = &above {
+            set_height(gap, self.span(0..window.start));
+        }
+        if let Some(gap) = &below {
+            set_height(gap, self.span(window.end..text.line_count()));
+        }
+        self.align_columns(text, &window);
         self.draw_carets(&doc, sels, caret, focused);
+    }
+
+    /// Keeps one height per line, so that a line's measurement outlives the
+    /// time it spends off screen.
+    fn fit_heights(&self, count: usize) {
+        let mut heights = self.heights.borrow_mut();
+        if heights.len() != count {
+            heights.resize(count, 0.0);
+        }
+    }
+
+    /// What a stretch of lines is worth: measured where it has been drawn, and
+    /// guessed at where it has not.
+    fn span(&self, lines: Range<usize>) -> f64 {
+        let heights = self.heights.borrow();
+        let unit = unit_height(&heights);
+        lines
+            .map(|line| match heights.get(line) {
+                Some(height) if *height > 0.0 => *height,
+                _ => unit,
+            })
+            .sum()
+    }
+
+    /// The lines the screen reaches, plus a screen above and below so that
+    /// scrolling a little needs no drawing at all.
+    fn window(&self, text: &Text) -> Range<usize> {
+        let count = text.line_count();
+        let height = self.root.client_height() as f64;
+        let margin = (height * MARGIN_SCREENS).max(200.0);
+        let scroll = self.root.scroll_top() as f64;
+        let (top, bottom) = (scroll - margin, scroll + height + margin);
+        let mut start = 0;
+        let mut y = 0.0;
+        while start + 1 < count {
+            let next = y + self.span(start..start + 1);
+            if next >= top {
+                break;
+            }
+            y = next;
+            start += 1;
+        }
+        let mut end = start;
+        while end < count && y <= bottom {
+            y += self.span(end..end + 1);
+            end += 1;
+        }
+        start..end.max(start + 1).min(count)
+    }
+
+    /// Widens the drawn range to whole blocks of column separators: lining a
+    /// column up is about the block, so a block cannot be drawn in halves.
+    fn widen_for_blocks(&self, text: &Text, window: Range<usize>) -> Range<usize> {
+        let count = text.line_count();
+        let mut start = window.start;
+        let floor = start.saturating_sub(BLOCK_LIMIT);
+        while start > floor && has_tab(text.line(start)) && has_tab(text.line(start - 1)) {
+            start -= 1;
+        }
+        let mut end = window.end;
+        let ceiling = (end + BLOCK_LIMIT).min(count);
+        while end < ceiling && has_tab(text.line(end - 1)) && has_tab(text.line(end)) {
+            end += 1;
+        }
+        start..end
+    }
+
+    /// Notes how tall the lines just drawn turned out to be.
+    fn measure(&self, window: &Range<usize>) {
+        let mut heights = self.heights.borrow_mut();
+        for line in window.clone() {
+            let Some(holder) = self.line_element(line) else {
+                continue;
+            };
+            let height = holder.get_bounding_client_rect().height();
+            if height > 0.0 {
+                if let Some(slot) = heights.get_mut(line) {
+                    *slot = height;
+                }
+            }
+        }
+    }
+
+    /// Brings a line into the screen when it is not there, which is what makes
+    /// a caret that jumped far (Ctrl+End, a search hit) reachable at all: only
+    /// drawn lines can be measured, so the view has to move first.
+    fn scroll_to_line(&self, line: usize) {
+        let height = self.root.client_height() as f64;
+        let scroll = self.root.scroll_top() as f64;
+        let top = self.span(0..line);
+        let bottom = top + self.span(line..line + 1);
+        if top >= scroll && bottom <= scroll + height {
+            return;
+        }
+        // A third of the way down, so that what follows the caret is visible.
+        self.root
+            .set_scroll_top((top - height / 3.0).max(0.0) as i32);
     }
 
     fn draw_line(
@@ -130,15 +296,15 @@ impl View {
     /// Lines up the column separators of neighbouring lines. This is the one
     /// thing a line does that a row inside a structure does not: it is about
     /// several lines at once, which only the document has.
-    fn align_columns(&self, text: &Text) {
-        let mut line = 0;
-        while line < text.line_count() {
+    fn align_columns(&self, text: &Text, window: &Range<usize>) {
+        let mut line = window.start;
+        while line < window.end {
             if !has_tab(text.line(line)) {
                 line += 1;
                 continue;
             }
             let mut end = line;
-            while end < text.line_count() && has_tab(text.line(end)) {
+            while end < window.end && has_tab(text.line(end)) {
                 end += 1;
             }
             self.align_block(line..end);
@@ -264,8 +430,13 @@ impl View {
         measure::boundary(&row, index)
     }
 
+    /// A line's element, by the line it stands for rather than by its place
+    /// among the children: only some of the lines are in the page.
     fn line_element(&self, line: usize) -> Option<Element> {
-        self.lines.children().item(line as u32)
+        self.lines
+            .query_selector(&format!("[{LINE_ATTR}=\"{line}\"]"))
+            .ok()
+            .flatten()
     }
 
     fn line_row(&self, line: usize) -> Option<Element> {
@@ -282,8 +453,12 @@ impl View {
     /// innermost row the point is in decides, so clicking a denominator lands
     /// in the denominator and not beside the fraction.
     pub fn hit(&self, text: &Text, x: f64, y: f64) -> Hit {
-        let mut line = text.line_count() - 1;
-        for candidate in 0..text.line_count() {
+        // Only what is in the page can be hit, so a click is answered with the
+        // drawn lines: everything else is not under the pointer anyway.
+        let drawn = self.drawn.borrow().clone();
+        let last = text.line_count() - 1;
+        let mut line = drawn.end.saturating_sub(1).min(last);
+        for candidate in drawn {
             let Some(holder) = self.line_element(candidate) else {
                 continue;
             };
@@ -368,6 +543,27 @@ fn set_box(element: &Element, rect: Box2, origin: &web_sys::DomRect) {
         rect.height
     );
     element.set_attribute("style", &style).ok();
+}
+
+fn set_height(element: &Element, height: f64) {
+    element
+        .set_attribute("style", &format!("height:{height}px"))
+        .ok();
+}
+
+/// What an unmeasured line is taken to be worth: what the measured ones are,
+/// on average, so a document of tall lines is not guessed at as short ones.
+fn unit_height(heights: &[f64]) -> f64 {
+    let mut total = 0.0;
+    let mut seen = 0;
+    for height in heights.iter().filter(|height| **height > 0.0) {
+        total += *height;
+        seen += 1;
+    }
+    if seen == 0 {
+        return GUESS;
+    }
+    total / seen as f64
 }
 
 fn has_tab(items: &[Item]) -> bool {

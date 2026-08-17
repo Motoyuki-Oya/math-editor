@@ -286,6 +286,12 @@ body {
   min-height: 1.6em;
 }
 
+/* Stands for the lines that are not in the page, above and below the ones that
+   are, so the document scrolls its full length. */
+.mn-gap {
+  pointer-events: none;
+}
+
 /* The number of a line, in the margin. It belongs to the line but not to its
    text, so it sits outside the row and never takes the mouse. */
 .mn-number {
