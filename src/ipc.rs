@@ -1,6 +1,6 @@
 //! Calls into the Tauri backend (file dialogs and disk access).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -102,6 +102,61 @@ pub async fn write_settings(contents: &str) {
         contents: &'a str,
     }
     let _ = call("write_settings", ContentsArg { contents }).await;
+}
+
+/// What was on screen last time, whether it had been saved or not.
+pub struct Draft {
+    pub id: usize,
+    pub path: Option<String>,
+    pub contents: String,
+}
+
+pub async fn write_draft(id: usize, path: Option<&str>, contents: &str) {
+    #[derive(Serialize)]
+    struct DraftArgs<'a> {
+        id: String,
+        path: Option<&'a str>,
+        contents: &'a str,
+    }
+    let _ = call(
+        "write_draft",
+        DraftArgs {
+            id: id.to_string(),
+            path,
+            contents,
+        },
+    )
+    .await;
+}
+
+pub async fn remove_draft(id: usize) {
+    #[derive(Serialize)]
+    struct IdArg {
+        id: String,
+    }
+    let _ = call("remove_draft", IdArg { id: id.to_string() }).await;
+}
+
+pub async fn read_drafts() -> Vec<Draft> {
+    #[derive(Deserialize)]
+    struct Raw {
+        id: String,
+        path: Option<String>,
+        contents: String,
+    }
+    let Ok(value) = call("read_drafts", NoArgs {}).await else {
+        return Vec::new();
+    };
+    let raw: Vec<Raw> = serde_wasm_bindgen::from_value(value).unwrap_or_default();
+    raw.into_iter()
+        .filter_map(|raw| {
+            Some(Draft {
+                id: raw.id.parse().ok()?,
+                path: raw.path,
+                contents: raw.contents,
+            })
+        })
+        .collect()
 }
 
 pub async fn frontend_ready() {

@@ -5,15 +5,30 @@ use leptos::prelude::*;
 use leptos::reactive::owner::{LocalStorage, Owner};
 use leptos::task::spawn_local;
 
+use super::drafts;
 use crate::editor;
 use crate::ipc;
 
 const UNTITLED: &str = "無題";
 
+thread_local! {
+    /// Names the next tab. A tab's number is also the name of its draft, so it
+    /// has to outlive the tab itself: a restored draft keeps its number.
+    static NEXT_ID: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn next_id() -> usize {
+    let id = NEXT_ID.get();
+    NEXT_ID.set(id + 1);
+    id
+}
+
 /// One open file. The document itself lives in the editor while the tab is
 /// shown, and is parked here while another tab is.
 #[derive(Clone, Copy)]
 pub(super) struct Tab {
+    /// Names this tab's draft on disk.
+    pub(super) id: RwSignal<usize>,
     pub(super) path: RwSignal<Option<String>>,
     pub(super) dirty: RwSignal<bool>,
     pub(super) parked: StoredValue<Option<editor::Parked>, LocalStorage>,
@@ -22,6 +37,7 @@ pub(super) struct Tab {
 impl Tab {
     pub(super) fn new() -> Tab {
         Tab {
+            id: RwSignal::new(next_id()),
             path: RwSignal::new(None),
             dirty: RwSignal::new(false),
             parked: StoredValue::new_local(None),
@@ -77,7 +93,13 @@ impl Pane {
     /// Takes the shown document off screen, keeping it with its tab.
     pub(super) fn park(&self) {
         let pane = self.editor_pane();
-        self.tab_untracked().parked.set_value(editor::park(pane));
+        let tab = self.tab_untracked();
+        // Written now: once the document is off screen the draft cannot read
+        // it from the pane any more.
+        if tab.dirty.get_untracked() {
+            drafts::write(tab, pane);
+        }
+        tab.parked.set_value(editor::park(pane));
     }
 }
 
@@ -174,11 +196,15 @@ impl Shell {
             tab.dirty.set(true);
             self.sync_dirty();
         }
+        drafts::touch(tab, editor_pane);
         self.refresh();
     }
 
+    /// The document now matches its file, so its draft has nothing to restore.
     pub(super) fn mark_clean(&self) {
-        self.tab_untracked().dirty.set(false);
+        let tab = self.tab_untracked();
+        tab.dirty.set(false);
+        drafts::forget(tab);
         self.sync_dirty();
         self.refresh();
     }
@@ -237,9 +263,13 @@ impl Shell {
     pub(super) fn show(&self, pane: Pane, tab: Tab) {
         let dirty = tab.dirty.get_untracked();
         let parked = tab.parked.try_update_value(Option::take).flatten();
-        // Drawing the document counts as a change, so the mark is set back.
+        // Drawing the document counts as a change, so the mark is set back —
+        // and with it the draft, which drawing must not create either.
         editor::restore(pane.editor_pane(), parked);
         tab.dirty.set(dirty);
+        if !dirty {
+            drafts::forget(tab);
+        }
         self.sync_dirty();
         self.refresh();
         editor::focus_pane(pane.editor_pane());
@@ -276,9 +306,13 @@ impl Shell {
             {
                 return;
             }
+            // Thrown away on purpose.
+            drafts::forget(tab);
             let current = pane.current.get_untracked();
             if pane.tabs.with_untracked(Vec::len) == 1 {
                 // The last tab stays, emptied, so there is always a document.
+                // It becomes a new tab as far as drafts go.
+                tab.id.set(next_id());
                 tab.path.set(None);
                 editor::restore(pane.editor_pane(), None);
                 tab.dirty.set(false);
@@ -363,6 +397,28 @@ impl Shell {
                 Err(error) => shell.status.set(error),
             }
         });
+    }
+
+    /// Opens what was on screen when the application last stopped. The drafts
+    /// come back as unsaved tabs, keeping their numbers so that a second stop
+    /// overwrites the same drafts.
+    pub(super) fn restore_drafts(&self, drafts: Vec<ipc::Draft>) {
+        if drafts.is_empty() {
+            return;
+        }
+        let highest = drafts.iter().map(|draft| draft.id).max().unwrap_or(0);
+        NEXT_ID.set(NEXT_ID.get().max(highest + 1));
+        let pane = self.pane_untracked();
+        for draft in drafts {
+            let tab = self.add_tab(pane);
+            tab.id.set(draft.id);
+            editor::load(&draft.contents);
+            tab.path.set(draft.path);
+            tab.dirty.set(true);
+        }
+        self.sync_dirty();
+        self.refresh();
+        self.status.set("前回の編集内容を復元しました".into());
     }
 
     pub(super) fn save(&self, force_dialog: bool) {

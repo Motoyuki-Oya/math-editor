@@ -15,6 +15,6 @@ mod trigger;
 pub use commands::{find_next, insert_math, insert_node, redo, replace_all, undo};
 pub use search::SearchOptions;
 pub use session::{
-    close_pane, focus_pane, init, load, park, redraw_all, restore, set_on_change, stats,
-    to_document, Parked,
+    close_pane, document_of, focus_pane, init, load, park, redraw_all, restore, set_on_change,
+    stats, to_document, Parked,
 };
