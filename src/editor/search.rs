@@ -60,7 +60,7 @@ pub struct SearchOptions {
     pub case_sensitive: bool,
 }
 
-/// コンパイル済みの検索パターン。正規表現または長大なリテラル検索は `regex` クレート、
+/// コンパイル済みの検索パターン。正規表現または長大な run は `regex` クレート、
 /// それ以外は Boyer-Moore 法で検索します。
 #[derive(Debug)]
 enum Matcher {
@@ -70,6 +70,7 @@ enum Matcher {
         case_sensitive: bool,
         bad_char: HashMap<char, usize>,
         good_suffix: Vec<usize>,
+        regex: Regex,
     },
 }
 
@@ -82,8 +83,7 @@ pub fn find_next(text: &Text, query: &str, options: SearchOptions, from: Key) ->
 }
 
 pub fn find_all(text: &Text, query: &str, options: SearchOptions) -> Vec<Found> {
-    let text_len = total_bytes(text);
-    let Some(matcher) = compile(query, options, Some(text_len)) else {
+    let Some(matcher) = compile(query, options) else {
         return Vec::new();
     };
     let mut found = Vec::new();
@@ -151,6 +151,9 @@ fn search_row(
 fn matches(matcher: &Matcher, run: &str) -> Vec<(usize, usize, Vec<String>)> {
     match matcher {
         Matcher::Regex(regex) => regex_matches(regex, run),
+        Matcher::Literal { regex, .. } if run.len() > LITERAL_REGEX_THRESHOLD => {
+            regex_matches(regex, run)
+        }
         Matcher::Literal { .. } => literal_matches(matcher, run),
     }
 }
@@ -198,6 +201,7 @@ fn literal_matches(matcher: &Matcher, run: &str) -> Vec<(usize, usize, Vec<Strin
         case_sensitive,
         bad_char,
         good_suffix,
+        ..
     } = matcher
     else {
         unreachable!("literal_matches called with a non-literal matcher")
@@ -385,7 +389,7 @@ fn char_of(starts: &[usize], unit: usize) -> Option<usize> {
     starts.iter().position(|start| *start == unit)
 }
 
-/// リテラル検索で `regex` クレートに切り替えるファイルサイズの仮の閾値（UTF-8 バイト数）。
+/// リテラル検索で `regex` クレートに切り替える run の長さの仮の閾値（UTF-8 バイト数）。
 const LITERAL_REGEX_THRESHOLD: usize = 100_000;
 
 fn build_regex(pattern: &str, case_sensitive: bool) -> Option<Regex> {
@@ -395,76 +399,37 @@ fn build_regex(pattern: &str, case_sensitive: bool) -> Option<Regex> {
         .ok()
 }
 
-/// 文書全体のおおよその UTF-8 バイト数を返します。
-fn total_bytes(text: &Text) -> usize {
-    (0..text.line_count())
-        .map(|line| text.line(line).iter().map(item_bytes).sum::<usize>())
-        .sum()
-}
-
-fn item_bytes(item: &Item) -> usize {
-    match item {
-        Item::Char(c) => c.len_utf8(),
-        Item::Tab => 1,
-        Item::Math(row) => row_bytes(row),
-    }
-}
-
-fn row_bytes(row: &Row) -> usize {
-    row.iter().map(node_bytes).sum()
-}
-
-fn node_bytes(node: &Node) -> usize {
-    let mut count = match node {
-        Node::Char(c) => c.len_utf8(),
-        Node::Sym(s) | Node::Func(s) => s.len(),
-        Node::Limits { sym, .. } => sym.len(),
-        _ => 0,
-    };
-    for i in 0..node.slot_count() {
-        if let Some(row) = node.slot(i) {
-            count += row_bytes(row);
-        }
-    }
-    count
-}
-
-/// コンパイル済みの検索パターンを作成します。正規表現または長大なリテラル検索は `regex` クレート、
+/// コンパイル済みの検索パターンを作成します。正規表現または長大な run は `regex` クレート、
 /// それ以外は Boyer-Moore 法を使います。
-fn compile(query: &str, options: SearchOptions, text_len: Option<usize>) -> Option<Matcher> {
+fn compile(query: &str, options: SearchOptions) -> Option<Matcher> {
     if query.is_empty() {
         return None;
     }
-    let use_regex = options.regex || text_len.is_some_and(|len| len > LITERAL_REGEX_THRESHOLD);
-    if use_regex {
-        let pattern = if options.regex {
-            query.to_string()
-        } else {
-            regex::escape(query)
-        };
-        build_regex(&pattern, options.case_sensitive).map(Matcher::Regex)
-    } else {
-        let pattern: Vec<char> = if options.case_sensitive {
-            query.chars().collect()
-        } else {
-            query.to_lowercase().chars().collect()
-        };
-        let m = pattern.len();
-        if m == 0 {
-            return None;
-        }
-        let mut bad_char = HashMap::new();
-        for (i, c) in pattern.iter().enumerate() {
-            bad_char.insert(*c, i);
-        }
-        let good_suffix = build_good_suffix(&pattern);
-        Some(Matcher::Literal {
-            pattern,
-            case_sensitive: options.case_sensitive,
-            bad_char,
-            good_suffix,
-        })
+    if options.regex {
+        return build_regex(query, options.case_sensitive).map(Matcher::Regex);
     }
+    let pattern: Vec<char> = if options.case_sensitive {
+        query.chars().collect()
+    } else {
+        query.to_lowercase().chars().collect()
+    };
+    let m = pattern.len();
+    if m == 0 {
+        return None;
+    }
+    let mut bad_char = HashMap::new();
+    for (i, c) in pattern.iter().enumerate() {
+        bad_char.insert(*c, i);
+    }
+    let good_suffix = build_good_suffix(&pattern);
+    let regex = build_regex(&regex::escape(query), options.case_sensitive)?;
+    Some(Matcher::Literal {
+        pattern,
+        case_sensitive: options.case_sensitive,
+        bad_char,
+        good_suffix,
+        regex,
+    })
 }
 
 /// Z-関数に基づく suffix テーブル。good-suffix テーブルの計算に使います。
@@ -726,7 +691,7 @@ mod tests {
         let rounds = 100;
 
         for (text, query) in cases {
-            let Some(matcher) = compile(query, options, None) else {
+            let Some(matcher) = compile(query, options) else {
                 panic!("literal pattern should compile");
             };
             let Some(re) = compile_regex_crate(query, options) else {
