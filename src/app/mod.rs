@@ -42,10 +42,10 @@ pub fn App() -> impl IntoView {
         keys::install_shortcuts(shell);
         menu::install(shell);
         spawn_local(async move {
-            settings::apply(settings::read(&ipc::read_settings().await));
+            // 起動もユーザーの変更と同じ入口を通ります。適用だけでは、保存されていた行番号や折り返しが最初の画面に出ず、メニューのチェックと食い違います。
+            preferences::take_effect(settings::read(&ipc::read_settings().await));
             // 保存された設定がある場所にメニューのチェック マークが付けられます。
             menu::show_state(shell);
-            // ペインはすでに存在しています。設定を読み取ると、その順番を構築する効果が与えられます。
             shell.restore_drafts(ipc::read_drafts().await);
             ipc::frontend_ready().await;
         });
