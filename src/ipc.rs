@@ -199,6 +199,8 @@ pub async fn read_drafts() -> Vec<Draft> {
         .collect()
 }
 
+/// 開いている文書のファイルサイズを返します。保存済みならそのファイル、未保存なら下書き
+/// ファイルのサイズです。どちらも読めないときは `None` を返します（エラーにはしません）。
 pub async fn file_size(path: Option<&str>, id: usize) -> Option<usize> {
     #[derive(Serialize)]
     struct FileSizeArgs<'a> {

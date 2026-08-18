@@ -395,7 +395,7 @@ fn char_of(starts: &[usize], unit: usize) -> Option<usize> {
     starts.iter().position(|start| *start == unit)
 }
 
-/// リテラル検索で `regex` クレートに切り替えるファイルサイズの仮の閾値（UTF-8 バイト数）。
+/// リテラル検索で `regex` クレートに切り替えるファイルサイズの仮の閾値（バイト数）。
 const LITERAL_REGEX_THRESHOLD: usize = 100_000;
 
 fn build_regex(pattern: &str, case_sensitive: bool) -> Option<Regex> {
@@ -406,12 +406,13 @@ fn build_regex(pattern: &str, case_sensitive: bool) -> Option<Regex> {
 }
 
 /// コンパイル済みの検索パターンを作成します。正規表現または長大なファイルは `regex` クレート、
-/// それ以外は Boyer-Moore 法を使います。
+/// それ以外は Boyer-Moore 法を使います。`file_size` が `None`（ファイルも下書きも読めず
+/// 大きさが分からない）ときは安全側に寄せて `regex` クレートを使います。
 fn compile(query: &str, options: SearchOptions, file_size: Option<usize>) -> Option<Matcher> {
     if query.is_empty() {
         return None;
     }
-    let large_file = file_size.is_some_and(|size| size > LITERAL_REGEX_THRESHOLD);
+    let large_file = file_size.is_none_or(|size| size > LITERAL_REGEX_THRESHOLD);
     let use_regex = options.regex || large_file;
     if use_regex {
         let pattern = if options.regex {
@@ -597,6 +598,27 @@ mod tests {
         assert_eq!(char_of(&starts, 2), Some(2));
     }
 
+    /// Boyer-Moore 法を使う十分に小さいファイルを表します。
+    const SMALL_FILE: Option<usize> = Some(0);
+
+    /// ファイルサイズが分からないときは `regex` クレートに寄せます。
+    #[test]
+    fn an_unknown_file_size_falls_back_to_the_regex_crate() {
+        let options = SearchOptions::default();
+        assert!(matches!(
+            compile("abc", options, None),
+            Some(Matcher::Regex(_))
+        ));
+        assert!(matches!(
+            compile("abc", options, SMALL_FILE),
+            Some(Matcher::Literal { .. })
+        ));
+        assert!(matches!(
+            compile("abc", options, Some(LITERAL_REGEX_THRESHOLD + 1)),
+            Some(Matcher::Regex(_))
+        ));
+    }
+
     /// リテラル検索は正規表現のメタ文字をただの文字として扱います。
     #[test]
     fn literal_queries_treat_metacharacters_as_text() {
@@ -606,7 +628,7 @@ mod tests {
             Item::Char('b'),
             Item::Char('*'),
         ]]);
-        let found = find_all(&text, "a.b*", SearchOptions::default(), None);
+        let found = find_all(&text, "a.b*", SearchOptions::default(), SMALL_FILE);
         assert_eq!(found.len(), 1);
         if let Place::Text(sel) = &found[0].place {
             assert_eq!(sel.start(), Pos::new(0, 0));
@@ -633,7 +655,7 @@ mod tests {
                 regex: false,
                 case_sensitive: false,
             },
-            None,
+            SMALL_FILE,
         );
         assert_eq!(found.len(), 2);
         if let (Place::Text(first), Place::Text(second)) = (&found[0].place, &found[1].place) {
@@ -655,7 +677,7 @@ mod tests {
             Item::Char('a'),
             Item::Char('a'),
         ]]);
-        let found = find_all(&text, "aa", SearchOptions::default(), None);
+        let found = find_all(&text, "aa", SearchOptions::default(), SMALL_FILE);
         assert_eq!(found.len(), 3);
     }
 
@@ -667,7 +689,7 @@ mod tests {
             Item::Math(vec![Node::Char('b'), Node::Char('c')]),
             Item::Char('d'),
         ]]);
-        let found = find_all(&text, "bc", SearchOptions::default(), None);
+        let found = find_all(&text, "bc", SearchOptions::default(), SMALL_FILE);
         assert_eq!(found.len(), 1);
         assert!(matches!(found[0].place, Place::Inside { .. }));
     }
@@ -704,7 +726,7 @@ mod tests {
         let rounds = 100;
 
         for (text, query) in cases {
-            let Some(matcher) = compile(query, options, None) else {
+            let Some(matcher) = compile(query, options, SMALL_FILE) else {
                 panic!("literal pattern should compile");
             };
             let Some(re) = compile_regex_crate(query, options) else {
