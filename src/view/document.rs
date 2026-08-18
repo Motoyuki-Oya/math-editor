@@ -105,6 +105,7 @@ impl View {
         follow_caret: bool,
     ) {
         self.heights.borrow_mut().fit(text.line_count());
+        self.fit_numbers(text.line_count());
         // ビューはどこにあるのか内容は次のようになります: 何かが変更されたときのキャレット、およびユーザーがスクロールしたときにそこから離れた場所。
         let mut scroll = match follow_caret {
             true => self.scroll_for(caret.at.line, text.line_count()),
@@ -132,6 +133,18 @@ impl View {
             }
             scroll = self.render(text, sels, caret, focused, settled);
         }
+    }
+
+    /// 行番号の幅を、この文書の一番大きい番号に合わせます。番号の幅は文字の測りごとなので、設定は番号を出すかどうかだけを言います。
+    fn fit_numbers(&self, count: usize) {
+        let style = self.root.style();
+        if !crate::settings::line_numbers() {
+            style.remove_property("--setting-gutter").ok();
+            return;
+        }
+        let digits = count.max(1).to_string().len();
+        let width = format!("calc({digits}ch + 1.4em)");
+        style.set_property("--setting-gutter", &width).ok();
     }
 
     /// 線全体を表示するスクロール、または線がすでに見えている場合は `scroll`。描かれた線が測定されるものであるため、その上の線を推測しても答えは変わりません。視界に入った線は、必要以上に遠くに表示されます。これは、ビューの端と同じ高さの線がそこに存在しないものとして読み取られるためです。ドキュメントの最後で、ブラウザは余分な部分をトリミングしますが、パディングによってスペースが確保されます。
