@@ -26,8 +26,8 @@ pub struct Session {
     pub search_from: Option<search::Key>,
 }
 
-/// ドキュメントが変更されたペインで呼び出されます。
-type OnChange = Box<dyn Fn(usize)>;
+/// ドキュメントが変更されたペインで呼び出されます。呼び出し中に再び変更が起きてもよいよう、台帳の借用の外で呼べる共有の参照で持ちます。
+type OnChange = Rc<dyn Fn(usize)>;
 
 thread_local! {
     /// ペインごとに 1 つのセッション画面。分割ビューはリストを作成します。
@@ -124,13 +124,13 @@ pub fn changed(session: &Rc<RefCell<Session>>) {
     session.borrow_mut().search_from = None;
     redraw(session);
     let pane = session.borrow().pane;
-    let callback = ON_CHANGE.with(|slot| slot.borrow_mut().take());
+    let callback = ON_CHANGE.with(|slot| slot.borrow().clone());
     if let Some(callback) = callback {
         callback(pane);
-        ON_CHANGE.with(|slot| *slot.borrow_mut() = Some(callback));
     }
 }
 
+/// 描き直してキャレットの行を見せ、隠しの入力欄をキャレットの場所についていかせます (IME の候補窓がそこに出ます)。
 pub fn redraw(session: &Rc<RefCell<Session>>) {
     let session = session.borrow();
     let caret = caret_of(&session);
@@ -141,13 +141,7 @@ pub fn redraw(session: &Rc<RefCell<Session>>) {
         session.focused,
     );
     if let Some(rect) = session.view.reveal(&caret) {
-        let style = format!(
-            "left:{}px;top:{}px;height:{}px",
-            rect.left,
-            rect.top,
-            rect.height.max(16.0)
-        );
-        session.textarea.set_attribute("style", &style).ok();
+        input::follow_caret(&session.textarea, rect);
     }
 }
 
@@ -180,10 +174,6 @@ pub fn redraw_all() {
     }
 }
 
-pub fn sync_input_box(session: &Rc<RefCell<Session>>) {
-    redraw(session);
-}
-
 pub fn focus() {
     let Some(session) = session() else { return };
     let textarea = session.borrow().textarea.clone();
@@ -195,7 +185,7 @@ pub fn focus() {
     }
 }
 
-/// Aドキュメント全体。別のタブが表示されている間脇に置かれます。
+/// 脇に置かれた文書 1 つ分。別のタブが表示されている間、ここに保ちます。
 pub struct Parked {
     editor: Editor,
 }
