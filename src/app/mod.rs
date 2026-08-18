@@ -38,7 +38,7 @@ pub fn App() -> impl IntoView {
     };
 
     Effect::new(move |_| {
-        editor::set_on_change(Box::new(move |pane| shell.mark_dirty(pane)));
+        editor::set_on_change(std::rc::Rc::new(move |pane| shell.mark_dirty(pane)));
         keys::install_shortcuts(shell);
         menu::install(shell);
         spawn_local(async move {

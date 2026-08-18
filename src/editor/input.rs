@@ -31,6 +31,17 @@ pub fn build(doc: &Document, root: &HtmlElement) -> Option<HtmlTextAreaElement> 
     Some(textarea)
 }
 
+/// 隠しの入力欄をキャレットの場所 (文書座標) に置きます。IME の候補窓はこの欄のそばに出るので、変換中の文字の近くに見えます。
+pub(super) fn follow_caret(textarea: &HtmlTextAreaElement, rect: crate::view::measure::Box2) {
+    let style = format!(
+        "left:{}px;top:{}px;height:{}px",
+        rect.left,
+        rect.top,
+        rect.height.max(16.0)
+    );
+    textarea.set_attribute("style", &style).ok();
+}
+
 /// エディターを使用可能にするイベントを結び付けます。
 pub fn install(session: &Rc<RefCell<Session>>) {
     let textarea = session.borrow().textarea.clone();
@@ -54,7 +65,7 @@ pub fn install(session: &Rc<RefCell<Session>>) {
         |session, _: CompositionEvent| {
             session.borrow_mut().composing = true;
             session.borrow_mut().preedit.clear();
-            session::sync_input_box(session);
+            session::redraw(session);
         },
     );
     on(
