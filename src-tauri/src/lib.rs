@@ -119,6 +119,22 @@ fn write_draft(
 }
 
 #[tauri::command]
+fn file_size(app: tauri::AppHandle, path: Option<String>, id: String) -> Result<u64, String> {
+    let target = match path {
+        Some(p) => PathBuf::from(p),
+        None => {
+            let Some(dir) = drafts_dir(&app) else {
+                return Err("下書きの保存先がありません".to_string());
+            };
+            dir.join(draft_name(&id))
+        }
+    };
+    std::fs::metadata(&target)
+        .map(|m| m.len())
+        .map_err(|e| format!("ファイルサイズを取得できませんでした: {e}"))
+}
+
+#[tauri::command]
 fn remove_draft(app: tauri::AppHandle, id: String) {
     if let Some(dir) = drafts_dir(&app) {
         std::fs::remove_file(dir.join(draft_name(&id))).ok();
@@ -315,6 +331,7 @@ pub fn run() {
             write_draft,
             remove_draft,
             read_drafts,
+            file_size,
             menu::sync_view_menu
         ])
         .run(tauri::generate_context!())

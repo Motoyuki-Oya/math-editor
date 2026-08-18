@@ -60,7 +60,7 @@ pub struct SearchOptions {
     pub case_sensitive: bool,
 }
 
-/// コンパイル済みの検索パターン。正規表現または長大な run は `regex` クレート、
+/// コンパイル済みの検索パターン。正規表現または長大なファイルは `regex` クレート、
 /// それ以外は Boyer-Moore 法で検索します。
 #[derive(Debug)]
 enum Matcher {
@@ -70,20 +70,30 @@ enum Matcher {
         case_sensitive: bool,
         bad_char: HashMap<char, usize>,
         good_suffix: Vec<usize>,
-        regex: Regex,
     },
 }
 
-pub fn find_next(text: &Text, query: &str, options: SearchOptions, from: Key) -> Option<Found> {
-    let all = find_all(text, query, options);
+pub fn find_next(
+    text: &Text,
+    query: &str,
+    options: SearchOptions,
+    file_size: Option<usize>,
+    from: Key,
+) -> Option<Found> {
+    let all = find_all(text, query, options, file_size);
     all.iter()
         .find(|found| found.place.start() >= from)
         .or_else(|| all.first())
         .cloned()
 }
 
-pub fn find_all(text: &Text, query: &str, options: SearchOptions) -> Vec<Found> {
-    let Some(matcher) = compile(query, options) else {
+pub fn find_all(
+    text: &Text,
+    query: &str,
+    options: SearchOptions,
+    file_size: Option<usize>,
+) -> Vec<Found> {
+    let Some(matcher) = compile(query, options, file_size) else {
         return Vec::new();
     };
     let mut found = Vec::new();
@@ -151,9 +161,6 @@ fn search_row(
 fn matches(matcher: &Matcher, run: &str) -> Vec<(usize, usize, Vec<String>)> {
     match matcher {
         Matcher::Regex(regex) => regex_matches(regex, run),
-        Matcher::Literal { regex, .. } if run.len() > LITERAL_REGEX_THRESHOLD => {
-            regex_matches(regex, run)
-        }
         Matcher::Literal { .. } => literal_matches(matcher, run),
     }
 }
@@ -201,7 +208,6 @@ fn literal_matches(matcher: &Matcher, run: &str) -> Vec<(usize, usize, Vec<Strin
         case_sensitive,
         bad_char,
         good_suffix,
-        ..
     } = matcher
     else {
         unreachable!("literal_matches called with a non-literal matcher")
@@ -389,7 +395,7 @@ fn char_of(starts: &[usize], unit: usize) -> Option<usize> {
     starts.iter().position(|start| *start == unit)
 }
 
-/// リテラル検索で `regex` クレートに切り替える run の長さの仮の閾値（UTF-8 バイト数）。
+/// リテラル検索で `regex` クレートに切り替えるファイルサイズの仮の閾値（UTF-8 バイト数）。
 const LITERAL_REGEX_THRESHOLD: usize = 100_000;
 
 fn build_regex(pattern: &str, case_sensitive: bool) -> Option<Regex> {
@@ -399,37 +405,43 @@ fn build_regex(pattern: &str, case_sensitive: bool) -> Option<Regex> {
         .ok()
 }
 
-/// コンパイル済みの検索パターンを作成します。正規表現または長大な run は `regex` クレート、
+/// コンパイル済みの検索パターンを作成します。正規表現または長大なファイルは `regex` クレート、
 /// それ以外は Boyer-Moore 法を使います。
-fn compile(query: &str, options: SearchOptions) -> Option<Matcher> {
+fn compile(query: &str, options: SearchOptions, file_size: Option<usize>) -> Option<Matcher> {
     if query.is_empty() {
         return None;
     }
-    if options.regex {
-        return build_regex(query, options.case_sensitive).map(Matcher::Regex);
-    }
-    let pattern: Vec<char> = if options.case_sensitive {
-        query.chars().collect()
+    let large_file = file_size.is_some_and(|size| size > LITERAL_REGEX_THRESHOLD);
+    let use_regex = options.regex || large_file;
+    if use_regex {
+        let pattern = if options.regex {
+            query.to_string()
+        } else {
+            regex::escape(query)
+        };
+        build_regex(&pattern, options.case_sensitive).map(Matcher::Regex)
     } else {
-        query.to_lowercase().chars().collect()
-    };
-    let m = pattern.len();
-    if m == 0 {
-        return None;
+        let pattern: Vec<char> = if options.case_sensitive {
+            query.chars().collect()
+        } else {
+            query.to_lowercase().chars().collect()
+        };
+        let m = pattern.len();
+        if m == 0 {
+            return None;
+        }
+        let mut bad_char = HashMap::new();
+        for (i, c) in pattern.iter().enumerate() {
+            bad_char.insert(*c, i);
+        }
+        let good_suffix = build_good_suffix(&pattern);
+        Some(Matcher::Literal {
+            pattern,
+            case_sensitive: options.case_sensitive,
+            bad_char,
+            good_suffix,
+        })
     }
-    let mut bad_char = HashMap::new();
-    for (i, c) in pattern.iter().enumerate() {
-        bad_char.insert(*c, i);
-    }
-    let good_suffix = build_good_suffix(&pattern);
-    let regex = build_regex(&regex::escape(query), options.case_sensitive)?;
-    Some(Matcher::Literal {
-        pattern,
-        case_sensitive: options.case_sensitive,
-        bad_char,
-        good_suffix,
-        regex,
-    })
 }
 
 /// Z-関数に基づく suffix テーブル。good-suffix テーブルの計算に使います。
@@ -594,7 +606,7 @@ mod tests {
             Item::Char('b'),
             Item::Char('*'),
         ]]);
-        let found = find_all(&text, "a.b*", SearchOptions::default());
+        let found = find_all(&text, "a.b*", SearchOptions::default(), None);
         assert_eq!(found.len(), 1);
         if let Place::Text(sel) = &found[0].place {
             assert_eq!(sel.start(), Pos::new(0, 0));
@@ -621,6 +633,7 @@ mod tests {
                 regex: false,
                 case_sensitive: false,
             },
+            None,
         );
         assert_eq!(found.len(), 2);
         if let (Place::Text(first), Place::Text(second)) = (&found[0].place, &found[1].place) {
@@ -642,7 +655,7 @@ mod tests {
             Item::Char('a'),
             Item::Char('a'),
         ]]);
-        let found = find_all(&text, "aa", SearchOptions::default());
+        let found = find_all(&text, "aa", SearchOptions::default(), None);
         assert_eq!(found.len(), 3);
     }
 
@@ -654,7 +667,7 @@ mod tests {
             Item::Math(vec![Node::Char('b'), Node::Char('c')]),
             Item::Char('d'),
         ]]);
-        let found = find_all(&text, "bc", SearchOptions::default());
+        let found = find_all(&text, "bc", SearchOptions::default(), None);
         assert_eq!(found.len(), 1);
         assert!(matches!(found[0].place, Place::Inside { .. }));
     }
@@ -691,7 +704,7 @@ mod tests {
         let rounds = 100;
 
         for (text, query) in cases {
-            let Some(matcher) = compile(query, options) else {
+            let Some(matcher) = compile(query, options, None) else {
                 panic!("literal pattern should compile");
             };
             let Some(re) = compile_regex_crate(query, options) else {

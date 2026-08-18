@@ -130,7 +130,7 @@ pub fn leave_math(session: &Rc<RefCell<Session>>) {
     session.borrow_mut().editor.leave_island();
 }
 
-pub fn find_next(query: &str, options: SearchOptions) -> bool {
+pub fn find_next(query: &str, options: SearchOptions, file_size: Option<usize>) -> bool {
     let Some(session) = session() else {
         return false;
     };
@@ -139,7 +139,7 @@ pub fn find_next(query: &str, options: SearchOptions) -> bool {
         let from = borrowed.search_from.clone().unwrap_or_else(|| {
             search::key_at(borrowed.editor.primary().end(), borrowed.editor.inside())
         });
-        search::find_next(borrowed.editor.text(), query, options, from)
+        search::find_next(borrowed.editor.text(), query, options, file_size, from)
     };
     let Some(found) = found else {
         return false;
@@ -160,12 +160,17 @@ pub fn find_next(query: &str, options: SearchOptions) -> bool {
     true
 }
 
-pub fn replace_all(query: &str, replacement: &str, options: SearchOptions) -> usize {
+pub fn replace_all(
+    query: &str,
+    replacement: &str,
+    options: SearchOptions,
+    file_size: Option<usize>,
+) -> usize {
     let Some(session) = session() else { return 0 };
     leave_math(&session);
     let matches = {
         let borrowed = session.borrow();
-        search::find_all(borrowed.editor.text(), query, options)
+        search::find_all(borrowed.editor.text(), query, options, file_size)
     };
     if matches.is_empty() {
         return 0;
