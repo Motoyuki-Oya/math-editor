@@ -118,6 +118,17 @@ fn write_draft(
         .map_err(|e| format!("下書きを保存できませんでした: {e}"))
 }
 
+/// 保存済みファイル、未保存なら下書きファイルのサイズを返します。
+/// どちらも読めないときは `None` を返します（呼び出し側が不明として扱います）。
+#[tauri::command]
+fn file_size(app: tauri::AppHandle, path: Option<String>, id: String) -> Option<u64> {
+    let target = match path {
+        Some(p) => PathBuf::from(p),
+        None => drafts_dir(&app)?.join(draft_name(&id)),
+    };
+    std::fs::metadata(&target).map(|m| m.len()).ok()
+}
+
 #[tauri::command]
 fn remove_draft(app: tauri::AppHandle, id: String) {
     if let Some(dir) = drafts_dir(&app) {
@@ -315,6 +326,7 @@ pub fn run() {
             write_draft,
             remove_draft,
             read_drafts,
+            file_size,
             menu::sync_view_menu
         ])
         .run(tauri::generate_context!())

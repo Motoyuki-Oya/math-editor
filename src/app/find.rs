@@ -1,10 +1,12 @@
 //! 検索と置換のバー。
 
 use leptos::prelude::*;
+use leptos::task::spawn_local;
 use web_sys::KeyboardEvent;
 
 use super::shell::{Field, Shell};
 use crate::editor;
+use crate::ipc;
 
 #[component]
 pub fn FindBar(shell: Shell) -> impl IntoView {
@@ -43,11 +45,25 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                         on:input=move |ev| query.set(event_target_value(&ev))
                         on:keydown=move |ev: KeyboardEvent| {
                             if ev.key() == "Enter" {
-                                editor::find_next(&query.get_untracked(), options());
+                                let shell = shell;
+                                let query = query.get_untracked();
+                                let options = options();
+                                spawn_local(async move {
+                                    let size = file_size_for(shell).await;
+                                    editor::find_next(&query, options, size);
+                                });
                             }
                         }
                     />
-                    <button class="tool" on:click=move |_| { editor::find_next(&query.get_untracked(), options()); }>"次を検索"</button>
+                    <button class="tool" on:click=move |_| {
+                        let shell = shell;
+                        let query = query.get_untracked();
+                        let options = options();
+                        spawn_local(async move {
+                            let size = file_size_for(shell).await;
+                            editor::find_next(&query, options, size);
+                        });
+                    }>"次を検索"</button>
                     <input
                         class="find-input"
                         node_ref=replacement_field
@@ -56,8 +72,15 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                         on:input=move |ev| replacement.set(event_target_value(&ev))
                     />
                     <button class="tool" on:click=move |_| {
-                        let replaced = editor::replace_all(&query.get_untracked(), &replacement.get_untracked(), options());
-                        shell.status.set(format!("{replaced} 件置換しました"));
+                        let shell = shell;
+                        let query = query.get_untracked();
+                        let replacement = replacement.get_untracked();
+                        let options = options();
+                        spawn_local(async move {
+                            let size = file_size_for(shell).await;
+                            let replaced = editor::replace_all(&query, &replacement, options, size);
+                            shell.status.set(format!("{replaced} 件置換しました"));
+                        });
                     }>"すべて置換"</button>
                     <label class="find-toggle" title="大文字小文字を区別">
                         <input
@@ -78,4 +101,10 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                     <button class="tool" on:click=move |_| shell.searching.set(false)>"閉じる"</button>
                 </div>
     }
+}
+
+async fn file_size_for(shell: Shell) -> Option<usize> {
+    let tab = shell.tab_untracked();
+    let path = tab.path.get_untracked();
+    ipc::file_size(path.as_deref(), tab.id.get_untracked()).await
 }

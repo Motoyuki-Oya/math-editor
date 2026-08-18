@@ -1,13 +1,19 @@
 //! オプションの正規表現を使用して、モデルを検索して置換します。
 //!
-//! ブラウザー独自の正規表現が照合を行うため、不適切なパターンはコンパイルに失敗するだけで、エディターが中断されることはありません。構造も同様に行ごとに検索されます。一致とは、文書内のどこにあっても、互いに隣り合った一連の文字です。行の端にまたがることがないのと同じように、一致は構造の端にまたがることはありません。
-
-use js_sys::RegExp;
-use wasm_bindgen::prelude::*;
-use wasm_bindgen::JsCast;
+//! 通常の（正規表現でない）検索は Rust 側で Boyer-Moore 法を使います。
+//! 長大な文書や正規表現の検索には `regex` クレートを使用します。
+//! 不適切なパターンはコンパイルに失敗するだけで、エディターが中断されることはありません。
+//! 構造も同様に行ごとに検索されます。一致とは、文書内のどこにあっても、
+//! 互いに隣り合った一連の文字です。行の端にまたがることがないのと同じように、
+//! 一致は構造の端にまたがることはありません。
 
 use crate::structure::ast::{Cursor, Node, Row};
 use crate::structure::text::{Item, Pos, Sel, Text};
+
+mod boyer_moore;
+mod matcher;
+
+use matcher::{compile, Matcher};
 
 /// 一致の場所。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,23 +61,34 @@ pub struct SearchOptions {
     pub case_sensitive: bool,
 }
 
-pub fn find_next(text: &Text, query: &str, options: SearchOptions, from: Key) -> Option<Found> {
-    let all = find_all(text, query, options);
+pub fn find_next(
+    text: &Text,
+    query: &str,
+    options: SearchOptions,
+    file_size: Option<usize>,
+    from: Key,
+) -> Option<Found> {
+    let all = find_all(text, query, options, file_size);
     all.iter()
         .find(|found| found.place.start() >= from)
         .or_else(|| all.first())
         .cloned()
 }
 
-pub fn find_all(text: &Text, query: &str, options: SearchOptions) -> Vec<Found> {
-    let Some(regex) = compile(query, options) else {
+pub fn find_all(
+    text: &Text,
+    query: &str,
+    options: SearchOptions,
+    file_size: Option<usize>,
+) -> Vec<Found> {
+    let Some(matcher) = compile(query, options, file_size) else {
         return Vec::new();
     };
     let mut found = Vec::new();
     for line in 0..text.line_count() {
         let items = text.line(line);
         for (start, run) in runs(items) {
-            for (from, to, groups) in matches(&regex, &run) {
+            for (from, to, groups) in matcher.matches(&run) {
                 found.push(Found {
                     place: Place::Text(Sel::range(
                         Pos::new(line, start + from),
@@ -85,7 +102,7 @@ pub fn find_all(text: &Text, query: &str, options: SearchOptions) -> Vec<Found> 
         for (col, item) in items.iter().enumerate() {
             let Item::Math(root) = item else { continue };
             let at = Pos::new(line, col);
-            search_row(&regex, root, &mut Vec::new(), &mut |cursor, groups| {
+            search_row(&matcher, root, &mut Vec::new(), &mut |cursor, groups| {
                 found.push(Found {
                     place: Place::Inside { at, cursor },
                     groups,
@@ -99,13 +116,13 @@ pub fn find_all(text: &Text, query: &str, options: SearchOptions) -> Vec<Found> 
 
 /// 1 つの行とその中にネストされているすべての行を検索し、各一致をその行の選択として報告します。
 fn search_row(
-    regex: &RegExp,
+    matcher: &Matcher,
     row: &Row,
     path: &mut Vec<(usize, usize)>,
     report: &mut impl FnMut(Cursor, Vec<String>),
 ) {
     for (start, run) in node_runs(row) {
-        for (from, to, groups) in matches(regex, &run) {
+        for (from, to, groups) in matcher.matches(&run) {
             report(
                 Cursor {
                     path: path.clone(),
@@ -123,48 +140,10 @@ fn search_row(
                 continue;
             };
             path.push((index, slot));
-            search_row(regex, nested, path, report);
+            search_row(matcher, nested, path, report);
             path.pop();
         }
     }
-}
-
-/// 「run」内のすべての一致は、対象となる文字の範囲とグループとして報告されます。
-fn matches(regex: &RegExp, run: &str) -> Vec<(usize, usize, Vec<String>)> {
-    let mut found = Vec::new();
-    regex.set_last_index(0);
-    let units: Vec<usize> = char_starts(run);
-    loop {
-        let Some(result) = regex.exec(run) else {
-            break;
-        };
-        let Some(whole) = result.get(0).as_string() else {
-            break;
-        };
-        let Some(at) = match_index(&result) else {
-            break;
-        };
-        let end = at + whole.encode_utf16().count();
-        if whole.is_empty() {
-            // 空の一致は永遠にループします。
-            regex.set_last_index(regex.last_index() + 1);
-            if regex.last_index() as usize > run.encode_utf16().count() {
-                break;
-            }
-            continue;
-        }
-        let (Some(from), Some(to)) = (char_of(&units, at), char_of(&units, end)) else {
-            break;
-        };
-        let groups = (0..result.length())
-            .map(|i| result.get(i).as_string().unwrap_or_default())
-            .collect();
-        found.push((from, to, groups));
-        if !regex.global() {
-            break;
-        }
-    }
-    found
 }
 
 /// 置換内の `$1` スタイルの参照をキャプチャされたもので埋め、列の区切り文字および改行として `\t` と `\n` を読み取ります。
@@ -282,70 +261,9 @@ fn node_runs(row: &Row) -> Vec<(usize, String)> {
     runs
 }
 
-/// ブラウザの正規表現でカウントされるため、各文字の UTF-16 インデックスが始まります。
-fn char_starts(text: &str) -> Vec<usize> {
-    let mut units = Vec::with_capacity(text.chars().count() + 1);
-    let mut at = 0;
-    for c in text.chars() {
-        units.push(at);
-        at += c.len_utf16();
-    }
-    units.push(at);
-    units
-}
-
-/// 一致の開始位置は、ブラウザが報告する UTF-16 単位です。
-fn match_index(result: &js_sys::Array<js_sys::JsString>) -> Option<usize> {
-    js_sys::Reflect::get(result, &JsValue::from_str("index"))
-        .ok()?
-        .as_f64()
-        .map(|index| index as usize)
-}
-
-fn char_of(starts: &[usize], unit: usize) -> Option<usize> {
-    starts.iter().position(|start| *start == unit)
-}
-
-/// コンパイルクエリ。プレーン クエリをリテラル テキストとして扱います。ブラウザが拒否するパターンは、エラーの代わりに「None」を返します。
-fn compile(query: &str, options: SearchOptions) -> Option<RegExp> {
-    if query.is_empty() {
-        return None;
-    }
-    let source = if options.regex {
-        query.to_string()
-    } else {
-        escape_regex(query)
-    };
-    let flags = if options.case_sensitive { "g" } else { "gi" };
-    let make = js_sys::Function::new_with_args(
-        "source, flags",
-        "try { return new RegExp(source, flags); } catch (e) { return null; }",
-    );
-    make.call2(&JsValue::NULL, &source.into(), &flags.into())
-        .ok()?
-        .dyn_into::<RegExp>()
-        .ok()
-}
-
-fn escape_regex(query: &str) -> String {
-    let mut out = String::with_capacity(query.len());
-    for c in query.chars() {
-        if "\\^$.|?*+()[]{}".contains(c) {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn plain_queries_are_escaped_into_literals() {
-        assert_eq!(escape_regex("a.b*"), "a\\.b\\*");
-    }
 
     #[test]
     fn groups_fill_the_replacement() {
@@ -437,10 +355,65 @@ mod tests {
         assert_eq!(places, vec![text, shallow, deep]);
     }
 
+    /// リテラル検索は正規表現のメタ文字をただの文字として扱います。
     #[test]
-    fn character_columns_come_from_utf16_offsets() {
-        let starts = char_starts("あa𝑥b");
-        assert_eq!(starts, vec![0, 1, 2, 4, 5]);
-        assert_eq!(char_of(&starts, 2), Some(2));
+    fn literal_queries_treat_metacharacters_as_text() {
+        let text = Text::from_lines(vec![vec![
+            Item::Char('a'),
+            Item::Char('.'),
+            Item::Char('b'),
+            Item::Char('*'),
+        ]]);
+        let found = find_all(&text, "a.b*", SearchOptions::default(), Some(0));
+        assert_eq!(found.len(), 1);
+        if let Place::Text(sel) = &found[0].place {
+            assert_eq!(sel.start(), Pos::new(0, 0));
+            assert_eq!(sel.end(), Pos::new(0, 4));
+        } else {
+            panic!("expected text match");
+        }
+    }
+
+    /// Boyer-Moore 法のリテラル検索は大文字小文字を区別しなくても動作します。
+    #[test]
+    fn literal_search_is_case_insensitive() {
+        let text = Text::from_lines(vec![vec![
+            Item::Char('A'),
+            Item::Char('B'),
+            Item::Char('a'),
+            Item::Char('b'),
+            Item::Char('A'),
+        ]]);
+        let found = find_all(
+            &text,
+            "ab",
+            SearchOptions {
+                regex: false,
+                case_sensitive: false,
+            },
+            Some(0),
+        );
+        assert_eq!(found.len(), 2);
+        if let (Place::Text(first), Place::Text(second)) = (&found[0].place, &found[1].place) {
+            assert_eq!(first.start(), Pos::new(0, 0));
+            assert_eq!(first.end(), Pos::new(0, 2));
+            assert_eq!(second.start(), Pos::new(0, 2));
+            assert_eq!(second.end(), Pos::new(0, 4));
+        } else {
+            panic!("expected two text matches");
+        }
+    }
+
+    /// 構造内の文字もリテラル検索で見つかります。
+    #[test]
+    fn literal_search_finds_characters_inside_structures() {
+        let text = Text::from_lines(vec![vec![
+            Item::Char('a'),
+            Item::Math(vec![Node::Char('b'), Node::Char('c')]),
+            Item::Char('d'),
+        ]]);
+        let found = find_all(&text, "bc", SearchOptions::default(), Some(0));
+        assert_eq!(found.len(), 1);
+        assert!(matches!(found[0].place, Place::Inside { .. }));
     }
 }
