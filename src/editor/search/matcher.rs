@@ -17,17 +17,15 @@ impl Matcher {
     pub(super) fn matches(&self, run: &str) -> Vec<(usize, usize, Vec<String>)> {
         match self {
             Self::Regex(regex) => regex_matches(regex, run),
-            Self::Literal(boyer_moore) => boyer_moore
-                .find(run)
-                .into_iter()
-                .map(|(from, to)| {
-                    (
-                        from,
-                        to,
-                        vec![run.chars().skip(from).take(to - from).collect()],
-                    )
-                })
-                .collect(),
+            Self::Literal(boyer_moore) => {
+                // 一致ごとに `run` を数え直すと一致の数だけ走査が増えるため、文字は一度だけ集めます。
+                let chars: Vec<char> = run.chars().collect();
+                boyer_moore
+                    .find(run)
+                    .into_iter()
+                    .map(|(from, to)| (from, to, vec![chars[from..to].iter().collect()]))
+                    .collect()
+            }
         }
     }
 }
