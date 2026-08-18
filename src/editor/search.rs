@@ -1,17 +1,15 @@
 //! オプションの正規表現を使用して、モデルを検索して置換します。
 //!
 //! 通常の（正規表現でない）検索は Rust 側で Boyer-Moore 法を使います。
-//! 正規表現の検索だけがブラウザー独自の正規表現に依存するため、不適切なパターンは
-//! コンパイルに失敗するだけで、エディターが中断されることはありません。
+//! 長大な文書や正規表現の検索には `regex` クレートを使用します。
+//! 不適切なパターンはコンパイルに失敗するだけで、エディターが中断されることはありません。
 //! 構造も同様に行ごとに検索されます。一致とは、文書内のどこにあっても、
 //! 互いに隣り合った一連の文字です。行の端にまたがることがないのと同じように、
 //! 一致は構造の端にまたがることはありません。
 
 use std::collections::HashMap;
 
-use js_sys::RegExp;
-use wasm_bindgen::prelude::*;
-use wasm_bindgen::JsCast;
+use regex::Regex;
 
 use crate::structure::ast::{Cursor, Node, Row};
 use crate::structure::text::{Item, Pos, Sel, Text};
@@ -62,10 +60,11 @@ pub struct SearchOptions {
     pub case_sensitive: bool,
 }
 
-/// コンパイル済みの検索パターン。正規表現はブラウザーに任せ、それ以外は Boyer-Moore 法で検索します。
+/// コンパイル済みの検索パターン。正規表現または長大なリテラル検索は `regex` クレート、
+/// それ以外は Boyer-Moore 法で検索します。
 #[derive(Debug)]
 enum Matcher {
-    Regex(RegExp),
+    Regex(Regex),
     Literal {
         pattern: Vec<char>,
         case_sensitive: bool,
@@ -83,7 +82,8 @@ pub fn find_next(text: &Text, query: &str, options: SearchOptions, from: Key) ->
 }
 
 pub fn find_all(text: &Text, query: &str, options: SearchOptions) -> Vec<Found> {
-    let Some(matcher) = compile(query, options) else {
+    let text_len = total_bytes(text);
+    let Some(matcher) = compile(query, options, Some(text_len)) else {
         return Vec::new();
     };
     let mut found = Vec::new();
@@ -155,39 +155,37 @@ fn matches(matcher: &Matcher, run: &str) -> Vec<(usize, usize, Vec<String>)> {
     }
 }
 
-/// ブラウザーの正規表現を使って一致を探します。
-fn regex_matches(regex: &RegExp, run: &str) -> Vec<(usize, usize, Vec<String>)> {
+/// `regex` クレートを使って一致を探します。
+fn regex_matches(regex: &Regex, run: &str) -> Vec<(usize, usize, Vec<String>)> {
     let mut found = Vec::new();
-    regex.set_last_index(0);
-    let units: Vec<usize> = char_starts(run);
-    loop {
-        let Some(result) = regex.exec(run) else {
-            break;
-        };
-        let Some(whole) = result.get(0).as_string() else {
-            break;
-        };
-        let Some(at) = match_index(&result) else {
-            break;
-        };
-        let end = at + whole.encode_utf16().count();
-        if whole.is_empty() {
-            // 空の一致は永遠にループします。
-            regex.set_last_index(regex.last_index() + 1);
-            if regex.last_index() as usize > run.encode_utf16().count() {
-                break;
-            }
-            continue;
+    let mut byte_starts = Vec::new();
+    let mut end = 0;
+    for (byte, c) in run.char_indices() {
+        byte_starts.push(byte);
+        end = byte + c.len_utf8();
+    }
+    byte_starts.push(end);
+    let byte_to_char = |byte: usize| byte_starts.binary_search(&byte).unwrap_or_else(|pos| pos);
+
+    if regex.captures_len() == 1 {
+        for m in regex.find_iter(run) {
+            let from = byte_to_char(m.start());
+            let to = byte_to_char(m.end());
+            found.push((from, to, vec![m.as_str().to_string()]));
         }
-        let (Some(from), Some(to)) = (char_of(&units, at), char_of(&units, end)) else {
-            break;
-        };
-        let groups = (0..result.length())
-            .map(|i| result.get(i).as_string().unwrap_or_default())
-            .collect();
-        found.push((from, to, groups));
-        if !regex.global() {
-            break;
+    } else {
+        for caps in regex.captures_iter(run) {
+            let m = caps.get(0).expect("group 0 is always present");
+            let from = byte_to_char(m.start());
+            let to = byte_to_char(m.end());
+            let groups = (0..caps.len())
+                .map(|i| {
+                    caps.get(i)
+                        .map(|m| m.as_str().to_string())
+                        .unwrap_or_default()
+                })
+                .collect();
+            found.push((from, to, groups));
         }
     }
     found
@@ -369,7 +367,8 @@ fn node_runs(row: &Row) -> Vec<(usize, String)> {
     runs
 }
 
-/// ブラウザの正規表現でカウントされるため、各文字の UTF-16 インデックスが始まります。
+#[cfg(test)]
+/// テスト用: JavaScriptCore の RegExp が返す UTF-16 単位を文字インデックスに変換します。
 fn char_starts(text: &str) -> Vec<usize> {
     let mut units = Vec::with_capacity(text.chars().count() + 1);
     let mut at = 0;
@@ -381,35 +380,69 @@ fn char_starts(text: &str) -> Vec<usize> {
     units
 }
 
-/// 一致の開始位置は、ブラウザが報告する UTF-16 単位です。
-fn match_index(result: &js_sys::Array<js_sys::JsString>) -> Option<usize> {
-    js_sys::Reflect::get(result, &JsValue::from_str("index"))
-        .ok()?
-        .as_f64()
-        .map(|index| index as usize)
-}
-
+#[cfg(test)]
 fn char_of(starts: &[usize], unit: usize) -> Option<usize> {
     starts.iter().position(|start| *start == unit)
 }
 
-/// コンパイルクエリ。正規表現はブラウザーに、それ以外は Rust 側の Boyer-Moore 法に任せます。
-fn compile(query: &str, options: SearchOptions) -> Option<Matcher> {
+/// リテラル検索で `regex` クレートに切り替えるファイルサイズの仮の閾値（UTF-8 バイト数）。
+const LITERAL_REGEX_THRESHOLD: usize = 100_000;
+
+fn build_regex(pattern: &str, case_sensitive: bool) -> Option<Regex> {
+    regex::RegexBuilder::new(pattern)
+        .case_insensitive(!case_sensitive)
+        .build()
+        .ok()
+}
+
+/// 文書全体のおおよその UTF-8 バイト数を返します。
+fn total_bytes(text: &Text) -> usize {
+    (0..text.line_count())
+        .map(|line| text.line(line).iter().map(item_bytes).sum::<usize>())
+        .sum()
+}
+
+fn item_bytes(item: &Item) -> usize {
+    match item {
+        Item::Char(c) => c.len_utf8(),
+        Item::Tab => 1,
+        Item::Math(row) => row_bytes(row),
+    }
+}
+
+fn row_bytes(row: &Row) -> usize {
+    row.iter().map(node_bytes).sum()
+}
+
+fn node_bytes(node: &Node) -> usize {
+    let mut count = match node {
+        Node::Char(c) => c.len_utf8(),
+        Node::Sym(s) | Node::Func(s) => s.len(),
+        Node::Limits { sym, .. } => sym.len(),
+        _ => 0,
+    };
+    for i in 0..node.slot_count() {
+        if let Some(row) = node.slot(i) {
+            count += row_bytes(row);
+        }
+    }
+    count
+}
+
+/// コンパイル済みの検索パターンを作成します。正規表現または長大なリテラル検索は `regex` クレート、
+/// それ以外は Boyer-Moore 法を使います。
+fn compile(query: &str, options: SearchOptions, text_len: Option<usize>) -> Option<Matcher> {
     if query.is_empty() {
         return None;
     }
-    if options.regex {
-        let source = query.to_string();
-        let flags = if options.case_sensitive { "g" } else { "gi" };
-        let make = js_sys::Function::new_with_args(
-            "source, flags",
-            "try { return new RegExp(source, flags); } catch (e) { return null; }",
-        );
-        make.call2(&JsValue::NULL, &source.into(), &flags.into())
-            .ok()?
-            .dyn_into::<RegExp>()
-            .ok()
-            .map(Matcher::Regex)
+    let use_regex = options.regex || text_len.is_some_and(|len| len > LITERAL_REGEX_THRESHOLD);
+    if use_regex {
+        let pattern = if options.regex {
+            query.to_string()
+        } else {
+            regex::escape(query)
+        };
+        build_regex(&pattern, options.case_sensitive).map(Matcher::Regex)
     } else {
         let pattern: Vec<char> = if options.case_sensitive {
             query.chars().collect()
@@ -664,7 +697,6 @@ mod tests {
     /// `regex` クレートを使って同じインターフェースで一致を探します（比較用）。
     /// リテラル検索は内部で正規表現化され、正規表現検索と統一できます。
     fn compile_regex_crate(query: &str, options: SearchOptions) -> Option<regex::Regex> {
-        use regex::RegexBuilder;
         if query.is_empty() {
             return None;
         }
@@ -673,49 +705,7 @@ mod tests {
         } else {
             regex::escape(query)
         };
-        RegexBuilder::new(&pattern)
-            .case_insensitive(!options.case_sensitive)
-            .build()
-            .ok()
-    }
-
-    fn regex_crate_matches(re: &regex::Regex, run: &str) -> Vec<(usize, usize, Vec<String>)> {
-        let mut byte_starts = Vec::with_capacity(run.chars().count() + 1);
-        let mut at = 0;
-        for (byte, c) in run.char_indices() {
-            byte_starts.push(byte);
-            at = byte + c.len_utf8();
-        }
-        byte_starts.push(at);
-
-        let mut found = Vec::new();
-        // キャプチャグループがないリテラル検索なら find_iter の方が軽い。
-        if re.captures_len() == 1 {
-            for m in re.find_iter(run) {
-                let from = byte_starts.binary_search(&m.start()).unwrap_or(0);
-                let to = byte_starts
-                    .binary_search(&m.end())
-                    .unwrap_or(byte_starts.len() - 1);
-                found.push((from, to, vec![m.as_str().to_string()]));
-            }
-        } else {
-            for caps in re.captures_iter(run) {
-                let m = caps.get(0).expect("group 0 is always present");
-                let from = byte_starts.binary_search(&m.start()).unwrap_or(0);
-                let to = byte_starts
-                    .binary_search(&m.end())
-                    .unwrap_or(byte_starts.len() - 1);
-                let groups: Vec<String> = (0..caps.len())
-                    .map(|i| {
-                        caps.get(i)
-                            .map(|m| m.as_str().to_string())
-                            .unwrap_or_default()
-                    })
-                    .collect();
-                found.push((from, to, groups));
-            }
-        }
-        found
+        build_regex(&pattern, options.case_sensitive)
     }
 
     /// Boyer-Moore 法と `regex` クレートの結果と速度を比較します。
@@ -736,7 +726,7 @@ mod tests {
         let rounds = 100;
 
         for (text, query) in cases {
-            let Some(matcher) = compile(query, options) else {
+            let Some(matcher) = compile(query, options, None) else {
                 panic!("literal pattern should compile");
             };
             let Some(re) = compile_regex_crate(query, options) else {
@@ -753,7 +743,7 @@ mod tests {
             let t1 = Instant::now();
             let mut re_matches = Vec::new();
             for _ in 0..rounds {
-                re_matches = regex_crate_matches(&re, &text);
+                re_matches = regex_matches(&re, &text);
             }
             let dt_re = t1.elapsed();
 
@@ -916,7 +906,7 @@ mod tests {
                 let t1 = Instant::now();
                 let mut re_results = Vec::new();
                 for _ in 0..rounds {
-                    re_results = regex_crate_matches(&re, text);
+                    re_results = regex_matches(&re, text);
                 }
                 let dt_re = t1.elapsed();
 
