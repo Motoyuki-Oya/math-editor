@@ -112,16 +112,7 @@ fn show(settings: &Settings) {
             if settings.wrap { "100%" } else { "max-content" },
         )
         .ok();
-    style
-        .set_property(
-            "--setting-gutter",
-            if settings.line_numbers {
-                "3.5em"
-            } else {
-                "0px"
-            },
-        )
-        .ok();
+    // 行番号の幅はここにはありません。設定が言うのは番号を出すかどうかだけで、幅は文書の行数次第なので描く側 (`crate::view`) が決めます。
 }
 
 /// ファイルに保存されている設定を書き込みます。1 行に 1 つの `name = value` で、これは TOML の小さなコーナーです。

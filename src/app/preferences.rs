@@ -8,10 +8,15 @@ use crate::ipc;
 use crate::settings;
 use crate::settings::Settings;
 
-/// 画面上、独自のテキストを測定するエディター内、および次回起動用のファイル内など、どこでも `settings` を有効にします。
-pub(super) fn change(settings: Settings) {
-    settings::apply(settings.clone());
+/// 設定を画面に効かせるただ 1 つの入口。設定の一部（行番号や折り返し）は行を描くときに行へ入るので、適用と描き直しは常に一緒です。ここを通らない適用は、画面と設定が食い違ったままになります。
+pub(super) fn take_effect(settings: Settings) {
+    settings::apply(settings);
     editor::redraw_all();
+}
+
+/// ユーザーが設定を変えたとき: 効かせて、次回起動用のファイルにも書きます。
+pub(super) fn change(settings: Settings) {
+    take_effect(settings.clone());
     spawn_local(async move {
         ipc::write_settings(&settings::write(&settings)).await;
     });

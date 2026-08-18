@@ -93,6 +93,7 @@ impl View {
         focused: bool,
         follow_caret: bool,
     ) {
+        self.fit_numbers(text.line_count());
         // IME が作成しているテキストは、どの行にあってもキャレットに属します。行を描画するコンポーネントがそれをそこに配置します。
         let (path, index) = caret.place();
         let preedit = caret.composing.map(|text| Preedit { path, index, text });
@@ -116,6 +117,18 @@ impl View {
         };
         self.viewport
             .show(text, caret.at.line, follow_caret, &draw_line, &finish);
+    }
+
+    /// 行番号の幅を、この文書の一番大きい番号に合わせます。番号の幅は文字の測りごとなので、設定は番号を出すかどうかだけを言います。
+    fn fit_numbers(&self, count: usize) {
+        let style = self.root.style();
+        if !crate::settings::line_numbers() {
+            style.remove_property("--setting-gutter").ok();
+            return;
+        }
+        let digits = count.max(1).to_string().len();
+        let width = format!("calc({digits}ch + 1.4em)");
+        style.set_property("--setting-gutter", &width).ok();
     }
 
     fn draw_line(
