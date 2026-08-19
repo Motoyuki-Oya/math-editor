@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use web_sys::MouseEvent;
 
-use super::commands::leave_math;
+use super::commands::leave_structure;
 use super::input;
 use super::session::{focus, redraw, Session};
 use crate::view::measure::Hit;
@@ -16,20 +16,20 @@ fn hit_at(session: &Rc<RefCell<Session>>, x: f64, y: f64) -> Hit {
     borrowed.view.hit(borrowed.editor.text(), x, y)
 }
 
-/// クリックが数式内に到達した場所、つまり選択範囲の遠端にキャレットを置きます。クリックが 1 つのクリックであったかどうかを返します。
-fn click_in_math(session: &Rc<RefCell<Session>>, hit: &Hit, extend: bool) -> bool {
+/// クリックした入れ子Rowへキャレットを置き、そこで処理したかを返します。
+fn click_in_structure(session: &Rc<RefCell<Session>>, hit: &Hit, extend: bool) -> bool {
     let Hit::Inside(at, cursor) = hit else {
         return false;
     };
     let mut borrowed = session.borrow_mut();
     if !extend {
-        return borrowed.editor.enter_island_at(*at, cursor);
+        return borrowed.editor.enter_at(*at, cursor);
     }
-    // 選択範囲を広げると、それが開始された数式内にのみ留まります。
-    if borrowed.editor.inside().is_none() || borrowed.editor.primary().head != *at {
+    // 入れ子Row内で始めた選択は、同じ文書行のそのRow内に留めます。
+    if borrowed.editor.nested_cursor().is_none() || borrowed.editor.primary().head != *at {
         return false;
     }
-    borrowed.editor.extend_in_island(cursor)
+    borrowed.editor.extend_nested(cursor)
 }
 
 pub fn on_mousedown(session: &Rc<RefCell<Session>>, event: MouseEvent) {
@@ -39,13 +39,13 @@ pub fn on_mousedown(session: &Rc<RefCell<Session>>, event: MouseEvent) {
     event.prevent_default();
     let (x, y) = (event.client_x() as f64, event.client_y() as f64);
     let hit = hit_at(session, x, y);
-    if !input::adds_caret(&event) && click_in_math(session, &hit, event.shift_key()) {
+    if !input::adds_caret(&event) && click_in_structure(session, &hit, event.shift_key()) {
         session.borrow_mut().dragging = true;
         focus();
         redraw(session);
         return;
     }
-    leave_math(session);
+    leave_structure(session);
     let pos = {
         let borrowed = session.borrow();
         borrowed.view.pos_at_point(borrowed.editor.text(), x, y)
@@ -70,11 +70,11 @@ pub fn on_mousemove(session: &Rc<RefCell<Session>>, event: MouseEvent) {
         return;
     }
     let (x, y) = (event.client_x() as f64, event.client_y() as f64);
-    if session.borrow().editor.inside().is_some() {
-        // 数式内をドラッグすると、数式内が選択されます。そこからドラッグすると、数式全体がテキストの 1 つの項目になります。
+    if session.borrow().editor.nested_cursor().is_some() {
+        // 入れ子Rowから外へドラッグした場合は、それを含む構造Node全体を選択します。
         let hit = hit_at(session, x, y);
-        if !click_in_math(session, &hit, true) {
-            session.borrow_mut().editor.select_island();
+        if !click_in_structure(session, &hit, true) {
+            session.borrow_mut().editor.select_structure();
         }
         redraw(session);
         return;
@@ -92,8 +92,8 @@ pub fn on_mousemove(session: &Rc<RefCell<Session>>, event: MouseEvent) {
 }
 
 pub fn on_dblclick(session: &Rc<RefCell<Session>>, event: MouseEvent) {
-    // 数式内には取得する単語がないため、行が単位となります。
-    if session.borrow().editor.inside().is_some() {
+    // 入れ子Rowでは外側の文書選択へ広げず、そのRowを選択単位にします。
+    if session.borrow().editor.nested_cursor().is_some() {
         session.borrow_mut().editor.select_all();
         redraw(session);
         return;

@@ -36,7 +36,7 @@ pub(super) fn install_shortcuts(shell: Shell) {
             ("r", _) => Some("replace"),
             ("w", _) => Some("close_tab"),
             ("\\", _) => Some("split"),
-            ("m", _) => Some("insert_math"),
+            ("m", _) => Some("insert_structure"),
             ("z", false) => Some("undo"),
             ("z", true) | ("y", _) => Some("redo"),
             (",", _) => Some("preferences"),

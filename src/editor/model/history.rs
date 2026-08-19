@@ -15,7 +15,7 @@ pub(super) enum Step {
 struct Snapshot {
     text: Text,
     sels: Vec<Sel>,
-    inside: Option<Cursor>,
+    cursor: Option<Cursor>,
 }
 
 /// 実行内容。スナップショット全体として保持されます。 [`Editor`] だけがここに書き込みます。履歴はステップがいつ結合するかを知っており、エディタはステップが何であるかを知っています。
@@ -60,7 +60,7 @@ impl Editor {
         Snapshot {
             text: self.text.clone(),
             sels: self.sels.clone(),
-            inside: self.inside.clone(),
+            cursor: self.cursor.clone(),
         }
     }
 
@@ -116,7 +116,7 @@ impl Editor {
     fn restore(&mut self, snapshot: Snapshot) {
         self.text = snapshot.text;
         self.sels = snapshot.sels;
-        self.inside = snapshot.inside;
+        self.cursor = snapshot.cursor;
         self.history.cut();
     }
 }

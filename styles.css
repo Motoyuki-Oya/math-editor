@@ -221,9 +221,10 @@ body {
 
 .editor {
   position: relative;
+  container-type: inline-size;
   flex: 1;
   overflow: auto;
-  padding: 18px 22px;
+  padding: 0 22px 18px;
   outline: none;
   line-height: 2;
   cursor: text;
@@ -232,25 +233,45 @@ body {
 }
 
 .mn-content {
+  display: grid;
+  grid-template-columns: var(--setting-gutter, 0px) minmax(0, 1fr);
   position: relative;
   min-height: 100%;
   /* コンテンツは折り返されない場合、最も長い行と同じ幅になります。これは、 エディターに横にスクロールする機能を提供します。 */
-  width: var(--setting-line-width, 100%);
+  width: 100%;
   min-width: 100%;
 }
 
-.mn-lines {
+.mn-content.mn-nowrap {
+  grid-template-columns: var(--setting-gutter, 0px) max-content;
+  width: max-content;
+}
+
+.mn-gutter {
+  grid-column: 1;
+  grid-row: 1;
   position: relative;
-  white-space: var(--setting-wrap, pre-wrap);
-  /* 必要な箇所で下に続く行: 長い単語は のままです長い単語。 */
-  overflow-wrap: anywhere;
-  /* 行番号が表示される場合、そのスペース。 */
-  padding-left: var(--setting-gutter, 0px);
+  pointer-events: none;
+  user-select: none;
+}
+
+.mn-document {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
 }
 
 .mn-line {
   position: relative;
   min-height: 1.6em;
+  white-space: pre-wrap;
+  /* 必要な箇所で下に続く行: 長い単語は のままです長い単語。 */
+  overflow-wrap: anywhere;
+}
+
+.mn-nowrap .mn-line {
+  white-space: pre;
+  overflow-wrap: normal;
 }
 
 /* がある行の上下にある、ページ内にない行を表す。そのため、文書は全長でスクロールする。 */
@@ -258,16 +279,16 @@ body {
   pointer-events: none;
 }
 
-/* マージン内の行番号。これは行に属しますが、 テキストには属さないため、行の外側に位置し、マウスを使用することはありません。 */
+/* ガター内の行番号。文書の行には属さず、描画後に本体フラグメントの中央へ配置されます。 */
 .mn-number {
   position: absolute;
-  left: calc(-1 * var(--setting-gutter, 0px));
-  width: var(--setting-gutter, 0px);
+  right: 0;
   padding-right: 0.9em;
   text-align: right;
   color: var(--muted);
   user-select: none;
   pointer-events: none;
+  transform: translateY(-50%);
 }
 
 /* 列区切り文字、$(t)。その幅は、隣接する行の 区切り文字が揃うように描画中に設定されます。 */
@@ -290,6 +311,8 @@ body {
 
 /* テキストの下のここに選択範囲とキャレットが描画されます。 */
 .mn-overlay {
+  grid-column: 2;
+  grid-row: 1;
   position: absolute;
   inset: 0;
   pointer-events: none;
@@ -350,59 +373,11 @@ body {
   color: var(--accent);
 }
 
-/* ---- 数式 ---- */
-
-/* 島は、行: それはテキストの一部であるため、周囲の単語と同じベースライン にあります。 */
-.mn-field {
-  font-family: var(--font-text);
-  outline: none;
-  white-space: nowrap;
-  cursor: text;
-}
-
-.mn-field-empty {
-  display: inline-block;
-  min-width: 12px;
-  border-bottom: 1px dashed var(--muted);
-}
-
-.mn-field-block {
-  display: block;
-  text-align: center;
-  margin: 6px 0;
-  font-size: 1.15em;
-}
+/* ---- 二次元構造 ---- */
 
 /* 行は、あらゆる深さの通常のインライン テキストです。その中にあるものは、テキストと同じように ベースラインに並び、構造は、必要なボックスの中央に配置されるのではなく、独自のベースラインがどこにあるのかを示します。 */
 .mn-row {
   display: inline;
-}
-
-.mn-atom {
-  display: inline-block;
-}
-
-/* 文字は、数式内でも周囲のテキストと同じように読み取られます。同じです。顔、 直立。構造体の形状だけがそれが 1 であることを示します。 */
-.mn-ident,
-.mn-word {
-  font-family: var(--font-text);
-  padding: 0 0.02em;
-}
-
-.mn-func {
-  padding: 0 0.15em 0 0;
-}
-
-.mn-bin {
-  padding: 0 0.22em;
-}
-
-.mn-rel {
-  padding: 0 0.28em;
-}
-
-.mn-punct {
-  padding: 0 0.05em;
 }
 
 .mn-placeholder {
@@ -420,29 +395,25 @@ body {
   }
 }
 
-/* 上下が等しい: 2 つの行が何であれ、ルールはボックスの中央の に収まり、`vertical-align: middle` はその中央を分数が入る行の 軸に置きます。そのため、分数は文字 の横に並び、分数のルールでネストされます。 */
+/* 上段・区切り・下段を、それぞれの内容に必要な高さで積みます。 */
 .mn-frac {
   display: inline-grid;
-  grid-template-rows: 1fr auto 1fr;
+  grid-template-rows: auto auto auto;
   justify-items: center;
-  vertical-align: middle;
   margin: 0 0.15em;
 }
 
 .mn-frac-num {
-  align-self: end;
   padding: 0 0.32em 0.22em;
 }
 
 .mn-frac-den {
-  align-self: start;
   padding: 0.26em 0.32em 0;
 }
 
 /* 幅の広い方と同じ幅です。 */
 .mn-frac-rule {
   justify-self: stretch;
-  align-self: center;
   border-top: 1px solid currentColor;
 }
 
@@ -482,7 +453,7 @@ body {
   position: relative;
   /* このパディングに描画される記号用のスペース。 */
   padding-left: 0.82em;
-  margin: 0 0.14em;
+  margin: 0.12em 0.14em 0;
 }
 
 .mn-sqrt-index {
@@ -507,7 +478,7 @@ body {
   display: inline-block;
   border-top: 1px solid currentColor;
   /* バーの下、および記号と最初の 文字の間のすべての面に空気があるため、記号はルートの下にあるものに触れることは決してない。 */
-  padding: 0.2em 0.3em 0.08em 0.22em;
+  padding: 0.08em 0.3em 0.08em 0.22em;
 }
 
 .mn-sup,
@@ -552,6 +523,30 @@ body {
   right: 0;
 }
 
+.mn-annotated {
+  display: inline-block;
+  position: relative;
+  padding: 0.62em 0;
+  margin: 0 0.08em;
+  line-height: 1;
+  vertical-align: baseline;
+}
+
+.mn-annotated > .mn-limit {
+  position: absolute;
+  left: 50%;
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+
+.mn-annotated > .mn-limit-upper {
+  top: 0;
+}
+
+.mn-annotated > .mn-limit-lower {
+  bottom: 0;
+}
+
 .mn-bigop {
   display: inline-flex;
   vertical-align: middle;
@@ -589,7 +584,7 @@ body {
 }
 
 .mn-limit-empty:not(:focus-within) .mn-placeholder {
-  display: none;
+  visibility: hidden;
 }
 
 /* グリッドには配置するテキスト行がないため、軸の中央に配置されます。 */

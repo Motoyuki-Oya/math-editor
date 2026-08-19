@@ -93,7 +93,7 @@ pub fn App() -> impl IntoView {
     }
 }
 
-/// ツールバー ボタンが押されたときに、数式内にキャレットを保持します。
+/// ツールバー操作で、現在編集中の入れ子Rowからフォーカスが外れないようにします。
 pub(super) fn hold_focus(event: web_sys::MouseEvent) {
     event.prevent_default();
 }

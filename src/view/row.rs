@@ -4,15 +4,16 @@
 
 use web_sys::{Document, Element};
 
-use crate::structure::ast::{Between, Delim, MatrixKind, Node, Row};
-use crate::structure::text::Item;
-use crate::structure::vocabulary::{self as vocabulary, Class};
+use crate::settings;
+use crate::structure::ast::{Between, Delim, MatrixKind, Node, NodeKind, Row};
 
 const SVG_NS: &str = "http://www.w3.org/2000/svg";
+const LIMIT_SCALE: f64 = 0.68;
+const SCRIPT_SCALE: f64 = 0.72;
+const ROOT_INDEX_SCALE: f64 = 0.7;
 
 pub const ROW_CLASS: &str = "mn-row";
 pub const RUN_CLASS: &str = "mn-run";
-pub const FIELD_CLASS: &str = "mn-field";
 pub const TAB_CLASS: &str = "mn-tab";
 pub const PREEDIT_CLASS: &str = "mn-preedit";
 /// 空の行が表示され、クリックできるように表示されるボックス。
@@ -43,30 +44,22 @@ pub fn decode_path(encoded: &str) -> Option<Vec<(usize, usize)>> {
         .collect()
 }
 
-/// 行内の 1 つのもの。ドキュメントの行と構造内のスロットは異なるものを保持しており、これがその違いの終点です。
+/// A rendered node. Characters are grouped into runs, while tabs and structures
+/// remain individual DOM siblings.
 pub enum Cell<'a> {
     Char(char),
-    /// ドキュメントの行のみにある列区切り文字。
     Tab,
-    /// アイランド: 2 つの次元が必要な行の一部。
-    Field(&'a Row),
-    /// 数式内の何か。
     Node(&'a Node),
 }
 
-pub fn cells_of_line(items: &[Item]) -> Vec<Cell<'_>> {
-    items
-        .iter()
-        .map(|item| match item {
-            Item::Char(c) => Cell::Char(*c),
-            Item::Tab => Cell::Tab,
-            Item::Math(row) => Cell::Field(row),
+pub fn cells_of_row(row: &[Node]) -> Vec<Cell<'_>> {
+    row.iter()
+        .map(|node| match &node.kind {
+            NodeKind::Char(c) => Cell::Char(*c),
+            NodeKind::Tab => Cell::Tab,
+            _ => Cell::Node(node),
         })
         .collect()
-}
-
-pub fn cells_of_row(row: &Row) -> Vec<Cell<'_>> {
-    row.iter().map(Cell::Node).collect()
 }
 
 /// IME がまだコミットしていないテキスト、およびドキュメント内の配置先: 行とそのどこまで。
@@ -76,9 +69,23 @@ pub struct Preedit<'a> {
     pub text: &'a str,
 }
 
+#[derive(Clone, Copy)]
+struct VerticalMetrics {
+    above: f64,
+    below: f64,
+}
+
+impl VerticalMetrics {
+    fn height(self) -> f64 {
+        self.above + self.below
+    }
+}
+
 pub struct Renderer<'a> {
     doc: &'a Document,
     preedit: Option<&'a Preedit<'a>>,
+    active: Option<&'a Path>,
+    font_size: f64,
 }
 
 /// 待機中の文字1 つのスパンとして描画されます。これにより、テキストの間隔と形状が維持されます。
@@ -90,7 +97,12 @@ struct Run {
 
 impl<'a> Renderer<'a> {
     pub fn new(doc: &'a Document) -> Renderer<'a> {
-        Renderer { doc, preedit: None }
+        Renderer {
+            doc,
+            preedit: None,
+            active: None,
+            font_size: settings::current().font_size,
+        }
     }
 
     pub fn with_preedit(mut self, preedit: Option<&'a Preedit<'a>>) -> Renderer<'a> {
@@ -98,19 +110,24 @@ impl<'a> Renderer<'a> {
         self
     }
 
+    pub fn with_active_path(mut self, active: Option<&'a Path>) -> Renderer<'a> {
+        self.active = active;
+        self
+    }
+
     /// ドキュメントの線を描画します。行とは、パスが空の行です。
-    pub fn line(&self, items: &[Item]) -> Element {
-        self.row(&cells_of_line(items), &[])
+    pub fn line(&self, row: &[Node]) -> Element {
+        self.row(&cells_of_row(row), &[], self.font_size)
     }
 
     /// どこにでも 1 行を描画します。
-    pub fn row(&self, cells: &[Cell<'_>], path: &Path) -> Element {
-        // 文書の行は散文です。アイランド内のすべてのものは数式であり、その文字は数式と同じように設定されます。
-        let math = !path.is_empty();
+    pub fn row(&self, cells: &[Cell<'_>], path: &Path, font_size: f64) -> Element {
+        // 入れ子の空Rowだけは、編集位置を示すプレースホルダーが必要です。
+        let nested = !path.is_empty();
         let container = self.el("span", ROW_CLASS);
         container.set_attribute(PATH_ATTR, &encode_path(path)).ok();
         if cells.is_empty() {
-            container.append_child(&self.empty(math)).ok();
+            container.append_child(&self.empty(nested)).ok();
         }
         let mut run: Option<Run> = None;
         for (index, cell) in cells.iter().enumerate() {
@@ -119,23 +136,19 @@ impl<'a> Renderer<'a> {
                 container.append_child(&preedit).ok();
             }
             match cell {
-                Cell::Char(c) => {
-                    let class = char_class(*c, math);
-                    match run.as_mut().filter(|run| run.class == class) {
-                        Some(run) => run.text.push(*c),
-                        None => {
-                            self.flush(&container, &mut run);
-                            run = Some(Run {
-                                start: index,
-                                class,
-                                text: c.to_string(),
-                            });
-                        }
+                Cell::Char(c) => match run.as_mut() {
+                    Some(run) => run.text.push(*c),
+                    None => {
+                        run = Some(Run {
+                            start: index,
+                            class: RUN_CLASS,
+                            text: c.to_string(),
+                        });
                     }
-                }
+                },
                 cell => {
                     self.flush(&container, &mut run);
-                    let element = self.cell(cell, path, index);
+                    let element = self.cell(cell, path, index, font_size);
                     element.set_attribute(START_ATTR, &index.to_string()).ok();
                     container.append_child(&element).ok();
                 }
@@ -149,8 +162,8 @@ impl<'a> Renderer<'a> {
     }
 
     /// 空の行でも、測定してクリックする必要があります。
-    fn empty(&self, math: bool) -> Element {
-        let class = if math { PLACEHOLDER_CLASS } else { RUN_CLASS };
+    fn empty(&self, nested: bool) -> Element {
+        let class = if nested { PLACEHOLDER_CLASS } else { RUN_CLASS };
         let element = self.el("span", class);
         element.set_attribute(START_ATTR, "0").ok();
         element
@@ -172,56 +185,44 @@ impl<'a> Renderer<'a> {
         container.append_child(&element).ok();
     }
 
-    fn cell(&self, cell: &Cell<'_>, path: &Path, index: usize) -> Element {
+    fn cell(&self, cell: &Cell<'_>, path: &Path, index: usize, font_size: f64) -> Element {
         match cell {
             // 上記の実行によって処理されます。ランは決して独自のセルではありません。
-            Cell::Char(c) => self.span(char_class(*c, !path.is_empty()), &c.to_string()),
+            Cell::Char(c) => self.span(RUN_CLASS, &c.to_string()),
             Cell::Tab => self.el("span", TAB_CLASS),
-            Cell::Field(row) => {
-                let field = self.el("span", FIELD_CLASS);
-                if row.is_empty() {
-                    field.class_list().add_1("mn-field-empty").ok();
-                }
-                let mut child = path.to_vec();
-                child.push((index, 0));
-                field
-                    .append_child(&self.row(&cells_of_row(row), &child))
-                    .ok();
-                field
-            }
-            Cell::Node(node) => self.node(node, path, index),
+            Cell::Node(node) => self.node(node, path, index, font_size),
         }
     }
 
-    fn child_row(&self, node: &Node, slot: usize, path: &Path, index: usize) -> Element {
+    fn child_row(
+        &self,
+        node: &Node,
+        slot: usize,
+        path: &Path,
+        index: usize,
+        font_size: f64,
+    ) -> Element {
         let mut child = path.to_vec();
         child.push((index, slot));
         let row = node.slot(slot).cloned().unwrap_or_default();
-        self.row(&cells_of_row(&row), &child)
+        self.row(&cells_of_row(&row), &child, font_size)
     }
 
-    fn node(&self, node: &Node, path: &Path, index: usize) -> Element {
-        match node {
-            Node::Char(c) => self.span(char_class(*c, true), &c.to_string()),
-            Node::Sym(name) => {
-                let symbol = vocabulary::lookup(name);
-                let glyph = symbol.map(|s| s.glyph).unwrap_or(name.as_str());
-                let class = match symbol.map(|s| s.class) {
-                    Some(Class::Ident) => "mn-atom mn-ident",
-                    Some(Class::Bin) => "mn-atom mn-bin",
-                    Some(Class::Rel) => "mn-atom mn-rel",
-                    _ => "mn-atom mn-punct",
-                };
-                self.span(class, glyph)
-            }
-            Node::Func(name) => self.span("mn-atom mn-func", name),
-            Node::Stack { between, .. } => {
-                // ルールの上下が等しい場合、ルールはボックスの中央に配置され、その中央に行が配置されます。
+    fn node(&self, node: &Node, path: &Path, index: usize, font_size: f64) -> Element {
+        let base = match &node.kind {
+            NodeKind::Char(c) => self.span(RUN_CLASS, &c.to_string()),
+            NodeKind::Tab => self.el("span", TAB_CLASS),
+            NodeKind::Stack { above, between, .. } => {
                 let frac = self.el("span", "mn-frac");
+                let shift = stack_axis_shift(above, between, font_size);
+                frac.set_attribute("style", &format!("vertical-align:{shift}px"))
+                    .ok();
                 let num = self.el("span", "mn-frac-num");
-                num.append_child(&self.child_row(node, 0, path, index)).ok();
+                num.append_child(&self.child_row(node, 0, path, index, font_size))
+                    .ok();
                 let den = self.el("span", "mn-frac-den");
-                den.append_child(&self.child_row(node, 1, path, index)).ok();
+                den.append_child(&self.child_row(node, 1, path, index, font_size))
+                    .ok();
                 frac.append_child(&num).ok();
                 match between {
                     Between::Rule => frac.append_child(&self.el("span", "mn-frac-rule")).ok(),
@@ -231,13 +232,19 @@ impl<'a> Renderer<'a> {
                 frac.append_child(&den).ok();
                 frac
             }
-            Node::Sqrt { index: root, .. } => {
+            NodeKind::Sqrt { index: root, .. } => {
                 let sqrt = self.el("span", "mn-sqrt");
                 let body_slot = if root.is_some() { 1 } else { 0 };
                 if root.is_some() {
                     let degree = self.el("span", "mn-sqrt-index");
                     degree
-                        .append_child(&self.child_row(node, 0, path, index))
+                        .append_child(&self.child_row(
+                            node,
+                            0,
+                            path,
+                            index,
+                            font_size * ROOT_INDEX_SCALE,
+                        ))
                         .ok();
                     sqrt.append_child(&degree).ok();
                 }
@@ -249,59 +256,43 @@ impl<'a> Renderer<'a> {
                 ))
                 .ok();
                 let body = self.el("span", "mn-sqrt-body");
-                body.append_child(&self.child_row(node, body_slot, path, index))
+                body.append_child(&self.child_row(node, body_slot, path, index, font_size))
                     .ok();
                 sqrt.append_child(&body).ok();
                 sqrt
             }
-            Node::Sup(_) => {
+            NodeKind::Sup(_) => {
                 let sup = self.el("span", "mn-sup");
-                sup.append_child(&self.child_row(node, 0, path, index)).ok();
+                sup.append_child(&self.child_row(node, 0, path, index, font_size * SCRIPT_SCALE))
+                    .ok();
                 sup
             }
-            Node::Sub(_) => {
+            NodeKind::Sub(_) => {
                 let sub = self.el("span", "mn-sub");
-                sub.append_child(&self.child_row(node, 0, path, index)).ok();
+                sub.append_child(&self.child_row(node, 0, path, index, font_size * SCRIPT_SCALE))
+                    .ok();
                 sub
             }
-            Node::Group { delim, .. } => {
+            NodeKind::Group { delim, .. } => {
                 let group = self.el("span", "mn-group");
                 group.append_child(&self.delimiter(delim, true)).ok();
                 let body = self.el("span", "mn-group-body");
-                body.append_child(&self.child_row(node, 0, path, index))
+                body.append_child(&self.child_row(node, 0, path, index, font_size))
                     .ok();
                 group.append_child(&body).ok();
                 group.append_child(&self.delimiter(delim, false)).ok();
                 group
             }
-            Node::Limits { sym, lower, upper } => {
-                let glyph = sym.as_str();
-                let container = self.el("span", "mn-bigop mn-bigop-stacked");
-                let upper_el = self.el("span", "mn-limit mn-limit-upper");
-                upper_el
-                    .append_child(&self.child_row(node, 1, path, index))
-                    .ok();
-                let lower_el = self.el("span", "mn-limit mn-limit-lower");
-                lower_el
-                    .append_child(&self.child_row(node, 0, path, index))
-                    .ok();
-                if upper.is_empty() {
-                    upper_el.class_list().add_1("mn-limit-empty").ok();
-                }
-                if lower.is_empty() {
-                    lower_el.class_list().add_1("mn-limit-empty").ok();
-                }
-                let symbol_class = if glyph.chars().count() > 1 {
+            NodeKind::BigOp(glyph) => {
+                let class = if glyph.chars().count() > 1 {
                     "mn-bigop-symbol mn-bigop-word"
                 } else {
                     "mn-bigop-symbol"
                 };
-                container.append_child(&upper_el).ok();
-                container.append_child(&self.span(symbol_class, glyph)).ok();
-                container.append_child(&lower_el).ok();
-                container
+                self.span(class, glyph)
             }
-            Node::Matrix { kind, cells } => {
+            NodeKind::Container(_) => self.child_row(node, 0, path, index, font_size),
+            NodeKind::Matrix { kind, cells } => {
                 let container = self.el("span", "mn-matrix");
                 let delim = match kind {
                     MatrixKind::Grid => Delim::Bracket,
@@ -323,6 +314,7 @@ impl<'a> Renderer<'a> {
                             row_index * cols + col_index,
                             path,
                             index,
+                            font_size,
                         ))
                         .ok();
                         grid.append_child(&cell).ok();
@@ -334,7 +326,82 @@ impl<'a> Renderer<'a> {
                 }
                 container
             }
+        };
+        let lower_slot = node.lower_slot();
+        let upper_slot = node.upper_slot();
+        let is_active = |slot| {
+            let mut child = path.to_vec();
+            child.push((index, slot));
+            self.active.is_some_and(|active| active == child.as_slice())
+        };
+        let show_upper = !node.upper.is_empty() || is_active(upper_slot);
+        let show_lower = !node.lower.is_empty() || is_active(lower_slot);
+        if !show_upper && !show_lower {
+            if matches!(&node.kind, NodeKind::BigOp(_)) {
+                base.class_list().add_1("mn-bigop").ok();
+            }
+            return base;
         }
+        if matches!(&node.kind, NodeKind::BigOp(_)) {
+            let container = self.el("span", "mn-bigop mn-bigop-stacked");
+            if show_upper {
+                let upper = self.el("span", "mn-limit mn-limit-upper");
+                upper
+                    .append_child(&self.child_row(
+                        node,
+                        upper_slot,
+                        path,
+                        index,
+                        font_size * LIMIT_SCALE,
+                    ))
+                    .ok();
+                container.append_child(&upper).ok();
+            }
+            container.append_child(&base).ok();
+            if show_lower {
+                let lower = self.el("span", "mn-limit mn-limit-lower");
+                lower
+                    .append_child(&self.child_row(
+                        node,
+                        lower_slot,
+                        path,
+                        index,
+                        font_size * LIMIT_SCALE,
+                    ))
+                    .ok();
+                container.append_child(&lower).ok();
+            }
+            return container;
+        }
+        let container = self.el("span", "mn-annotated");
+        if show_upper {
+            let upper = self.el("span", "mn-limit mn-limit-upper");
+            upper
+                .append_child(&self.child_row(
+                    node,
+                    upper_slot,
+                    path,
+                    index,
+                    font_size * LIMIT_SCALE,
+                ))
+                .ok();
+            container.append_child(&upper).ok();
+        }
+        container.append_child(&base).ok();
+        if show_lower {
+            let lower = self.el("span", "mn-limit mn-limit-lower");
+            lower
+                .append_child(&self.child_row(
+                    node,
+                    lower_slot,
+                    path,
+                    index,
+                    font_size * LIMIT_SCALE,
+                ))
+                .ok();
+            container.append_child(&lower).ok();
+        }
+        container
     }
 
     /// スタックの 2 行間の矢印。シャフトは柔軟な線なので、ルールと同様に、矢印は幅の広い行と同じ幅になります。
@@ -436,26 +503,125 @@ impl<'a> Renderer<'a> {
     }
 }
 
-/// 文字の設定方法。文字はその周囲のテキストと同じように読み取れます。クラスはスペースを確保するためのものです。演算子には空気が入りますが、数字には空気が入りません。
-fn char_class(c: char, math: bool) -> &'static str {
-    if !math {
-        return RUN_CLASS;
-    }
-    if c.is_ascii_digit() {
-        "mn-atom mn-num"
-    } else if is_variable_letter(c) {
-        "mn-atom mn-ident"
-    } else if c.is_alphabetic() {
-        "mn-atom mn-word"
-    } else if matches!(c, '+' | '-' | '=' | '<' | '>' | '±') {
-        "mn-atom mn-bin"
-    } else {
-        "mn-atom mn-punct"
+fn stack_axis_shift(above: &Row, between: &Between, font_size: f64) -> f64 {
+    row_vertical_metrics(above, font_size).below
+        + font_size * 0.22
+        + separator_height(between, font_size) / 2.0
+}
+
+fn separator_height(between: &Between, font_size: f64) -> f64 {
+    match between {
+        Between::Rule => 1.0,
+        Between::Arrow(_) => font_size,
+        Between::Nothing => 0.0,
     }
 }
 
-fn is_variable_letter(c: char) -> bool {
-    c.is_ascii_alphabetic() || matches!(c, 'α'..='ω' | 'Α'..='Ω')
+fn row_vertical_metrics(row: &Row, font_size: f64) -> VerticalMetrics {
+    row.iter()
+        .fold(text_vertical_metrics(font_size), |row, node| {
+            let node = node_vertical_metrics(node, font_size);
+            VerticalMetrics {
+                above: row.above.max(node.above),
+                below: row.below.max(node.below),
+            }
+        })
+}
+
+fn node_vertical_metrics(node: &Node, font_size: f64) -> VerticalMetrics {
+    let mut metrics = match &node.kind {
+        NodeKind::Char(_) | NodeKind::Tab => text_vertical_metrics(font_size),
+        NodeKind::BigOp(_) => VerticalMetrics {
+            above: font_size * 1.05,
+            below: font_size * 0.45,
+        },
+        NodeKind::Stack {
+            above,
+            below,
+            between,
+        } => {
+            let above = row_vertical_metrics(above, font_size);
+            let below = row_vertical_metrics(below, font_size);
+            let separator = separator_height(between, font_size);
+            VerticalMetrics {
+                above: above.height() + font_size * 0.22 + separator / 2.0,
+                below: below.height() + font_size * 0.26 + separator / 2.0,
+            }
+        }
+        NodeKind::Sqrt { index, body } => {
+            let body = row_vertical_metrics(body, font_size);
+            let index = index
+                .as_ref()
+                .map(|row| row_vertical_metrics(row, font_size * ROOT_INDEX_SCALE).height())
+                .unwrap_or(0.0);
+            VerticalMetrics {
+                above: (body.above + font_size * 0.2).max(index),
+                below: body.below + font_size * 0.08,
+            }
+        }
+        NodeKind::Sup(row) => {
+            let row = row_vertical_metrics(row, font_size * SCRIPT_SCALE);
+            VerticalMetrics {
+                above: row.height() + font_size * 0.35,
+                below: font_size * 0.1,
+            }
+        }
+        NodeKind::Sub(row) => {
+            let row = row_vertical_metrics(row, font_size * SCRIPT_SCALE);
+            VerticalMetrics {
+                above: font_size * 0.7,
+                below: row.height(),
+            }
+        }
+        NodeKind::Group { body, .. } | NodeKind::Container(body) => {
+            row_vertical_metrics(body, font_size)
+        }
+        NodeKind::Matrix { cells, .. } => {
+            let rows: Vec<f64> = cells
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|cell| row_vertical_metrics(cell, font_size).height())
+                        .fold(font_size * 2.0, f64::max)
+                })
+                .collect();
+            let height =
+                rows.iter().sum::<f64>() + font_size * 0.15 * rows.len().saturating_sub(1) as f64;
+            VerticalMetrics {
+                above: height / 2.0,
+                below: height / 2.0,
+            }
+        }
+    };
+    if matches!(&node.kind, NodeKind::BigOp(_)) {
+        if !node.upper.is_empty() {
+            metrics.above += row_vertical_metrics(&node.upper, font_size * LIMIT_SCALE).height();
+        }
+        if !node.lower.is_empty() {
+            metrics.below += row_vertical_metrics(&node.lower, font_size * LIMIT_SCALE).height();
+        }
+    } else if !node.upper.is_empty() || !node.lower.is_empty() {
+        let upper = if node.upper.is_empty() {
+            0.0
+        } else {
+            row_vertical_metrics(&node.upper, font_size * LIMIT_SCALE).height()
+        };
+        let lower = if node.lower.is_empty() {
+            0.0
+        } else {
+            row_vertical_metrics(&node.lower, font_size * LIMIT_SCALE).height()
+        };
+        metrics.above += upper.max(font_size * 0.62);
+        metrics.below += lower.max(font_size * 0.62);
+    }
+    metrics
+}
+
+fn text_vertical_metrics(font_size: f64) -> VerticalMetrics {
+    VerticalMetrics {
+        above: font_size * 1.4,
+        below: font_size * 0.6,
+    }
 }
 
 #[cfg(test)]
@@ -475,9 +641,32 @@ mod tests {
     }
 
     #[test]
-    fn prose_is_not_set_as_a_formula() {
-        assert_eq!(char_class('a', false), RUN_CLASS);
-        assert_eq!(char_class('a', true), "mn-atom mn-ident");
-        assert_eq!(char_class('あ', true), "mn-atom mn-word");
+    fn fraction_axis_uses_the_recursive_height_below_its_numerator_baseline() {
+        let plain = vec![Node::char('a')];
+        assert!((stack_axis_shift(&plain, &Between::Rule, 15.0) - 12.8).abs() < 0.001);
+        let nested = vec![Node::stack(
+            vec![Node::char('a')],
+            vec![Node::char('b')],
+            Between::Rule,
+        )];
+        assert!(stack_axis_shift(&nested, &Between::Rule, 15.0) > 12.8);
+        let limit_font = 15.0 * LIMIT_SCALE;
+        assert!(
+            (stack_axis_shift(&plain, &Between::Rule, limit_font) - (limit_font * 0.82 + 0.5))
+                .abs()
+                < 0.001
+        );
+        let nested_scale = limit_font * SCRIPT_SCALE;
+        assert!(stack_axis_shift(&plain, &Between::Rule, nested_scale) < limit_font);
+    }
+
+    #[test]
+    fn structure_characters_are_rendered_as_run_cells() {
+        let row = vec![Node::char('+'), Node::char('d')];
+        let cells = cells_of_row(&row);
+        assert!(matches!(
+            cells.as_slice(),
+            [Cell::Char('+'), Cell::Char('d')]
+        ));
     }
 }

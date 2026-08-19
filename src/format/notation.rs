@@ -2,7 +2,7 @@
 //!
 //! `$(` … `)` 内のすべてがここで読み取られ、ここで書き戻されるため、保存されたファイルはプレーン テキストのままであり、他の形式は関与しません。
 
-use crate::structure::ast::{is_arrow, Between, Delim, MatrixKind, Node, Row};
+use crate::structure::ast::{is_arrow, Between, Delim, MatrixKind, Node, NodeKind, Row};
 use crate::structure::vocabulary;
 
 pub const LIMITS_MARK: char = '↨';
@@ -127,20 +127,28 @@ fn content(chars: &[char]) -> Row {
     match chars[0] {
         c if is_stack_mark(c) && chars.get(1) != Some(&c) => {
             let args = split_args(trim(&chars[1..]));
-            return vec![Node::Stack {
-                above: arg(&args, 0),
-                below: arg(&args, 1),
-                between: between(c),
-            }];
+            return vec![Node::stack(arg(&args, 0), arg(&args, 1), between(c))];
         }
         LIMITS_MARK => {
             let args = split_args(trim(&chars[1..]));
-            let sym: String = args.first().map(|a| a.iter().collect()).unwrap_or_default();
-            return vec![Node::Limits {
-                sym,
-                upper: arg(&args, 1),
-                lower: arg(&args, 2),
-            }];
+            let base = arg(&args, 0);
+            let mut node = match base.as_slice() {
+                [node] => node.clone(),
+                _ => Node::container(base),
+            };
+            node.upper = arg(&args, 1);
+            node.lower = arg(&args, 2);
+            if let NodeKind::Container(base) = &node.kind {
+                if let Some(name) = big_op_text(base) {
+                    node.kind = NodeKind::BigOp(name);
+                }
+            } else if let NodeKind::Char(c) = &node.kind {
+                let name = c.to_string();
+                if is_big_op(&name) {
+                    node.kind = NodeKind::BigOp(name);
+                }
+            }
+            return vec![node];
         }
         '^' | '_' => return scripts(chars),
         '[' => return vec![matrix(chars, MatrixKind::Grid)],
@@ -159,11 +167,11 @@ fn content(chars: &[char]) -> Row {
         .into_iter()
         .find(|&(_, c)| is_stack_mark(c))
     {
-        return vec![Node::Stack {
-            above: row(trim(&chars[..i])),
-            below: row(trim(&chars[i + 1..])),
-            between: between(c),
-        }];
+        return vec![Node::stack(
+            row(trim(&chars[..i])),
+            row(trim(&chars[i + 1..])),
+            between(c),
+        )];
     }
     row(chars)
 }
@@ -171,6 +179,22 @@ fn content(chars: &[char]) -> Row {
 /// スタックの 2 行を区切る文字。
 fn is_stack_mark(c: char) -> bool {
     c == '/' || c == '-' || is_arrow(c)
+}
+
+fn is_big_op(text: &str) -> bool {
+    vocabulary::BIG_OPS.iter().any(|op| op.glyph == text) || text == "Σ"
+}
+
+fn big_op_text(row: &Row) -> Option<String> {
+    let text: String = row
+        .iter()
+        .map(|node| match &node.kind {
+            NodeKind::Char(c) => Some(c.to_string()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?
+        .concat();
+    is_big_op(&text).then_some(text)
 }
 
 fn between(mark: char) -> Between {
@@ -193,7 +217,7 @@ fn root(chars: &[char]) -> Row {
     };
     let rest = trim(rest);
     let (body, taken) = chunk(rest);
-    let mut out = vec![Node::Sqrt { index, body }];
+    let mut out = vec![Node::sqrt(index, body)];
     out.extend(row(&rest[taken.min(rest.len())..]));
     out
 }
@@ -207,7 +231,7 @@ fn chunk(chars: &[char]) -> (Row, usize) {
         i = next;
     }
     while let Some((node, next)) = node_at(chars, i) {
-        if !matches!(node, Node::Sup(_) | Node::Sub(_)) {
+        if !matches!(&node.kind, NodeKind::Sup(_) | NodeKind::Sub(_)) {
             break;
         }
         out.push(node);
@@ -229,9 +253,9 @@ fn scripts(chars: &[char]) -> Row {
         let end = marks.get(n + 1).copied().unwrap_or(chars.len());
         let body = row(trim(&chars[start + 1..end]));
         out.push(if chars[start] == '^' {
-            Node::Sup(body)
+            Node::sup(body)
         } else {
-            Node::Sub(body)
+            Node::sub(body)
         });
     }
     out
@@ -285,7 +309,7 @@ fn matrix(chars: &[char], kind: MatrixKind) -> Node {
     for row in &mut cells {
         row.resize_with(width, Row::new);
     }
-    Node::Matrix { kind, cells }
+    Node::matrix(kind, cells)
 }
 
 /// `open` の括弧または括弧を閉じる括弧または括弧のインデックス。
@@ -337,41 +361,29 @@ fn row(chars: &[char]) -> Row {
 fn node_at(chars: &[char], i: usize) -> Option<(Node, usize)> {
     let c = *chars.get(i)?;
     if is_special(c) && chars.get(i + 1) == Some(&c) {
-        return Some((Node::Char(c), i + 2));
+        return Some((Node::char(c), i + 2));
     }
     if c == '$' && chars.get(i + 1) == Some(&'(') {
         let end = island_end(chars, i)?;
         let inner = content(&chars[i + 2..end]);
         let node = match inner.len() {
             1 => inner.into_iter().next()?,
-            _ => Node::Group {
-                delim: Delim::Paren,
-                body: inner,
-            },
+            _ => Node::group(Delim::Paren, inner),
         };
         return Some((node, end + 1));
     }
     if c == '(' {
         let end = closing(chars, i)?;
-        return Some((
-            Node::Group {
-                delim: Delim::Paren,
-                body: row(&chars[i + 1..end]),
-            },
-            end + 1,
-        ));
+        return Some((Node::group(Delim::Paren, row(&chars[i + 1..end])), end + 1));
     }
     if c == '[' {
         let end = closing(chars, i)?;
         return Some((
-            Node::Group {
-                delim: Delim::Bracket,
-                body: row(&chars[i + 1..end]),
-            },
+            Node::group(Delim::Bracket, row(&chars[i + 1..end])),
             end + 1,
         ));
     }
-    Some((Node::Char(c), i + 1))
+    Some((Node::char(c), i + 1))
 }
 
 /// `at` で始まるアイランドを閉じる `)` のインデックス。
@@ -416,18 +428,19 @@ pub fn island_text(root: &Row) -> String {
 
 /// 行内に表示されるノード: 構造には独自のアイランドが必要です。
 fn inline(node: &Node) -> String {
-    match node {
-        Node::Char(c) if is_special(*c) => format!("{c}{c}"),
-        Node::Char(c) => c.to_string(),
-        Node::Sym(name) => vocabulary::lookup(name)
-            .map(|s| s.glyph.to_string())
-            .unwrap_or_else(|| name.clone()),
-        Node::Func(name) => name.clone(),
-        Node::Group { delim, body } => {
+    if !node.upper.is_empty() || !node.lower.is_empty() {
+        return format!("$({})", bare(node));
+    }
+    match &node.kind {
+        NodeKind::Char(c) if is_special(*c) => format!("{c}{c}"),
+        NodeKind::Char(c) => c.to_string(),
+        NodeKind::BigOp(name) => name.clone(),
+        NodeKind::Group { delim, body } => {
             let (open, close) = delim.pair();
             format!("{open}{}{close}", text(body))
         }
-        other => format!("$({})", bare(other)),
+        NodeKind::Container(body) => text(body),
+        _ => format!("$({})", bare(node)),
     }
 }
 
@@ -437,8 +450,24 @@ fn text(row: &Row) -> String {
 
 /// A
 fn bare(node: &Node) -> String {
-    match node {
-        Node::Stack {
+    if !node.upper.is_empty() || !node.lower.is_empty() {
+        let base = match &node.kind {
+            NodeKind::Container(body) => text(body),
+            _ => {
+                let mut base = node.clone();
+                base.upper.clear();
+                base.lower.clear();
+                inline(&base)
+            }
+        };
+        return format!(
+            "{LIMITS_MARK} {base}, {}, {}",
+            text(&node.upper),
+            text(&node.lower)
+        );
+    }
+    match &node.kind {
+        NodeKind::Stack {
             above,
             below,
             between,
@@ -450,16 +479,13 @@ fn bare(node: &Node) -> String {
                 Between::Arrow(arrow) => format!("{above} {arrow} {below}"),
             }
         }
-        Node::Sqrt { index, body } => match index {
+        NodeKind::Sqrt { index, body } => match index {
             Some(index) => format!("{ROOT_MARK}[{}] {}", text(index), text(body)),
             None => format!("{ROOT_MARK} {}", text(body)),
         },
-        Node::Sup(body) => format!("^ {}", text(body)),
-        Node::Sub(body) => format!("_ {}", text(body)),
-        Node::Limits { sym, lower, upper } => {
-            format!("{LIMITS_MARK} {sym}, {}, {}", text(upper), text(lower))
-        }
-        Node::Matrix { kind, cells } => {
+        NodeKind::Sup(body) => format!("^ {}", text(body)),
+        NodeKind::Sub(body) => format!("_ {}", text(body)),
+        NodeKind::Matrix { kind, cells } => {
             let rows: String = cells
                 .iter()
                 .map(|row| {
@@ -472,7 +498,7 @@ fn bare(node: &Node) -> String {
                 MatrixKind::Cases => format!("{{{rows}"),
             }
         }
-        other => inline(other),
+        _ => inline(node),
     }
 }
 
@@ -490,8 +516,11 @@ mod tests {
         assert_eq!(roundtrip("/ x+1, 2y"), "x+1/2y");
         assert!(matches!(
             parse_island("1/2").as_slice(),
-            [Node::Stack {
-                between: Between::Rule,
+            [Node {
+                kind: NodeKind::Stack {
+                    between: Between::Rule,
+                    ..
+                },
                 ..
             }]
         ));
@@ -503,8 +532,11 @@ mod tests {
         assert_eq!(roundtrip("- n, k"), "n - k");
         assert!(matches!(
             parse_island("- n, k").as_slice(),
-            [Node::Stack {
-                between: Between::Nothing,
+            [Node {
+                kind: NodeKind::Stack {
+                    between: Between::Nothing,
+                    ..
+                },
                 ..
             }]
         ));
@@ -515,7 +547,10 @@ mod tests {
         assert_eq!(roundtrip("→ f, g"), "f → g");
         assert_eq!(roundtrip("n→∞"), "n → ∞");
         match parse_island("→ f,").as_slice() {
-            [Node::Stack { between, below, .. }] => {
+            [Node {
+                kind: NodeKind::Stack { between, below, .. },
+                ..
+            }] => {
                 assert_eq!(*between, Between::Arrow('→'));
                 assert!(below.is_empty());
             }
@@ -531,8 +566,14 @@ mod tests {
         assert_eq!(roundtrip("sqrt[3] x"), "√[3] x");
         // マークの直後のチャンクだけがルートの下にあります。
         match parse_island("√ x+1").as_slice() {
-            [Node::Sqrt { body, .. }, Node::Char('+'), Node::Char('1')] => {
-                assert_eq!(body, &vec![Node::Char('x')]);
+            [Node {
+                kind: NodeKind::Sqrt { body, .. },
+                ..
+            }, plus, one]
+                if matches!(&plus.kind, NodeKind::Char('+'))
+                    && matches!(&one.kind, NodeKind::Char('1')) =>
+            {
+                assert_eq!(body, &vec![Node::char('x')]);
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -541,7 +582,10 @@ mod tests {
     #[test]
     fn a_bracketed_chunk_goes_under_the_root_whole() {
         match parse_island("√ (x+1)").as_slice() {
-            [Node::Sqrt { body, .. }] => assert_eq!(body.len(), 1),
+            [Node {
+                kind: NodeKind::Sqrt { body, .. },
+                ..
+            }] => assert_eq!(body.len(), 1),
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -550,7 +594,19 @@ mod tests {
     fn scripts_can_be_written_together() {
         assert_eq!(roundtrip("^ 3"), "^ 3");
         let row = parse_island("^ 3 _ i");
-        assert!(matches!(row.as_slice(), [Node::Sup(_), Node::Sub(_)]));
+        assert!(matches!(
+            row.as_slice(),
+            [
+                Node {
+                    kind: NodeKind::Sup(_),
+                    ..
+                },
+                Node {
+                    kind: NodeKind::Sub(_),
+                    ..
+                }
+            ]
+        ));
         assert_eq!(island_text(&row), "$(^ 3)$(_ i)");
     }
 
@@ -558,7 +614,11 @@ mod tests {
     fn a_symbol_carries_what_is_above_and_below_it() {
         assert_eq!(roundtrip("↨ Σ, n, x=1"), "↨ Σ, n, x=1");
         match parse_island("↨ Σ, n, x=1").as_slice() {
-            [Node::Limits { sym, upper, lower }] => {
+            [Node {
+                kind: NodeKind::BigOp(sym),
+                upper,
+                lower,
+            }] => {
                 assert_eq!(sym, "Σ");
                 assert_eq!(text(upper), "n");
                 assert_eq!(text(lower), "x=1");
@@ -568,9 +628,16 @@ mod tests {
     }
 
     #[test]
+    fn structured_rows_can_be_annotated_and_roundtrip() {
+        assert_eq!(roundtrip("↨ $(1/2)x, u, l"), "↨ $(1/2)x, u, l");
+        let row = parse_island("↨ $(1/2)x, u, l");
+        assert!(matches!(&row[0].kind, NodeKind::Container(_)));
+    }
+
+    #[test]
     fn one_limit_may_be_left_out() {
         match parse_island("↨ lim,, n→∞").as_slice() {
-            [Node::Limits { upper, lower, .. }] => {
+            [Node { upper, lower, .. }] => {
                 assert!(upper.is_empty());
                 // ここでは矢印は普通の文字なので二重になります。
                 assert_eq!(text(lower), "n→→∞");
@@ -584,7 +651,10 @@ mod tests {
         assert_eq!(roundtrip("[a, b][c, d]"), "[a, b][c, d]");
         assert_eq!(roundtrip("{[x>0, 正][x<0, 負]"), "{[x>0, 正][x<0, 負]");
         match parse_island("[a, b][c, d]").as_slice() {
-            [Node::Matrix { kind, cells }] => {
+            [Node {
+                kind: NodeKind::Matrix { kind, cells },
+                ..
+            }] => {
                 assert_eq!(*kind, MatrixKind::Grid);
                 assert_eq!(cells.len(), 2);
                 assert_eq!(cells[0].len(), 2);
@@ -597,8 +667,23 @@ mod tests {
     fn islands_nest() {
         let row = parse_island("√ x$(^ 3)");
         match row.as_slice() {
-            [Node::Sqrt { body, .. }] => {
-                assert!(matches!(body.as_slice(), [Node::Char('x'), Node::Sup(_)]));
+            [Node {
+                kind: NodeKind::Sqrt { body, .. },
+                ..
+            }] => {
+                assert!(matches!(
+                    body.as_slice(),
+                    [
+                        Node {
+                            kind: NodeKind::Char('x'),
+                            ..
+                        },
+                        Node {
+                            kind: NodeKind::Sup(_),
+                            ..
+                        }
+                    ]
+                ));
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -609,7 +694,7 @@ mod tests {
     fn doubled_characters_are_ordinary_ones() {
         assert_eq!(
             parse_island("a//b"),
-            vec![Node::Char('a'), Node::Char('/'), Node::Char('b')]
+            vec![Node::char('a'), Node::char('/'), Node::char('b')]
         );
         assert_eq!(roundtrip("a//b"), "a//b");
         assert_eq!(parse_island("a--b").len(), 3);

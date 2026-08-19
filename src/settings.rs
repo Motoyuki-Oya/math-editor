@@ -56,6 +56,10 @@ pub fn line_numbers() -> bool {
     CURRENT.with(|current| current.borrow().line_numbers)
 }
 
+pub fn wrap() -> bool {
+    CURRENT.with(|current| current.borrow().wrap)
+}
+
 pub fn history_limit() -> usize {
     CURRENT.with(|current| current.borrow().history_limit)
 }
@@ -99,20 +103,8 @@ fn show(settings: &Settings) {
             },
         )
         .ok();
-    style
-        .set_property(
-            "--setting-wrap",
-            if settings.wrap { "pre-wrap" } else { "pre" },
-        )
-        .ok();
-    // 折り返された行はウィンドウと同じ幅です。ラップされていないものは必要なだけ幅があり、エディターに横にスクロールする機能を与えます。
-    style
-        .set_property(
-            "--setting-line-width",
-            if settings.wrap { "100%" } else { "max-content" },
-        )
-        .ok();
-    // 行番号の幅はここにはありません。設定が言うのは番号を出すかどうかだけで、幅は文書の行数次第なので描く側 (`crate::view`) が決めます。
+    // 折り返しは文書のクラスなので、描く側 (`crate::view`) が現在の設定から決めます。
+    // 行番号の幅もここにはありません。設定が言うのは番号を出すかどうかだけで、幅は文書の行数次第なので描く側が決めます。
 }
 
 /// ファイルに保存されている設定を書き込みます。1 行に 1 つの `name = value` で、これは TOML の小さなコーナーです。

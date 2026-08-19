@@ -6,6 +6,7 @@ use std::rc::Rc;
 use web_sys::InputEvent;
 
 use super::clipboard::{self, Clip};
+use super::model::Did;
 use super::search::{self, Place, SearchOptions};
 use super::session::{changed, focus, redraw, session, Session};
 use super::trigger;
@@ -16,6 +17,7 @@ pub fn on_input(session: &Rc<RefCell<Session>>, event: InputEvent) {
     let text = textarea.value();
     if session.borrow().composing {
         // まだ作成中。 `compositionupdate` は完了するまで描画します。
+        update_composition(session, &text);
         event.stop_propagation();
         return;
     }
@@ -27,21 +29,34 @@ pub fn on_input(session: &Rc<RefCell<Session>>, event: InputEvent) {
 }
 
 /// コミットされる前に IME が何を構成しているかを表示します。
-pub fn update_composition(session: &Rc<RefCell<Session>>, text: &str) {
-    session.borrow_mut().preedit = text.to_string();
+pub fn update_composition(session: &Rc<RefCell<Session>>, event_text: &str) {
+    let textarea_text = session.borrow().textarea.value();
+    session.borrow_mut().preedit = composition_text(event_text, textarea_text);
     redraw(session);
 }
 
-pub fn commit_composition(session: &Rc<RefCell<Session>>, text: &str) {
-    session.borrow().textarea.set_value("");
+pub fn commit_composition(session: &Rc<RefCell<Session>>, event_text: &str) {
+    let textarea = session.borrow().textarea.clone();
+    let text = composition_text(event_text, textarea.value());
+    textarea.set_value("");
     session.borrow_mut().preedit.clear();
     if !text.is_empty() {
-        insert_text(session, text);
+        insert_text(session, &text);
+    } else {
+        redraw(session);
+    }
+}
+
+fn composition_text(event_text: &str, textarea_text: String) -> String {
+    if textarea_text.is_empty() {
+        event_text.to_string()
+    } else {
+        textarea_text
     }
 }
 
 pub fn insert_text(session: &Rc<RefCell<Session>>, text: &str) {
-    // 単一の文字で数式を開始することもできます。
+    // 単一の文字で構造を開始することもできます。
     let mut chars = text.chars();
     if let (Some(c), None) = (chars.next(), chars.next()) {
         if trigger::type_char(session, c) {
@@ -57,24 +72,35 @@ pub fn insert_text(session: &Rc<RefCell<Session>>, text: &str) {
 }
 
 /// キャレットにアイランドを配置し、編集を開始します。
-pub fn insert_math() {
+pub fn insert_structure() {
     let Some(session) = session() else { return };
-    session.borrow_mut().editor.insert_island();
+    session.borrow_mut().editor.start_structure();
     focus();
     changed(&session);
 }
 
-/// パレットから構造をキャレットの数式に配置し、キャレットが通常のテキスト内にあるときに数式を開始します。
+/// パレットから構造をキャレット位置へ配置し、その編集スロットへ入ります。
+pub fn annotate(upper: bool) {
+    let Some(session) = session() else { return };
+    let did = session.borrow_mut().editor.annotate(upper);
+    focus();
+    match did {
+        Did::Changed => changed(&session),
+        Did::Moved => redraw(&session),
+        Did::Nothing => {}
+    }
+}
+
 pub fn insert_node(node: Node) {
     let Some(session) = session() else { return };
     {
-        // 数式を開始してその中に構造を追加するのは 1 つのステップなので、1 回元に戻すとすべてが元に戻ります。
+        // 構造の配置と編集開始は 1 つの操作なので、1 回元に戻すと両方を戻します。
         let mut borrowed = session.borrow_mut();
         borrowed.editor.one_step(|editor| {
-            if editor.inside().is_none() {
-                editor.insert_island();
+            if editor.nested_cursor().is_none() {
+                editor.start_structure();
             }
-            editor.insert_in_island(node);
+            editor.insert_node(node);
         });
     }
     focus();
@@ -109,7 +135,7 @@ pub fn select_all() {
 pub fn selected_text(session: &Rc<RefCell<Session>>) -> Option<String> {
     let borrowed = session.borrow();
     // 構造内の選択範囲は、構造のその部分をコピーします。クリップボードはどちらの方法でも同じです。
-    if let Some(row) = borrowed.editor.island_selection() {
+    if let Some(row) = borrowed.editor.nested_selection() {
         return Some(clipboard::keep(Clip::Row(row)));
     }
     let sel = borrowed.editor.primary();
@@ -125,9 +151,9 @@ pub fn delete_selection(session: &Rc<RefCell<Session>>) {
     changed(session);
 }
 
-/// 数式の編集を停止し、その直後にキャレットを残します。
-pub fn leave_math(session: &Rc<RefCell<Session>>) {
-    session.borrow_mut().editor.leave_island();
+/// 入れ子構造の編集を停止し、その直後にキャレットを残します。
+pub fn leave_structure(session: &Rc<RefCell<Session>>) {
+    session.borrow_mut().editor.leave_structure();
 }
 
 pub fn find_next(query: &str, options: SearchOptions, file_size: Option<usize>) -> bool {
@@ -137,7 +163,10 @@ pub fn find_next(query: &str, options: SearchOptions, file_size: Option<usize>) 
     let found = {
         let borrowed = session.borrow();
         let from = borrowed.search_from.clone().unwrap_or_else(|| {
-            search::key_at(borrowed.editor.primary().end(), borrowed.editor.inside())
+            search::key_at(
+                borrowed.editor.primary().end(),
+                borrowed.editor.nested_cursor(),
+            )
         });
         search::find_next(borrowed.editor.text(), query, options, file_size, from)
     };
@@ -151,7 +180,7 @@ pub fn find_next(query: &str, options: SearchOptions, file_size: Option<usize>) 
             // 構造内の一致がその中に表示されるため、どちらの方法でも見つかったものが選択されたものになります。
             Place::Text(sel) => borrowed.editor.set_sels(vec![sel]),
             Place::Inside { at, cursor } => {
-                borrowed.editor.select_in_island(at, cursor);
+                borrowed.editor.select_nested(at, cursor);
             }
         }
     }
@@ -167,7 +196,7 @@ pub fn replace_all(
     file_size: Option<usize>,
 ) -> usize {
     let Some(session) = session() else { return 0 };
-    leave_math(&session);
+    leave_structure(&session);
     let matches = {
         let borrowed = session.borrow();
         search::find_all(borrowed.editor.text(), query, options, file_size)
@@ -184,17 +213,27 @@ pub fn replace_all(
                 Place::Text(sel) => borrowed.editor.replace_range_with(
                     sel.start(),
                     sel.end(),
-                    search::replacement_items(&text),
+                    search::replacement_nodes(&text),
                 ),
                 Place::Inside { at, cursor } => {
-                    borrowed
-                        .editor
-                        .replace_in_island(*at, cursor.clone(), &text);
+                    borrowed.editor.replace_nested(*at, cursor.clone(), &text);
                 }
             }
         }
-        borrowed.editor.leave_island();
+        borrowed.editor.leave_structure();
     }
     changed(&session);
     matches.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::composition_text;
+
+    #[test]
+    fn textarea_value_keeps_ime_preedit_inline_when_event_data_is_empty() {
+        assert_eq!(composition_text("", "日本".into()), "日本");
+        assert_eq!(composition_text("日本", "".into()), "日本");
+        assert_eq!(composition_text("日", "日本".into()), "日本");
+    }
 }

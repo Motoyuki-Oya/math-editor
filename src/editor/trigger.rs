@@ -1,32 +1,31 @@
-//! テキストから直接数式を開始する、Markdown ショートカットの仕組み: `1/`、`x^`、`\sqrt `、および `$` は数式に切り替わりますが、`\alpha ` と `\sin ` はテキストに通常の文字のみを入れます。
+//! テキストから直接構造を開始するショートカットの仕組み: `1/ `、`x^ `、`\sqrt `は構造に切り替わりますが、`\alpha ` と `\sin ` は通常の文字のみを入れます。
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::session::{self, Session};
-use crate::structure::ast::Node as MathNode;
-use crate::structure::text::Pos;
+use crate::structure::ast::{self, Node as StructureNode};
+use crate::structure::text::{as_char, Pos};
 use crate::structure::vocabulary;
 
 enum Seed {
-    /// `$`: 空の数式。
-    Empty,
     /// `1/`、`x^`: すでに入力されているテキスト、その後、 trigger.
     Typed(String, char),
     /// `\sqrt `: コマンド名の構造体。
-    Node(MathNode),
-    /// `\alpha `、`\sin `: 通常のテキスト。数式は必要ありません。
+    Node(StructureNode),
+    NthRoot(String),
+    /// `\alpha `、`\sin `: 通常のテキスト。
     Text(String),
 }
 
-/// 数式を開始する可能性がある入力文字を処理します。挿入したかどうかを返します。挿入した場合、呼び出し元は文字自体を挿入してはなりません。
+/// 構造ショートカットを完了する入力文字を処理し、入力を消費したかを返します。
 pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
     let sel = session.borrow().editor.primary();
     if !sel.is_caret() || session.borrow().editor.sels().len() > 1 {
         return false;
     }
-    // 式の内部には、構造体自体のショートカットがあります。これらは、通常のテキストを数式に変換するだけです。
-    if session.borrow().editor.inside().is_some() {
+    // 入れ子のRowでは構造編集側が同じショートカットを処理します。
+    if session.borrow().editor.nested_cursor().is_some() {
         return false;
     }
     let before = text_before(session, sel.head);
@@ -46,16 +45,14 @@ pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
         seed => {
             {
                 let mut borrowed = session.borrow_mut();
-                // 入力されたテキストを取得してその構造を作成することは、歴史の 1 ステップです。`1/` を元に戻すと、入力した空の数式ではなく、文字が戻ります。
+                // ショートカット文字列の置換と構造の配置を、履歴上の1操作にまとめます。
                 borrowed.editor.one_step(|editor| {
                     editor.replace_range(from, sel.head, "");
-                    editor.insert_island();
-                    // 誰も求めなかった数式は、それを呼び出した構造が続く限り持続します。つまり、`1/2 + 3` は分数を数式に入れ、`+ 3` をテキストに戻します。
-                    if !matches!(seed, Seed::Empty) {
-                        editor.island_lasts_one_structure();
-                    }
+                    editor.start_structure();
+                    // 本文トリガーの編集状態は、今回作る構造が完成した時点で終了します。
+                    editor.limit_trigger_to_structure();
                     match seed {
-                        Seed::Empty | Seed::Text(_) => {}
+                        Seed::Text(_) => {}
                         Seed::Typed(run, trigger) => {
                             // 一度に 1 文字ずつ、同じドアタイピングが使用するため、`1/` は手動で構築する構造を構築します。
                             let mut buffer = [0u8; 4];
@@ -64,7 +61,12 @@ pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
                             }
                         }
                         Seed::Node(node) => {
-                            editor.insert_in_island(node);
+                            editor.insert_node(node);
+                        }
+                        Seed::NthRoot(index) => {
+                            editor.insert_node(ast::nth_root());
+                            editor.insert_text(&index);
+                            editor.tab(false);
                         }
                     }
                 });
@@ -76,7 +78,7 @@ pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
     }
 }
 
-/// キャレットの前の行の文字、省略された数式。
+/// キャレットの前にある、構造Nodeを空白として読み替えた文字列。
 fn text_before(session: &Rc<RefCell<Session>>, at: Pos) -> String {
     let borrowed = session.borrow();
     borrowed
@@ -85,53 +87,89 @@ fn text_before(session: &Rc<RefCell<Session>>, at: Pos) -> String {
         .line(at.line)
         .iter()
         .take(at.col)
-        .map(|item| item.as_char().unwrap_or(' '))
+        .map(|node| as_char(node).unwrap_or(' '))
         .collect()
 }
 
 /// トリガー文字が生成するもの、およびそれに伴うキャレットの前の文字数。
 fn seed_for(c: char, before: &str) -> Option<(usize, Seed)> {
-    match c {
-        '$' => Some((0, Seed::Empty)),
-        '/' | '^' | '_' => {
+    (c == ' ')
+        .then(|| trailing_typed(before).or_else(|| trailing_shortcut(before)))
+        .flatten()
+}
+
+fn trailing_typed(text: &str) -> Option<(usize, Seed)> {
+    let trigger = text
+        .chars()
+        .next_back()
+        .filter(|c| matches!(c, '/' | '^' | '_'))?;
+    let before = text.strip_suffix(trigger)?;
+    let (consumed, run) = match (trigger == '/').then(|| trailing_group(before)).flatten() {
+        Some(group) => group,
+        None => {
             let run = trailing_run(before);
-            // `and/or` は散文のままである必要があります。 `1/`、`x/`、および `x^` は数式です。
-            let mathlike = !run.is_empty()
-                && (c != '/'
-                    || run.chars().any(|c| c.is_ascii_digit())
-                    || run.chars().count() == 1);
-            mathlike.then(|| (run.chars().count(), Seed::Typed(run, c)))
+            (run.chars().count(), run)
         }
-        ' ' => trailing_shortcut(before),
-        _ => None,
+    };
+    (!run.is_empty()).then(|| (consumed + 1, Seed::Typed(run, trigger)))
+}
+
+fn trailing_group(text: &str) -> Option<(usize, String)> {
+    if !text.ends_with(')') {
+        return None;
     }
+    let mut depth = 0;
+    for (start, c) in text.char_indices().rev() {
+        match c {
+            ')' => depth += 1,
+            '(' if depth == 1 => {
+                let run = &text[start + 1..text.len() - 1];
+                return (!run.is_empty()).then(|| (text[start..].chars().count(), run.to_string()));
+            }
+            '(' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
 }
 
 fn trailing_run(text: &str) -> String {
     let run: String = text
         .chars()
         .rev()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '.')
+        .take_while(|c| c.is_alphanumeric() || *c == '.')
         .collect();
     run.chars().rev().collect()
 }
 
 /// `\name` または `√` などの直接入力されたグリフ。文字を表すだけの名前はテキストのままです。
 fn trailing_shortcut(text: &str) -> Option<(usize, Seed)> {
+    if let Some(root) = trailing_root(text) {
+        return Some(root);
+    }
     if let Some(name) = trailing_command(text) {
-        if let Some(node) = vocabulary::node_for(&name) {
-            let consumed = name.chars().count() + 1;
-            let seed = match node {
-                MathNode::Sym(name) => Seed::Text(vocabulary::glyph_for(&name)?.to_string()),
-                MathNode::Func(name) => Seed::Text(name),
-                node => Seed::Node(node),
-            };
-            return Some((consumed, seed));
+        let consumed = name.chars().count() + 1;
+        if let Some(node) = vocabulary::structure_for(&name) {
+            return Some((consumed, Seed::Node(node)));
+        }
+        if let Some(replacement) = vocabulary::text_for(&name) {
+            return Some((consumed, Seed::Text(replacement)));
         }
     }
     let glyph = text.chars().next_back()?;
     let node = vocabulary::node_for_glyph(glyph)?;
     Some((1, Seed::Node(node)))
+}
+
+fn trailing_root(text: &str) -> Option<(usize, Seed)> {
+    let text = text.strip_suffix(']')?;
+    let (before, index) = text.rsplit_once("√[")?;
+    (!index.is_empty() && index.chars().all(char::is_alphanumeric)).then(|| {
+        (
+            text[before.len()..].chars().count() + 1,
+            Seed::NthRoot(index.to_string()),
+        )
+    })
 }
 
 fn trailing_command(text: &str) -> Option<String> {
@@ -155,9 +193,9 @@ mod tests {
     fn seed(c: char, before: &str) -> Option<(usize, String)> {
         seed_for(c, before).map(|(consume, seed)| {
             let kind = match seed {
-                Seed::Empty => "empty".to_string(),
                 Seed::Typed(run, trigger) => format!("typed {run}{trigger}"),
                 Seed::Node(_) => "node".to_string(),
+                Seed::NthRoot(index) => format!("root {index}"),
                 Seed::Text(text) => format!("text {text}"),
             };
             (consume, kind)
@@ -165,10 +203,11 @@ mod tests {
     }
 
     #[test]
-    fn slash_after_a_word_stays_prose() {
-        assert!(seed('/', "and").is_none());
-        assert_eq!(seed('/', "1"), Some((1, "typed 1/".into())));
-        assert_eq!(seed('/', "x"), Some((1, "typed x/".into())));
+    fn slash_waits_for_space_after_every_kind_of_text() {
+        assert!(seed('/', "abc").is_none());
+        assert_eq!(seed(' ', "abc/"), Some((4, "typed abc/".into())));
+        assert_eq!(seed(' ', "日本/"), Some((3, "typed 日本/".into())));
+        assert_eq!(seed(' ', "(x+1)/"), Some((6, "typed x+1/".into())));
     }
 
     #[test]
@@ -180,13 +219,12 @@ mod tests {
     }
 
     #[test]
-    fn a_root_glyph_expands_but_a_greek_letter_does_not() {
+    fn structural_glyphs_wait_for_space_but_plain_symbols_do_not_expand() {
+        assert!(seed('√', "").is_none());
         assert_eq!(seed(' ', "√"), Some((1, "node".into())));
+        assert_eq!(seed(' ', "√[n]"), Some((4, "root n".into())));
+        assert!(seed(' ', "√[]").is_none());
+        assert_eq!(seed(' ', "Σ"), Some((1, "node".into())));
         assert!(seed(' ', "α").is_none());
-    }
-
-    #[test]
-    fn dollar_opens_an_empty_formula() {
-        assert_eq!(seed('$', "text "), Some((0, "empty".into())));
     }
 }

@@ -48,7 +48,7 @@ pub(super) fn choose(shell: Shell, name: &str, from: From) {
         "redo" => editor::redo(),
         "find" => shell.find(Field::Query),
         "replace" => shell.find(Field::Replacement),
-        "insert_math" => editor::insert_math(),
+        "insert_structure" => editor::insert_structure(),
         "wrap" => change(Settings {
             wrap: !current.wrap,
             ..current
