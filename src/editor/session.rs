@@ -120,6 +120,37 @@ pub fn set_on_change(callback: OnChange) {
     ON_CHANGE.with(|slot| *slot.borrow_mut() = Some(callback));
 }
 
+/// 画面に入ったのにまだ届いていない行の範囲をアプリへ知らせます。
+/// 取り寄せ自体は文書の取っ手を知っているアプリの仕事です。
+type OnMissing = Rc<dyn Fn(usize, std::ops::Range<usize>)>;
+
+thread_local! {
+    static ON_MISSING: RefCell<Option<OnMissing>> = const { RefCell::new(None) };
+}
+
+pub fn set_on_missing(callback: OnMissing) {
+    ON_MISSING.with(|slot| *slot.borrow_mut() = Some(callback));
+}
+
+/// 描いた窓の中にまだ届いていない行があれば、その範囲を要求します。
+fn request_missing(session: &Rc<RefCell<Session>>) {
+    let (pane, range) = {
+        let borrowed = session.borrow();
+        let drawn = borrowed.view.drawn();
+        let Some(first) = borrowed.editor.text().first_absent(drawn.start) else {
+            return;
+        };
+        if first >= drawn.end {
+            return;
+        }
+        (borrowed.pane, first..drawn.end)
+    };
+    let callback = ON_MISSING.with(|slot| slot.borrow().clone());
+    if let Some(callback) = callback {
+        callback(pane, range);
+    }
+}
+
 pub fn changed(session: &Rc<RefCell<Session>>) {
     session.borrow_mut().search_from = None;
     redraw(session);
@@ -132,29 +163,35 @@ pub fn changed(session: &Rc<RefCell<Session>>) {
 
 /// 描き直してキャレットの行を見せ、隠しの入力欄をキャレットの場所についていかせます (IME の候補窓がそこに出ます)。
 pub fn redraw(session: &Rc<RefCell<Session>>) {
-    let session = session.borrow();
-    let caret = caret_of(&session);
-    session.view.draw(
-        session.editor.text(),
-        session.editor.sels(),
-        &caret,
-        session.focused,
-    );
-    if let Some(rect) = session.view.reveal(&caret) {
-        input::follow_caret(&session.textarea, rect);
+    {
+        let session = session.borrow();
+        let caret = caret_of(&session);
+        session.view.draw(
+            session.editor.text(),
+            session.editor.sels(),
+            &caret,
+            session.focused,
+        );
+        if let Some(rect) = session.view.reveal(&caret) {
+            input::follow_caret(&session.textarea, rect);
+        }
     }
+    request_missing(session);
 }
 
 /// ビューがスクロールされた後に再度描画するため、表示された行がページに配置されます。 [`redraw`] とは異なり、これはユーザーがスクロールしたビューを残し、キャレットに移動しません。
 pub fn scrolled(session: &Rc<RefCell<Session>>) {
-    let session = session.borrow();
-    let caret = caret_of(&session);
-    session.view.repaint(
-        session.editor.text(),
-        session.editor.sels(),
-        &caret,
-        session.focused,
-    );
+    {
+        let session = session.borrow();
+        let caret = caret_of(&session);
+        session.view.repaint(
+            session.editor.text(),
+            session.editor.sels(),
+            &caret,
+            session.focused,
+        );
+    }
+    request_missing(session);
 }
 
 /// 1 つのキャレットで両方のケースを説明するため、描画に選択するモードはありません。

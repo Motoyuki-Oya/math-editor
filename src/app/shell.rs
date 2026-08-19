@@ -216,6 +216,16 @@ impl Shell {
         spawn_local(ipc::set_dirty(any));
     }
 
+    /// エディターのペインに表示されているタブの文書の取っ手。
+    pub(super) fn document_of(&self, editor_pane: usize) -> Option<u64> {
+        self.panes.with_untracked(|panes| {
+            panes
+                .iter()
+                .find(|pane| pane.editor.get_value() == Some(editor_pane))
+                .and_then(|pane| pane.tab_untracked().doc.get_untracked())
+        })
+    }
+
     /// 変更元のペインのドキュメントをマークします。
     pub(super) fn mark_dirty(&self, editor_pane: usize) {
         let pane = self
