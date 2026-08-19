@@ -3,32 +3,45 @@
 use super::islands::{self, Segment};
 use super::notation::{island_text, parse_island};
 use crate::structure::ast::{Node, NodeKind, Row};
-use crate::structure::text::Text;
+use crate::structure::text::{SourceLine, Text};
 
 pub const TAB_SOURCE: &str = "t";
 
 pub fn read(source: &str) -> Text {
-    let lines = islands::parse(source)
-        .into_iter()
+    let lines = source
+        .split('\n')
         .map(|line| {
-            line.into_iter()
+            // `$` を含まない行には島もエスケープもないので、文字列のまま持ち、
+            // そのまま書き戻せる。巨大なファイルの大部分がこの形で済む。
+            if !line.contains('$') {
+                return SourceLine::Plain(line.to_string());
+            }
+            let row = islands::parse_line(line)
+                .into_iter()
                 .flat_map(|segment| match segment {
                     Segment::Text(text) => text.chars().map(Node::char).collect::<Row>(),
                     Segment::Island(source) if source.trim() == TAB_SOURCE => vec![Node::tab()],
                     Segment::Island(source) => parse_island(&source),
                 })
-                .collect()
+                .collect();
+            SourceLine::Parsed(row)
         })
         .collect();
-    Text::from_lines(lines)
+    Text::compose(lines)
 }
 
 pub fn write(text: &Text) -> String {
-    let lines: Vec<islands::Line> = text.lines().iter().map(line_segments).collect();
-    islands::serialize(&lines)
+    (0..text.line_count())
+        .map(|line| match text.raw_line(line) {
+            // 素のままの行は `$` を含まないので、エスケープなしで元の文字列のまま。
+            Some(source) => source.to_string(),
+            None => islands::serialize_line(&line_segments(text.line(line))),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
-fn line_segments(row: &Row) -> islands::Line {
+fn line_segments(row: &[Node]) -> islands::Line {
     let mut segments = islands::Line::new();
     let mut text = String::new();
     for node in row {
@@ -98,6 +111,46 @@ mod tests {
         ] {
             assert_eq!(write(&read(source)), source);
         }
+    }
+
+    #[test]
+    fn plain_lines_stay_raw_and_are_written_verbatim() {
+        let source = "abc\nx $(1/2) y\n100$$ です";
+        let text = read(source);
+        assert_eq!(text.raw_line(0), Some("abc"));
+        // `$` を含む行は解析され、書くときにエスケープを通る。
+        assert_eq!(text.raw_line(1), None);
+        assert_eq!(text.raw_line(2), None);
+        assert_eq!(write(&text), source);
+    }
+
+    /// 一時的な規模チェック: `cargo test --release -- --ignored` で実行する。
+    #[test]
+    #[ignore]
+    fn scale_check_hundred_megabytes() {
+        let line = "The quick brown fox jumps over the lazy dog. 0123";
+        let count = 2_000_000usize; // 約100MB
+        let mut source = String::with_capacity(51 * count);
+        for _ in 0..count {
+            source.push_str(line);
+            source.push('\n');
+        }
+        let start = std::time::Instant::now();
+        let text = read(&source);
+        println!("read: {:?}", start.elapsed());
+        let start = std::time::Instant::now();
+        let stats = text.stats();
+        println!("stats: {:?} {stats:?}", start.elapsed());
+        // 可視範囲相当の行アクセス。
+        let start = std::time::Instant::now();
+        for line in 1_000_000..1_000_100 {
+            let _ = text.line(line);
+        }
+        println!("view 100 lines: {:?}", start.elapsed());
+        let start = std::time::Instant::now();
+        let written = write(&text);
+        println!("write: {:?}", start.elapsed());
+        assert_eq!(written.len(), source.len());
     }
 
     #[test]

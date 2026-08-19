@@ -616,7 +616,9 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn plain(editor: &Editor) -> String {
-        crate::structure::plain::lines(editor.text().lines())
+        let text = editor.text();
+        let rows = text.slice(Pos::default(), text.end());
+        crate::structure::plain::lines(&rows)
     }
 
     #[test]

@@ -16,11 +16,7 @@ pub fn escape_text(text: &str) -> String {
     text.replace('$', "$$")
 }
 
-pub fn parse(text: &str) -> Vec<Line> {
-    text.split('\n').map(parse_line).collect()
-}
-
-fn parse_line(line: &str) -> Line {
+pub fn parse_line(line: &str) -> Line {
     let chars: Vec<char> = line.chars().collect();
     let mut segments = Line::new();
     let mut text = String::new();
@@ -57,21 +53,15 @@ fn parse_line(line: &str) -> Line {
     segments
 }
 
-/// `parse` が読み取った形式で行を書き戻します。
-pub fn serialize(lines: &[Line]) -> String {
-    lines
+/// `parse_line` が読み取った形式で 1 行を書き戻します。
+pub fn serialize_line(segments: &Line) -> String {
+    segments
         .iter()
-        .map(|segments| {
-            segments
-                .iter()
-                .map(|segment| match segment {
-                    Segment::Text(text) => escape_text(text),
-                    Segment::Island(source) => format!("$({source})"),
-                })
-                .collect::<String>()
+        .map(|segment| match segment {
+            Segment::Text(text) => escape_text(text),
+            Segment::Island(source) => format!("$({source})"),
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect()
 }
 
 #[cfg(test)]
@@ -133,6 +123,6 @@ mod tests {
 
     #[test]
     fn blank_lines_are_preserved() {
-        assert_eq!(parse("a\n\nb").len(), 3);
+        assert_eq!("a\n\nb".split('\n').map(parse_line).count(), 3);
     }
 }
