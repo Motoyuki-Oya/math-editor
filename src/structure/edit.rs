@@ -734,276 +734,276 @@ mod tests {
 
     #[test]
     fn typing_builds_a_row() {
-        let mut island = Fixture::new();
-        island.type_in("x+1");
-        assert_eq!(island.to_notation(), "x+1");
+        let mut fixture = Fixture::new();
+        fixture.type_in("x+1");
+        assert_eq!(fixture.to_notation(), "x+1");
     }
 
     #[test]
     fn backslash_shortcut_expands_into_a_structure() {
-        let mut island = Fixture::new();
-        island.type_in("\\sqrt");
-        assert!(island.edit().commit_command());
-        island.type_in("2");
-        assert_eq!(island.to_notation(), "√ 2");
+        let mut fixture = Fixture::new();
+        fixture.type_in("\\sqrt");
+        assert!(fixture.edit().commit_command());
+        fixture.type_in("2");
+        assert_eq!(fixture.to_notation(), "√ 2");
     }
 
     #[test]
     fn typed_glyph_expands_like_its_command() {
-        let mut island = Fixture::new();
-        island.type_in("√");
-        assert!(island.edit().commit_command());
-        island.type_in("2");
-        assert_eq!(island.to_notation(), "√ 2");
+        let mut fixture = Fixture::new();
+        fixture.type_in("√");
+        assert!(fixture.edit().commit_command());
+        fixture.type_in("2");
+        assert_eq!(fixture.to_notation(), "√ 2");
     }
 
     #[test]
     fn unknown_backslash_shortcut_is_left_alone() {
-        let mut island = Fixture::new();
-        island.type_in("\\nope");
-        assert!(!island.edit().commit_command());
+        let mut fixture = Fixture::new();
+        fixture.type_in("\\nope");
+        assert!(!fixture.edit().commit_command());
     }
 
     #[test]
     fn slash_takes_the_preceding_run_as_the_upper_row() {
-        let mut island = Fixture::new();
-        island.type_in("1+ab/");
-        island.type_in("2c");
-        assert_eq!(island.to_notation(), "1+$(ab/2c)");
+        let mut fixture = Fixture::new();
+        fixture.type_in("1+ab/");
+        fixture.type_in("2c");
+        assert_eq!(fixture.to_notation(), "1+$(ab/2c)");
     }
 
     #[test]
     fn a_closing_bracket_leaves_the_brackets_from_inside_a_fraction() {
-        let mut island = Fixture::new();
-        island.type_in("1/(2/3)+4");
+        let mut fixture = Fixture::new();
+        fixture.type_in("1/(2/3)+4");
         // `+4` は、その下の行に落ちずに分数をたどります。
-        assert_eq!(island.to_notation(), "$(1/($(2/3)))+4");
+        assert_eq!(fixture.to_notation(), "$(1/($(2/3)))+4");
     }
 
     /// 下の行は、`/` 自体が持ち上げられてキャレットを戻すので、入力された内容は、行に書かれたとおりに読み取られます。
     #[test]
     fn a_lower_row_takes_one_run_and_then_hands_the_caret_back() {
-        let mut island = Fixture::new();
-        island.type_in("a/b + 1");
-        assert_eq!(island.to_notation(), "$(a/b) + 1");
+        let mut fixture = Fixture::new();
+        fixture.type_in("a/b + 1");
+        assert_eq!(fixture.to_notation(), "$(a/b) + 1");
     }
 
     #[test]
     fn a_longer_lower_row_is_written_in_brackets() {
-        let mut island = Fixture::new();
-        island.type_in("a/(b + c) + 1");
-        assert_eq!(island.to_notation(), "$(a/(b + c)) + 1");
+        let mut fixture = Fixture::new();
+        fixture.type_in("a/(b + c) + 1");
+        assert_eq!(fixture.to_notation(), "$(a/(b + c)) + 1");
     }
 
     #[test]
     fn a_digit_run_stays_in_the_lower_row() {
-        let mut island = Fixture::new();
-        island.type_in("1/12+3");
-        assert_eq!(island.to_notation(), "$(1/12)+3");
+        let mut fixture = Fixture::new();
+        fixture.type_in("1/12+3");
+        assert_eq!(fixture.to_notation(), "$(1/12)+3");
     }
 
     #[test]
     fn brackets_after_the_lower_row_are_not_part_of_it() {
-        let mut island = Fixture::new();
-        island.type_in("c/d(e/f) +g");
-        assert_eq!(island.to_notation(), "$(c/d)($(e/f)) +g");
+        let mut fixture = Fixture::new();
+        fixture.type_in("c/d(e/f) +g");
+        assert_eq!(fixture.to_notation(), "$(c/d)($(e/f)) +g");
     }
 
     #[test]
     fn a_second_slash_stacks_on_the_first_fraction() {
-        let mut island = Fixture::new();
-        island.type_in("a/b/c");
-        assert_eq!(island.to_notation(), "$(a/b)/c");
+        let mut fixture = Fixture::new();
+        fixture.type_in("a/b/c");
+        assert_eq!(fixture.to_notation(), "$(a/b)/c");
     }
 
     #[test]
     fn a_root_takes_one_run_the_same_way() {
-        let mut island = Fixture::new();
-        island.type_in("√");
-        assert!(island.edit().commit_command());
-        island.type_in("2 + 1");
-        assert_eq!(island.to_notation(), "$(√ 2) + 1");
+        let mut fixture = Fixture::new();
+        fixture.type_in("√");
+        assert!(fixture.edit().commit_command());
+        fixture.type_in("2 + 1");
+        assert_eq!(fixture.to_notation(), "$(√ 2) + 1");
     }
 
     #[test]
     fn a_script_belongs_to_the_run_it_follows() {
-        let mut island = Fixture::new();
-        island.type_in("a/b^2 + 1");
-        assert_eq!(island.to_notation(), "$(a/b$(^ 2)) + 1");
+        let mut fixture = Fixture::new();
+        fixture.type_in("a/b^2 + 1");
+        assert_eq!(fixture.to_notation(), "$(a/b$(^ 2)) + 1");
     }
 
     #[test]
     fn a_closing_bracket_with_no_brackets_open_changes_nothing() {
-        let mut island = Fixture::new();
-        island.type_in("a)b");
-        assert_eq!(island.to_notation(), "ab");
+        let mut fixture = Fixture::new();
+        fixture.type_in("a)b");
+        assert_eq!(fixture.to_notation(), "ab");
     }
 
     #[test]
     fn caret_enters_and_leaves_a_stack() {
-        let mut island = Fixture::from_notation("a/b");
-        island.edit().move_to_start();
-        assert_eq!(island.edit().move_right(), None);
-        assert_eq!(island.cursor.path, vec![(0, 0)]);
-        island.edit().move_right();
-        island.edit().move_right();
-        assert_eq!(island.cursor.path, vec![(0, 1)]);
+        let mut fixture = Fixture::from_notation("a/b");
+        fixture.edit().move_to_start();
+        assert_eq!(fixture.edit().move_right(), None);
+        assert_eq!(fixture.cursor.path, vec![(0, 0)]);
+        fixture.edit().move_right();
+        fixture.edit().move_right();
+        assert_eq!(fixture.cursor.path, vec![(0, 1)]);
     }
 
     #[test]
     fn up_and_down_switch_between_the_upper_and_lower_row() {
-        let mut island = Fixture::from_notation("a/b");
-        island.edit().move_to_start();
-        island.edit().move_right();
-        assert!(island.edit().move_down());
-        assert_eq!(island.cursor.path, vec![(0, 1)]);
-        assert!(island.edit().move_up());
-        assert_eq!(island.cursor.path, vec![(0, 0)]);
+        let mut fixture = Fixture::from_notation("a/b");
+        fixture.edit().move_to_start();
+        fixture.edit().move_right();
+        assert!(fixture.edit().move_down());
+        assert_eq!(fixture.cursor.path, vec![(0, 1)]);
+        assert!(fixture.edit().move_up());
+        assert_eq!(fixture.cursor.path, vec![(0, 0)]);
     }
 
     #[test]
     fn backspace_keeps_the_content_of_a_deleted_structure() {
-        let mut island = Fixture::from_notation("ab/c");
-        island.edit().move_to_end();
-        assert_eq!(island.edit().backspace(), None);
-        assert_eq!(island.to_notation(), "abc");
+        let mut fixture = Fixture::from_notation("ab/c");
+        fixture.edit().move_to_end();
+        assert_eq!(fixture.edit().backspace(), None);
+        assert_eq!(fixture.to_notation(), "abc");
     }
 
     #[test]
     fn backspace_reports_escape_on_an_empty_root_row() {
-        let mut island = Fixture::new();
-        assert_eq!(island.edit().backspace(), Some(Escape::Delete));
+        let mut fixture = Fixture::new();
+        assert_eq!(fixture.edit().backspace(), Some(Escape::Delete));
     }
 
     #[test]
     fn arrow_past_the_edge_reports_escape() {
-        let mut island = Fixture::from_notation("x");
-        island.edit().move_to_end();
-        assert_eq!(island.edit().move_right(), Some(Escape::Right));
-        island.edit().move_to_start();
-        assert_eq!(island.edit().move_left(), Some(Escape::Left));
+        let mut fixture = Fixture::from_notation("x");
+        fixture.edit().move_to_end();
+        assert_eq!(fixture.edit().move_right(), Some(Escape::Right));
+        fixture.edit().move_to_start();
+        assert_eq!(fixture.edit().move_left(), Some(Escape::Left));
     }
 
     #[test]
     fn closing_paren_steps_out_of_the_group() {
-        let mut island = Fixture::new();
-        island.type_in("(x)+");
-        assert_eq!(island.to_notation(), "(x)+");
+        let mut fixture = Fixture::new();
+        fixture.type_in("(x)+");
+        assert_eq!(fixture.to_notation(), "(x)+");
     }
 
     #[test]
     fn selecting_reaches_the_whole_row_then_the_structure_around_it() {
-        let mut island = Fixture::from_notation("1/2");
-        island.edit().move_to_end();
-        island.edit().move_left();
+        let mut fixture = Fixture::from_notation("1/2");
+        fixture.edit().move_to_end();
+        fixture.edit().move_left();
         // 右から分数に移動すると、その分数に移動します。
-        assert_eq!(island.cursor.path, vec![(0, 1)]);
-        assert_eq!(island.edit().extend(false), None);
-        assert_eq!((island.cursor.start(), island.cursor.end()), (0, 1));
+        assert_eq!(fixture.cursor.path, vec![(0, 1)]);
+        assert_eq!(fixture.edit().extend(false), None);
+        assert_eq!((fixture.cursor.start(), fixture.cursor.end()), (0, 1));
         // その行を越えると、その上の行にある分数が選択されます。
-        assert_eq!(island.edit().extend(false), None);
-        assert_eq!(island.cursor.path, Vec::new());
-        assert_eq!((island.cursor.start(), island.cursor.end()), (0, 1));
+        assert_eq!(fixture.edit().extend(false), None);
+        assert_eq!(fixture.cursor.path, Vec::new());
+        assert_eq!((fixture.cursor.start(), fixture.cursor.end()), (0, 1));
         // 最も外側の行を超えると、選択は数式から外れます。
-        assert_eq!(island.edit().extend(false), Some(Escape::Left));
+        assert_eq!(fixture.edit().extend(false), Some(Escape::Left));
     }
 
     #[test]
     fn select_row_takes_everything_in_the_row() {
-        let mut island = Fixture::from_notation("ab");
-        island.edit().select_row();
-        assert_eq!((island.cursor.start(), island.cursor.end()), (0, 2));
-        island.edit().backspace();
-        assert_eq!(island.to_notation(), "");
-        assert!(island.cursor.is_caret());
+        let mut fixture = Fixture::from_notation("ab");
+        fixture.edit().select_row();
+        assert_eq!((fixture.cursor.start(), fixture.cursor.end()), (0, 2));
+        fixture.edit().backspace();
+        assert_eq!(fixture.to_notation(), "");
+        assert!(fixture.cursor.is_caret());
     }
 
     /// ペーストすると、構造がそのまま挿入されます。ショートカットは再度実行されません。
     #[test]
     fn a_pasted_row_goes_in_at_the_caret() {
-        let mut island = Fixture::from_notation("x");
-        island.edit().insert_row(notation::parse_island("1/2"));
-        assert_eq!(island.to_notation(), "x$(1/2)");
-        assert!(island.cursor.is_caret());
-        assert_eq!(island.cursor.index, 2);
+        let mut fixture = Fixture::from_notation("x");
+        fixture.edit().insert_row(notation::parse_island("1/2"));
+        assert_eq!(fixture.to_notation(), "x$(1/2)");
+        assert!(fixture.cursor.is_caret());
+        assert_eq!(fixture.cursor.index, 2);
     }
 
     #[test]
     fn a_paste_replaces_the_selection() {
-        let mut island = Fixture::from_notation("ab");
-        island.edit().select_row();
-        island.edit().insert_row(notation::parse_island("c"));
-        assert_eq!(island.to_notation(), "c");
+        let mut fixture = Fixture::from_notation("ab");
+        fixture.edit().select_row();
+        fixture.edit().insert_row(notation::parse_island("c"));
+        assert_eq!(fixture.to_notation(), "c");
     }
 
     #[test]
     fn vertical_movement_skips_empty_and_enters_nonempty_annotations() {
-        let mut island = Fixture::from_notation("x");
-        assert!(!island.edit().move_up());
-        island.root[0].upper = vec![Node::char('n')];
-        island.cursor = Cursor::root(1);
-        assert!(island.edit().move_up());
-        assert_eq!(island.cursor.path, vec![(0, island.root[0].upper_slot())]);
-        assert!(island.edit().move_down());
-        assert_eq!(island.cursor, Cursor::root(1));
+        let mut fixture = Fixture::from_notation("x");
+        assert!(!fixture.edit().move_up());
+        fixture.root[0].upper = vec![Node::char('n')];
+        fixture.cursor = Cursor::root(1);
+        assert!(fixture.edit().move_up());
+        assert_eq!(fixture.cursor.path, vec![(0, fixture.root[0].upper_slot())]);
+        assert!(fixture.edit().move_down());
+        assert_eq!(fixture.cursor, Cursor::root(1));
     }
 
     #[test]
     fn explicit_annotation_enters_an_empty_slot() {
-        let mut island = Fixture::from_notation("ab");
-        island.cursor.anchor = 0;
-        assert!(island.edit().annotate(true));
-        assert!(island.root[0].upper.is_empty());
-        assert_eq!(island.cursor.path, vec![(0, island.root[0].upper_slot())]);
+        let mut fixture = Fixture::from_notation("ab");
+        fixture.cursor.anchor = 0;
+        assert!(fixture.edit().annotate(true));
+        assert!(fixture.root[0].upper.is_empty());
+        assert_eq!(fixture.cursor.path, vec![(0, fixture.root[0].upper_slot())]);
     }
 
     #[test]
     fn moving_from_an_annotation_returns_to_the_wrapped_base() {
-        let mut island = Fixture::from_notation("abc");
-        island.edit().select_row();
-        assert!(island.edit().annotate(true));
-        island.root[0].lower = vec![Node::char('l')];
-        island.edit().insert_char('n');
-        assert!(island.edit().move_down());
-        assert_eq!(island.cursor.path, vec![(0, 0)]);
+        let mut fixture = Fixture::from_notation("abc");
+        fixture.edit().select_row();
+        assert!(fixture.edit().annotate(true));
+        fixture.root[0].lower = vec![Node::char('l')];
+        fixture.edit().insert_char('n');
+        assert!(fixture.edit().move_down());
+        assert_eq!(fixture.cursor.path, vec![(0, 0)]);
     }
 
     #[test]
     fn inserting_a_big_operator_enters_its_empty_lower_annotation() {
-        let mut island = Fixture::new();
-        island.edit().insert(Node::big_op("∑".into()));
-        assert_eq!(island.cursor.path, vec![(0, island.root[0].lower_slot())]);
+        let mut fixture = Fixture::new();
+        fixture.edit().insert(Node::big_op("∑".into()));
+        assert_eq!(fixture.cursor.path, vec![(0, fixture.root[0].lower_slot())]);
     }
 
     #[test]
     fn horizontal_movement_does_not_enter_annotations() {
-        let mut island = Fixture::from_notation("x");
-        island.root[0].upper = vec![Node::char('n')];
-        island.cursor = Cursor::root(0);
-        assert_eq!(island.edit().move_right(), None);
-        assert_eq!(island.cursor, Cursor::root(1));
-        assert_eq!(island.edit().move_left(), None);
-        assert_eq!(island.cursor, Cursor::root(0));
+        let mut fixture = Fixture::from_notation("x");
+        fixture.root[0].upper = vec![Node::char('n')];
+        fixture.cursor = Cursor::root(0);
+        assert_eq!(fixture.edit().move_right(), None);
+        assert_eq!(fixture.cursor, Cursor::root(1));
+        assert_eq!(fixture.edit().move_left(), None);
+        assert_eq!(fixture.cursor, Cursor::root(0));
     }
 
     #[test]
     fn matrix_grows_by_row_and_column() {
-        let mut island = Fixture::new();
-        island.edit().insert(super::super::ast::matrix(
+        let mut fixture = Fixture::new();
+        fixture.edit().insert(super::super::ast::matrix(
             super::super::ast::MatrixKind::Grid,
             1,
             2,
         ));
-        assert!(island.edit().grow_matrix(true));
-        match &island.root[0] {
+        assert!(fixture.edit().grow_matrix(true));
+        match &fixture.root[0] {
             Node {
                 kind: NodeKind::Matrix { cells, .. },
                 ..
             } => assert_eq!(cells.len(), 2),
             other => panic!("expected a matrix, got {other:?}"),
         }
-        assert!(island.edit().grow_matrix(false));
-        match &island.root[0] {
+        assert!(fixture.edit().grow_matrix(false));
+        match &fixture.root[0] {
             Node {
                 kind: NodeKind::Matrix { cells, .. },
                 ..
