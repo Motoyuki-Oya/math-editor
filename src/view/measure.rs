@@ -120,12 +120,12 @@ pub(super) fn hit_in_line(holder: &Element, line: usize, x: f64, y: f64) -> Hit 
         .get_attribute(PATH_ATTR)
         .and_then(|encoded| row::decode_path(&encoded))
         .unwrap_or_default();
-    match path.split_first() {
+    match path.first() {
         None => Hit::Text(Pos::new(line, index)),
-        Some(((col, _), rest)) => Hit::Inside(
+        Some((col, _)) => Hit::Inside(
             Pos::new(line, *col),
             Cursor {
-                path: rest.to_vec(),
+                path,
                 index,
                 anchor: index,
                 fills: Vec::new(),
@@ -219,6 +219,39 @@ fn boundaries(row: &Element) -> Vec<(usize, Box2)> {
 }
 
 /// `index` の項目の直前の場所。 `usize::MAX` は終了を意味します。
+pub(super) fn first_base_fragment(holder: &Element) -> Option<Box2> {
+    let nodes = holder.query_selector_all(&format!("[{START_ATTR}]")).ok()?;
+    let mut best: Option<Box2> = None;
+    for i in 0..nodes.length() {
+        let Some(element) = nodes
+            .item(i)
+            .and_then(|node| node.dyn_ref::<Element>().cloned())
+        else {
+            continue;
+        };
+        if element.children().length() > 0 || element.closest(".mn-limit").ok().flatten().is_some()
+        {
+            continue;
+        }
+        let Some(rect) = (if element.class_list().contains(RUN_CLASS) {
+            text_boundary(&element, 0)
+        } else {
+            Some(box_of(&element.get_bounding_client_rect()))
+        }) else {
+            continue;
+        };
+        if rect.height <= 0.0 {
+            continue;
+        }
+        if best.is_none_or(|current| {
+            rect.top < current.top || (rect.top == current.top && rect.left < current.left)
+        }) {
+            best = Some(rect);
+        }
+    }
+    best
+}
+
 pub(super) fn boundary(row: &Element, index: usize) -> Option<Box2> {
     let places = boundaries(row);
     if index == usize::MAX {

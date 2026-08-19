@@ -35,7 +35,7 @@ pub(super) struct Viewport {
     /// スクロールする要素。
     root: HtmlElement,
     /// 描いた行が入る要素。上下の場所取りもここに入ります。
-    lines: Element,
+    document: Element,
     /// 各行の高さ。それによって描画する行が決まります。
     heights: RefCell<Heights>,
     /// 現在ページ内にある行。ページを測定するものはすべて、これらについてのみ
@@ -44,10 +44,10 @@ pub(super) struct Viewport {
 }
 
 impl Viewport {
-    pub(super) fn new(root: HtmlElement, lines: Element) -> Self {
+    pub(super) fn new(root: HtmlElement, document: Element) -> Self {
         Self {
             root,
-            lines,
+            document,
             heights: RefCell::new(Heights::new()),
             drawn: RefCell::new(0..0),
         }
@@ -60,7 +60,7 @@ impl Viewport {
     /// 行の要素は、子の中での位置ではなく、その行が表す行によって決まります。
     /// ページ内には行の一部のみが存在します。
     pub(super) fn line_element(&self, line: usize) -> Option<Element> {
-        self.lines
+        self.document
             .query_selector(&format!("[{LINE_ATTR}=\"{line}\"]"))
             .ok()
             .flatten()
@@ -124,11 +124,11 @@ impl Viewport {
         draw_line: &dyn Fn(&Document, usize) -> Option<Element>,
         finish: &dyn Fn(&Range<usize>),
     ) -> f64 {
-        let Some(doc) = self.lines.owner_document() else {
+        let Some(doc) = self.document.owner_document() else {
             return self.root.scroll_top() as f64;
         };
         let window = self.widen_for_blocks(text, self.window(scroll, text.line_count()));
-        self.lines.set_inner_html("");
+        self.document.set_inner_html("");
         let above = element(&doc, "div", GAP_CLASS);
         // 描く行の上に何があるかの見立て。測ると変わり、描いた行もその差の分だけ
         // 動くので、スクロールも一緒に動かします。
@@ -138,11 +138,11 @@ impl Viewport {
             // ブラウザがスクロールを切り詰め、ビューがそれ以上下へ行けなく
             // なるからです。
             set_height(gap, guessed);
-            append(&self.lines, gap);
+            append(&self.document, gap);
         }
         for line in window.clone() {
             if let Some(element) = draw_line(&doc, line) {
-                append(&self.lines, &element);
+                append(&self.document, &element);
             }
         }
         let below = element(&doc, "div", GAP_CLASS);
@@ -151,7 +151,7 @@ impl Viewport {
                 gap,
                 self.heights.borrow().span(window.end..text.line_count()),
             );
-            append(&self.lines, gap);
+            append(&self.document, gap);
         }
         *self.drawn.borrow_mut() = window.clone();
         self.measure(&window);

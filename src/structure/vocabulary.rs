@@ -2,137 +2,124 @@
 
 use super::ast::{self, Between, MatrixKind, Node};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Class {
-    /// 変数のようなもの、横にあるものに対してぴったりと描画されます。
-    Ident,
-    /// 二項演算子、両側にスペースをあけて描画されます。
-    Bin,
-    /// 関係、両側に広いスペースを使って描画されます。
-    Rel,
-    /// 句読点とその他すべて、余分なスペースを入れずに直立して描画されます。
-    Plain,
-}
-
 pub struct Symbol {
     pub name: &'static str,
     pub glyph: &'static str,
-    pub class: Class,
 }
 
 macro_rules! symbols {
-    ($(($name:literal, $glyph:literal, $class:ident)),* $(,)?) => {
+    ($(($name:literal, $glyph:literal)),* $(,)?) => {
         pub const SYMBOLS: &[Symbol] = &[
-            $(Symbol { name: $name, glyph: $glyph, class: Class::$class }),*
+            $(Symbol { name: $name, glyph: $glyph }),*
         ];
     };
 }
 
 symbols![
-    ("alpha", "α", Ident),
-    ("beta", "β", Ident),
-    ("gamma", "γ", Ident),
-    ("delta", "δ", Ident),
-    ("epsilon", "ε", Ident),
-    ("varepsilon", "ε", Ident),
-    ("zeta", "ζ", Ident),
-    ("eta", "η", Ident),
-    ("theta", "θ", Ident),
-    ("vartheta", "ϑ", Ident),
-    ("iota", "ι", Ident),
-    ("kappa", "κ", Ident),
-    ("lambda", "λ", Ident),
-    ("mu", "μ", Ident),
-    ("nu", "ν", Ident),
-    ("xi", "ξ", Ident),
-    ("pi", "π", Ident),
-    ("rho", "ρ", Ident),
-    ("sigma", "σ", Ident),
-    ("tau", "τ", Ident),
-    ("upsilon", "υ", Ident),
-    ("phi", "φ", Ident),
-    ("varphi", "ϕ", Ident),
-    ("chi", "χ", Ident),
-    ("psi", "ψ", Ident),
-    ("omega", "ω", Ident),
-    ("Gamma", "Γ", Ident),
-    ("Delta", "Δ", Ident),
-    ("Theta", "Θ", Ident),
-    ("Lambda", "Λ", Ident),
-    ("Xi", "Ξ", Ident),
-    ("Pi", "Π", Ident),
-    ("Sigma", "Σ", Ident),
-    ("Phi", "Φ", Ident),
-    ("Psi", "Ψ", Ident),
-    ("Omega", "Ω", Ident),
-    ("infty", "∞", Plain),
-    ("partial", "∂", Ident),
-    ("nabla", "∇", Ident),
-    ("hbar", "ℏ", Ident),
-    ("ell", "ℓ", Ident),
-    ("Re", "ℜ", Ident),
-    ("Im", "ℑ", Ident),
-    ("aleph", "ℵ", Ident),
-    ("times", "×", Bin),
-    ("div", "÷", Bin),
-    ("cdot", "⋅", Bin),
-    ("pm", "±", Bin),
-    ("mp", "∓", Bin),
-    ("ast", "∗", Bin),
-    ("star", "⋆", Bin),
-    ("circ", "∘", Bin),
-    ("oplus", "⊕", Bin),
-    ("otimes", "⊗", Bin),
-    ("cup", "∪", Bin),
-    ("cap", "∩", Bin),
-    ("setminus", "∖", Bin),
-    ("leq", "≤", Rel),
-    ("le", "≤", Rel),
-    ("geq", "≥", Rel),
-    ("ge", "≥", Rel),
-    ("neq", "≠", Rel),
-    ("ne", "≠", Rel),
-    ("approx", "≈", Rel),
-    ("sim", "∼", Rel),
-    ("simeq", "≃", Rel),
-    ("equiv", "≡", Rel),
-    ("propto", "∝", Rel),
-    ("ll", "≪", Rel),
-    ("gg", "≫", Rel),
-    ("subset", "⊂", Rel),
-    ("subseteq", "⊆", Rel),
-    ("supset", "⊃", Rel),
-    ("supseteq", "⊇", Rel),
-    ("in", "∈", Rel),
-    ("notin", "∉", Rel),
-    ("ni", "∋", Rel),
-    ("perp", "⊥", Rel),
-    ("parallel", "∥", Rel),
-    ("mid", "∣", Rel),
-    ("to", "→", Rel),
-    ("rightarrow", "→", Rel),
-    ("leftarrow", "←", Rel),
-    ("leftrightarrow", "↔", Rel),
-    ("Rightarrow", "⇒", Rel),
-    ("Leftarrow", "⇐", Rel),
-    ("Leftrightarrow", "⇔", Rel),
-    ("mapsto", "↦", Rel),
-    ("forall", "∀", Plain),
-    ("exists", "∃", Plain),
-    ("neg", "¬", Plain),
-    ("emptyset", "∅", Plain),
-    ("varnothing", "∅", Plain),
-    ("angle", "∠", Plain),
-    ("triangle", "△", Plain),
-    ("degree", "°", Plain),
-    ("prime", "′", Plain),
-    ("ldots", "…", Plain),
-    ("cdots", "⋯", Plain),
-    ("vdots", "⋮", Plain),
-    ("ddots", "⋱", Plain),
-    ("therefore", "∴", Plain),
-    ("because", "∵", Plain),
-    ("checkmark", "✓", Plain),
+    ("alpha", "α"),
+    ("beta", "β"),
+    ("gamma", "γ"),
+    ("delta", "δ"),
+    ("epsilon", "ε"),
+    ("varepsilon", "ε"),
+    ("zeta", "ζ"),
+    ("eta", "η"),
+    ("theta", "θ"),
+    ("vartheta", "ϑ"),
+    ("iota", "ι"),
+    ("kappa", "κ"),
+    ("lambda", "λ"),
+    ("mu", "μ"),
+    ("nu", "ν"),
+    ("xi", "ξ"),
+    ("pi", "π"),
+    ("rho", "ρ"),
+    ("sigma", "σ"),
+    ("tau", "τ"),
+    ("upsilon", "υ"),
+    ("phi", "φ"),
+    ("varphi", "ϕ"),
+    ("chi", "χ"),
+    ("psi", "ψ"),
+    ("omega", "ω"),
+    ("Gamma", "Γ"),
+    ("Delta", "Δ"),
+    ("Theta", "Θ"),
+    ("Lambda", "Λ"),
+    ("Xi", "Ξ"),
+    ("Pi", "Π"),
+    ("Sigma", "Σ"),
+    ("Phi", "Φ"),
+    ("Psi", "Ψ"),
+    ("Omega", "Ω"),
+    ("infty", "∞"),
+    ("partial", "∂"),
+    ("nabla", "∇"),
+    ("hbar", "ℏ"),
+    ("ell", "ℓ"),
+    ("Re", "ℜ"),
+    ("Im", "ℑ"),
+    ("aleph", "ℵ"),
+    ("times", "×"),
+    ("div", "÷"),
+    ("cdot", "⋅"),
+    ("pm", "±"),
+    ("mp", "∓"),
+    ("ast", "∗"),
+    ("star", "⋆"),
+    ("circ", "∘"),
+    ("oplus", "⊕"),
+    ("otimes", "⊗"),
+    ("cup", "∪"),
+    ("cap", "∩"),
+    ("setminus", "∖"),
+    ("leq", "≤"),
+    ("le", "≤"),
+    ("geq", "≥"),
+    ("ge", "≥"),
+    ("neq", "≠"),
+    ("ne", "≠"),
+    ("approx", "≈"),
+    ("sim", "∼"),
+    ("simeq", "≃"),
+    ("equiv", "≡"),
+    ("propto", "∝"),
+    ("ll", "≪"),
+    ("gg", "≫"),
+    ("subset", "⊂"),
+    ("subseteq", "⊆"),
+    ("supset", "⊃"),
+    ("supseteq", "⊇"),
+    ("in", "∈"),
+    ("notin", "∉"),
+    ("ni", "∋"),
+    ("perp", "⊥"),
+    ("parallel", "∥"),
+    ("mid", "∣"),
+    ("to", "→"),
+    ("rightarrow", "→"),
+    ("leftarrow", "←"),
+    ("leftrightarrow", "↔"),
+    ("Rightarrow", "⇒"),
+    ("Leftarrow", "⇐"),
+    ("Leftrightarrow", "⇔"),
+    ("mapsto", "↦"),
+    ("forall", "∀"),
+    ("exists", "∃"),
+    ("neg", "¬"),
+    ("emptyset", "∅"),
+    ("varnothing", "∅"),
+    ("angle", "∠"),
+    ("triangle", "△"),
+    ("degree", "°"),
+    ("prime", "′"),
+    ("ldots", "…"),
+    ("cdots", "⋯"),
+    ("vdots", "⋮"),
+    ("ddots", "⋱"),
+    ("therefore", "∴"),
+    ("because", "∵"),
+    ("checkmark", "✓"),
 ];
 
 pub fn lookup(name: &str) -> Option<&'static Symbol> {
@@ -199,8 +186,8 @@ pub fn is_function(name: &str) -> bool {
     FUNCTIONS.contains(&name)
 }
 
-/// 名前がわかっている場合、`\name` ショートカットが展開されるノード。
-pub fn node_for(name: &str) -> Option<Node> {
+/// `\name`が二次元構造を表す場合、そのNodeを返します。
+pub fn structure_for(name: &str) -> Option<Node> {
     match name {
         "stack" | "frac" => Some(ast::stack(Between::Rule)),
         "atop" => Some(ast::stack(Between::Nothing)),
@@ -211,9 +198,16 @@ pub fn node_for(name: &str) -> Option<Node> {
         "matrix" => Some(ast::matrix(MatrixKind::Grid, 2, 2)),
         "cases" => Some(ast::matrix(MatrixKind::Cases, 2, 2)),
         _ if big_op(name).is_some() => Some(limits_for(name)),
-        _ if is_function(name) => Some(Node::Func(name.to_string())),
-        _ if lookup(name).is_some() => Some(Node::Sym(name.to_string())),
         _ => None,
+    }
+}
+
+/// `\name`が通常文字を表す場合、置き換える文字列を返します。
+pub fn text_for(name: &str) -> Option<String> {
+    if is_function(name) {
+        Some(name.to_string())
+    } else {
+        glyph_for(name).map(str::to_string)
     }
 }
 
@@ -228,7 +222,7 @@ pub fn node_for_glyph(glyph: char) -> Option<Node> {
     if glyph == '√' {
         return Some(ast::sqrt());
     }
-    let text = glyph.to_string();
+    let text = if glyph == 'Σ' { '∑' } else { glyph }.to_string();
     BIG_OPS
         .iter()
         .find(|op| op.glyph == text)
@@ -243,25 +237,46 @@ pub fn glyph_for(name: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::structure::ast::NodeKind;
 
     #[test]
     fn structures_symbols_and_functions_are_known() {
-        assert!(matches!(node_for("sqrt"), Some(Node::Sqrt { .. })));
-        assert!(matches!(node_for("sum"), Some(Node::Limits { .. })));
-        assert!(matches!(node_for("cases"), Some(Node::Matrix { .. })));
-        assert!(matches!(node_for("alpha"), Some(Node::Sym(_))));
-        assert!(matches!(node_for("sin"), Some(Node::Func(_))));
+        assert!(matches!(
+            structure_for("sqrt").map(|n| n.kind),
+            Some(NodeKind::Sqrt { .. })
+        ));
+        assert!(matches!(
+            structure_for("sum").map(|n| n.kind),
+            Some(NodeKind::BigOp(_))
+        ));
+        assert!(matches!(
+            structure_for("cases").map(|n| n.kind),
+            Some(NodeKind::Matrix { .. })
+        ));
+        assert_eq!(text_for("alpha"), Some("α".into()));
+        assert_eq!(text_for("sin"), Some("sin".into()));
     }
 
     #[test]
     fn unknown_names_are_rejected() {
-        assert!(node_for("notacommand").is_none());
+        assert!(structure_for("notacommand").is_none());
+        assert!(text_for("notacommand").is_none());
     }
 
     #[test]
     fn only_structural_glyphs_expand() {
-        assert!(matches!(node_for_glyph('√'), Some(Node::Sqrt { .. })));
-        assert!(matches!(node_for_glyph('∑'), Some(Node::Limits { .. })));
+        assert!(matches!(
+            node_for_glyph('√').map(|n| n.kind),
+            Some(NodeKind::Sqrt { .. })
+        ));
+        assert!(matches!(
+            node_for_glyph('∑').map(|n| n.kind),
+            Some(NodeKind::BigOp(_))
+        ));
+        assert!(matches!(
+            node_for_glyph('Σ').map(|n| n.kind),
+            Some(NodeKind::BigOp(_))
+        ));
         assert!(node_for_glyph('α').is_none());
         assert!(node_for_glyph('a').is_none());
     }

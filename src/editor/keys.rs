@@ -23,9 +23,11 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
         match (ctrl, key.as_str()) {
             (_, "ArrowLeft") => editor.move_h(false, shift),
             (_, "ArrowRight") => editor.move_h(true, shift),
+            (true, "ArrowUp") if !event.alt_key() && !shift => editor.annotate(true),
+            (true, "ArrowDown") if !event.alt_key() && !shift => editor.annotate(false),
             (false, "ArrowUp") => editor.move_v(false, shift),
             (false, "ArrowDown") => editor.move_v(true, shift),
-            // Alt+Up/Down は行を移動します。 Ctrl を押すと上または下にキャレットが追加されます。
+            // Alt+Up/Down は行を移動します。 Ctrl+Up/Down は上または下の共通欄を開きます。
             (true, "ArrowUp") | (true, "ArrowDown") => Did::Nothing,
             (false, "Home") => editor.move_line_edge(false, shift),
             (false, "End") => editor.move_line_edge(true, shift),

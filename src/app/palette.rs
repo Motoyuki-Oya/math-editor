@@ -28,6 +28,8 @@ pub(super) fn Palette() -> impl IntoView {
     view! {
         <div class="palette">
             <div class="group">
+                <button class="pal" title="上に注釈" on:mousedown=hold_focus on:click=move |_| editor::annotate(true)>"x̅"</button>
+                <button class="pal" title="下に注釈" on:mousedown=hold_focus on:click=move |_| editor::annotate(false)>"x̲"</button>
                 {structures
                     .into_iter()
                     .map(|(label, tip, structure)| {
@@ -73,8 +75,8 @@ impl Structure {
             Structure::Arrow => ast::stack(Between::Arrow('→')),
             Structure::Sqrt => ast::sqrt(),
             Structure::NthRoot => ast::nth_root(),
-            Structure::Sup => Node::Sup(Vec::new()),
-            Structure::Sub => Node::Sub(Vec::new()),
+            Structure::Sup => Node::sup(Vec::new()),
+            Structure::Sub => Node::sub(Vec::new()),
             Structure::Sum => ast::limits("∑"),
             Structure::Prod => ast::limits("∏"),
             Structure::Int => ast::limits("∫"),

@@ -3,15 +3,14 @@
 //! すべてのコマンドは、複数のカーソルが予期される動作として、単一のステップとしてすべての選択に適用されます。ドキュメント自体は [`crate::structural::text`] であり、表記や画面については何も知りません。
 
 mod history;
-mod island;
+mod nested;
 
-use crate::structure::edit::Escape;
 use history::{History, Step};
-pub use island::Inside;
+pub use nested::Inside;
 
 use super::clipboard::Clip;
-use crate::structure::ast::{Cursor, Node, Row};
-use crate::structure::text::{items_of, Item, Pos, Sel, Text};
+use crate::structure::ast::{row_at, Cursor, Node, Row};
+use crate::structure::text::{as_char, nodes_of, Pos, Sel, Text};
 
 /// `to` までのテキストが `end` で終わるテキストに置き換えられると、`p​​os` が終了します。
 fn shifted(pos: Pos, to: Pos, end: Pos) -> Pos {
@@ -51,8 +50,10 @@ impl Did {
 pub struct Editor {
     text: Text,
     sels: Vec<Sel>,
-    /// ケアトが島の中にいるところ、それが1つにいるとき。 注意は、いずれかの文書の1つの場所にある: これは、それが到達するその場所の深さだけを言う.
-    inside: Option<Cursor>,
+    /// 文書行のルートから、現在編集している入れ子の行までの位置。
+    cursor: Option<Cursor>,
+    /// 本文トリガーが今回構造を作る文書行内の位置。
+    transient_structure: Option<usize>,
     history: History,
 }
 
@@ -61,7 +62,8 @@ impl Default for Editor {
         Self {
             text: Text::default(),
             sels: vec![Sel::caret(Pos::default())],
-            inside: None,
+            cursor: None,
+            transient_structure: None,
             history: History::default(),
         }
     }
@@ -85,13 +87,13 @@ impl Editor {
     pub fn load(&mut self, text: Text) {
         self.text = text;
         self.sels = vec![Sel::caret(Pos::default())];
-        self.inside = None;
+        self.cursor = None;
         self.history.clear();
     }
 
-    fn edit_each(&mut self, step: Step, edit: impl Fn(&Text, Sel) -> (Pos, Pos, Vec<Vec<Item>>)) {
+    fn edit_each(&mut self, step: Step, edit: impl Fn(&Text, Sel) -> (Pos, Pos, Vec<Row>)) {
         self.record(step);
-        self.inside = None;
+        self.cursor = None;
         let mut order: Vec<usize> = (0..self.sels.len()).collect();
         order.sort_by_key(|&i| self.sels[i].start());
         for (done, &i) in order.iter().enumerate() {
@@ -108,7 +110,7 @@ impl Editor {
         self.merge_sels();
     }
 
-    pub fn insert(&mut self, what: Vec<Vec<Item>>) {
+    pub fn insert(&mut self, what: Vec<Row>) {
         let typing = what.len() == 1 && what[0].len() == 1;
         let step = if typing { Step::Typing } else { Step::Other };
         self.edit_each(step, move |_, sel| (sel.start(), sel.end(), what.clone()));
@@ -116,42 +118,108 @@ impl Editor {
 
     /// キャレットがどこにあっても、そのキャレットにテキストを挿入します。単一の文字が入力されるため、構造内のショートカットは引き続き実行されます。それ以上のものはペーストなのでそのまま入ります。
     pub fn insert_text(&mut self, text: &str) -> Did {
-        if self.inside.is_some() {
+        if self.cursor.is_some() {
             let mut chars = text.chars();
             match (chars.next(), chars.next()) {
-                (Some(c), None) => self.type_in_island(c),
+                (Some(c), None) => self.type_with_cursor(c),
                 // 文字は文字のままです。貼り付けでは、文字を入力したときのショートカットが再実行されることはありません。構造体は 1 行を保持するため、その内部では改行は何の意味も持ちません。
-                _ => self.insert_row_in_island(
+                _ => self.insert_nested_row(
                     text.chars()
                         .filter(|c| *c != '\n')
-                        .map(Node::Char)
+                        .map(Node::char)
                         .collect(),
                 ),
             };
             return Did::Changed;
         }
-        self.insert(items_of(text));
+        self.insert(nodes_of(text));
         Did::Changed
     }
 
     /// ドキュメントからコピーされた部分を、元の形状のまま元に戻します。他の場所からのテキストは、[`Self::insert_text`] を介して文字として到着します。
     pub fn insert_clip(&mut self, clip: &Clip) -> Did {
-        if self.inside.is_some() {
-            self.insert_row_in_island(clip.row());
+        if self.cursor.is_some() {
+            self.insert_nested_row(clip.row());
         } else {
-            self.insert(clip.items());
+            self.insert(clip.lines());
         }
         Did::Changed
     }
 
-    pub fn insert_math(&mut self, row: Row) {
-        self.insert(vec![vec![Item::Math(row)]]);
+    pub fn annotate(&mut self, upper: bool) -> Did {
+        if let Some(cursor) = &self.cursor {
+            let can_annotate = row_at(self.text.line(self.primary().head.line), &cursor.path)
+                .is_some_and(|row| {
+                    if cursor.is_caret() {
+                        cursor.index > 0 || cursor.index < row.len()
+                    } else {
+                        cursor.start() < cursor.end().min(row.len())
+                    }
+                });
+            if !can_annotate {
+                return Did::Nothing;
+            }
+            let mut annotated = false;
+            let changed = self.with_cursor(Inside::Change, |editing| {
+                annotated = editing.annotate(upper);
+                None
+            });
+            return if changed && annotated {
+                Did::Changed
+            } else {
+                Did::Nothing
+            };
+        }
+        let sel = self.primary();
+        if sel.is_caret() && self.enter_node_beside(false) {
+            return self.annotate(upper);
+        }
+        if sel.is_caret() && self.enter_node_beside(true) {
+            return self.annotate(upper);
+        }
+        if !sel.is_caret() && sel.start().line == sel.end().line {
+            let lines = self.text.slice(sel.start(), sel.end());
+            let Some(items) = lines.first() else {
+                return Did::Nothing;
+            };
+            if items
+                .iter()
+                .any(|node| matches!(node.kind, crate::structure::ast::NodeKind::Tab))
+            {
+                return Did::Nothing;
+            }
+            let base = items.clone();
+            if base.is_empty() {
+                return Did::Nothing;
+            }
+            let node = Node::container(base);
+            let slot = if upper {
+                node.upper_slot()
+            } else {
+                node.lower_slot()
+            };
+            let at = sel.start();
+            self.replace_range_with(at, sel.end(), vec![vec![node]]);
+            self.sels = vec![Sel::caret(at)];
+            self.cursor = Some(Cursor {
+                path: vec![(at.col, slot)],
+                index: 0,
+                anchor: 0,
+                fills: Vec::new(),
+            });
+            return Did::Changed;
+        }
+        Did::Nothing
     }
 
-    /// タブ: テキスト内の列の区切り文字、および構造内の次のスロットへのステップ。これがすべての数式エディターでのタブの意味です。
+    /// 本文では列区切りを挿入し、入れ子構造では次のスロットへ移動します。
     pub fn tab(&mut self, back: bool) -> Did {
-        if self.inside.is_some() {
-            self.in_island(Inside::Move, |editing| {
+        if self
+            .cursor
+            .as_ref()
+            .is_some_and(|cursor| !cursor.path.is_empty())
+        {
+            self.with_cursor(Inside::Move, |editing| {
                 if back {
                     editing.move_left()
                 } else {
@@ -160,27 +228,30 @@ impl Editor {
             });
             return Did::Moved;
         }
-        self.insert(vec![vec![Item::Tab]]);
+        if self.cursor.is_some() {
+            self.leave_structure();
+        }
+        self.insert(vec![vec![Node::tab()]]);
         Did::Changed
     }
 
-    /// テキストに新しい行を入力し、その中に式の終わりを入力します。
+    /// 本文では行を分割し、入れ子構造の編集中なら改行せず構造を抜けます。
     pub fn split_line(&mut self) -> Did {
-        if self.leave_island() {
+        if self.leave_structure() {
             return Did::Moved;
         }
         self.insert(vec![Vec::new(), Vec::new()]);
         Did::Changed
     }
 
-    /// エスケープ: 式を終了するか、余分なカーソルを削除します。
+    /// 入れ子構造の編集を終了するか、余分なカーソルを削除します。
     pub fn escape(&mut self) -> Did {
-        Did::moved(self.leave_island() || self.collapse_sels())
+        Did::moved(self.leave_structure() || self.collapse_sels())
     }
 
     pub fn backspace(&mut self) -> Did {
-        if self.inside.is_some() {
-            self.in_island(Inside::Change, |editing| editing.backspace());
+        if self.cursor.is_some() {
+            self.with_cursor(Inside::Change, |editing| editing.backspace());
             return Did::Changed;
         }
         self.backspace_in_text();
@@ -198,8 +269,8 @@ impl Editor {
     }
 
     pub fn delete_forward(&mut self) -> Did {
-        if self.inside.is_some() {
-            self.in_island(Inside::Change, |editing| {
+        if self.cursor.is_some() {
+            self.with_cursor(Inside::Change, |editing| {
                 editing.delete_forward();
                 None
             });
@@ -217,10 +288,10 @@ impl Editor {
 
     /// ケアトのグリッドは、構造内のものだけを意味し、列によって成長します。
     pub fn grow_matrix(&mut self) -> Did {
-        if self.inside.is_none() {
+        if self.cursor.is_none() {
             return Did::Nothing;
         }
-        self.in_island(Inside::Change, |editing| {
+        self.with_cursor(Inside::Change, |editing| {
             editing.grow_matrix(true);
             None
         });
@@ -229,23 +300,23 @@ impl Editor {
 
     /// 検索と置換によって使用される1つの範囲を置換します。
     pub fn replace_range(&mut self, from: Pos, to: Pos, with: &str) {
-        self.replace_range_with(from, to, items_of(with));
+        self.replace_range_with(from, to, nodes_of(with));
     }
 
     /// カラムの区切り文字よりも多くの文字を入れる置換のために、アイテムと範囲を置換します。
-    pub fn replace_range_with(&mut self, from: Pos, to: Pos, with: Vec<Vec<Item>>) {
+    pub fn replace_range_with(&mut self, from: Pos, to: Pos, with: Vec<Row>) {
         self.record(Step::Other);
-        self.inside = None;
+        self.cursor = None;
         let at = self.text.remove(from, to);
         let end = self.text.insert(at, with);
         self.sels = vec![Sel::caret(end)];
     }
 
-    /// 左と右に、一度に1つの場所。 数式は、キャレットが上回るのではなく、内部の1つの場所は構造自体です。
+    /// 左右へ1つ移動し、構造Nodeでは外側を飛び越えず編集可能なスロットへ入ります。
     pub fn move_h(&mut self, forward: bool, extend: bool) -> Did {
-        if self.inside.is_some() {
+        if self.cursor.is_some() {
             let kind = if extend { Inside::Extend } else { Inside::Move };
-            self.in_island(kind, |editing| {
+            self.with_cursor(kind, |editing| {
                 if extend {
                     editing.extend(forward)
                 } else if forward {
@@ -256,7 +327,7 @@ impl Editor {
             });
             return Did::Moved;
         }
-        if !extend && self.enter_island_beside(forward) {
+        if !extend && self.enter_node_beside(forward) {
             return Did::Moved;
         }
         self.map_sels(extend, |text, head| {
@@ -269,18 +340,21 @@ impl Editor {
         Did::Moved
     }
 
-    /// 上下: テキストの行間と、キャレットが入っている構造のスロット間。数式の上部または下部を残すと、キャレットがテキストに戻ります。
+    /// 本文では行間を移動し、入れ子構造では内容のある上下スロット間を移動します。
     pub fn move_v(&mut self, down: bool, extend: bool) -> Did {
-        if self.inside.is_some() {
-            self.in_island(Inside::Move, |editing| {
-                let moved = if down {
+        if self.cursor.is_some() {
+            let mut moved = false;
+            self.with_cursor(Inside::Move, |editing| {
+                moved = if down {
                     editing.move_down()
                 } else {
                     editing.move_up()
                 };
-                (!moved).then_some(Escape::Done)
+                None
             });
-            return Did::Moved;
+            if moved {
+                return Did::Moved;
+            }
         }
         self.map_sels(extend, |text, head| {
             let line = if down {
@@ -294,8 +368,8 @@ impl Editor {
     }
 
     pub fn move_line_edge(&mut self, end: bool, extend: bool) -> Did {
-        if self.inside.is_some() {
-            self.in_island(Inside::Move, |editing| {
+        if self.cursor.is_some() {
+            self.with_cursor(Inside::Move, |editing| {
                 if end {
                     editing.move_end();
                 } else {
@@ -312,7 +386,7 @@ impl Editor {
     }
 
     pub fn move_document_edge(&mut self, end: bool, extend: bool) -> Did {
-        self.leave_island();
+        self.leave_structure();
         self.map_sels(
             extend,
             |text, _| {
@@ -328,7 +402,7 @@ impl Editor {
 
     fn map_sels(&mut self, extend: bool, step: impl Fn(&Text, Pos) -> Pos) {
         self.history.cut();
-        self.inside = None;
+        self.cursor = None;
         for sel in &mut self.sels {
             // 他のエディタと同様に、Shift を使用せずに選択範囲を折りたたむと、近くの端が維持されます。
             let from = if extend || sel.is_caret() {
@@ -347,13 +421,13 @@ impl Editor {
 
     pub fn set_caret(&mut self, at: Pos) {
         self.history.cut();
-        self.inside = None;
+        self.cursor = None;
         self.sels = vec![Sel::caret(self.text.clamp(at))];
     }
 
     pub fn extend_to(&mut self, at: Pos) {
         self.history.cut();
-        self.inside = None;
+        self.cursor = None;
         let at = self.text.clamp(at);
         if let Some(sel) = self.sels.last_mut() {
             sel.head = at;
@@ -363,15 +437,15 @@ impl Editor {
 
     pub fn add_caret(&mut self, at: Pos) {
         self.history.cut();
-        self.inside = None;
+        self.cursor = None;
         self.sels.push(Sel::caret(self.text.clamp(at)));
         self.merge_sels();
     }
 
     /// キャレットが存在する場所を選択するために存在するものすべてを選択します (キャレットが含まれる構造の行、またはドキュメント全体)。
     pub fn select_all(&mut self) -> Did {
-        if self.inside.is_some() {
-            self.in_island(Inside::Extend, |editing| {
+        if self.cursor.is_some() {
+            self.with_cursor(Inside::Extend, |editing| {
                 editing.select_row();
                 None
             });
@@ -384,7 +458,7 @@ impl Editor {
 
     pub fn set_sels(&mut self, sels: Vec<Sel>) {
         self.history.cut();
-        self.inside = None;
+        self.cursor = None;
         if sels.is_empty() {
             return;
         }
@@ -404,7 +478,7 @@ impl Editor {
     /// `Ctrl+D`: キャレットの単語を選択し、さらに押すたびに、同じテキストが表示される次の場所が追加されます。
     pub fn add_next_occurrence(&mut self) -> bool {
         // 構造体は 1 つのキャレットを保持するため、そこに追加するものは何もありません。
-        if self.inside.is_some() {
+        if self.cursor.is_some() {
             return false;
         }
         self.history.cut();
@@ -416,7 +490,7 @@ impl Editor {
             *self.sels.last_mut().expect("a selection") = word;
             return true;
         }
-        let needle: Vec<Item> = self
+        let needle: Row = self
             .text
             .slice(primary.start(), primary.end())
             .into_iter()
@@ -486,7 +560,7 @@ fn is_word(c: char) -> bool {
 
 fn word_at(text: &Text, at: Pos) -> Option<Sel> {
     let line = text.line(at.line);
-    let word = |col: usize| line.get(col).and_then(Item::as_char).is_some_and(is_word);
+    let word = |col: usize| line.get(col).and_then(as_char).is_some_and(is_word);
     let mut start = at.col;
     while start > 0 && word(start - 1) {
         start -= 1;
@@ -499,7 +573,7 @@ fn word_at(text: &Text, at: Pos) -> Option<Sel> {
 }
 
 /// 既に選択した場所をスキップして、 `from` からアイテムを探します。
-fn find_after(text: &Text, needle: &[Item], from: Pos, taken: &[Pos]) -> Option<Sel> {
+fn find_after(text: &Text, needle: &[Node], from: Pos, taken: &[Pos]) -> Option<Sel> {
     let mut at = from;
     for _ in 0..text.line_count() + 1 {
         for line in at.line..text.line_count() {
@@ -532,36 +606,28 @@ pub(crate) mod tests {
     use super::*;
     /// ここでは、表記を通過するものは何もありません。モデルは渡されるアイテムのみであるため、ファイル形式によってはこれらのテストを開始できません。
     pub(crate) fn editor(source: &str) -> Editor {
-        with_items(items_of(source))
+        with_rows(nodes_of(source))
     }
 
-    pub(crate) fn with_items(lines: Vec<Vec<Item>>) -> Editor {
+    pub(crate) fn with_rows(lines: Vec<Row>) -> Editor {
         let mut editor = Editor::default();
         editor.load(Text::from_lines(lines));
         editor
     }
 
-    /// 文書のテキストは、各島が1つの文字として立っています。
     pub(crate) fn plain(editor: &Editor) -> String {
-        (0..editor.text().line_count())
-            .map(|line| {
-                editor
-                    .text()
-                    .line(line)
-                    .iter()
-                    .map(|item| item.as_char().unwrap_or('\u{fffc}'))
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        crate::structure::plain::lines(editor.text().lines())
     }
 
     #[test]
-    fn a_separator_is_one_item() {
+    fn a_separator_is_one_node() {
         let mut editor = editor("x= 1");
         editor.set_caret(Pos::new(0, 1));
         editor.tab(false);
-        assert_eq!(editor.text().item_at(Pos::new(0, 1)), Some(&Item::Tab));
+        assert!(matches!(
+            editor.text().node_at(Pos::new(0, 1)).map(|node| &node.kind),
+            Some(crate::structure::ast::NodeKind::Tab)
+        ));
         assert_eq!(editor.text().line_len(0), 5);
     }
 
@@ -614,12 +680,15 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn backspace_joins_lines_and_deletes_an_island_whole() {
-        let island = Item::Math(vec![crate::structure::ast::Node::Char('x')]);
-        let mut editor = with_items(vec![vec![Item::Char('a'), island], vec![Item::Char('b')]]);
+    fn backspace_joins_lines_and_deletes_a_structure_node_whole() {
+        let structure = Node::sqrt(None, vec![Node::char('x')]);
+        let mut editor = with_rows(vec![
+            vec![Node::char('a'), structure],
+            vec![Node::char('b')],
+        ]);
         editor.set_caret(Pos::new(1, 0));
         editor.backspace();
-        assert_eq!(plain(&editor), "a\u{fffc}b");
+        assert_eq!(plain(&editor), "a√xb");
         editor.set_caret(Pos::new(0, 2));
         editor.backspace();
         assert_eq!(plain(&editor), "ab");
@@ -658,11 +727,92 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn moving_left_from_a_big_operator_enters_its_last_nonempty_annotation() {
+        let mut operator = Node::big_op("∑".into());
+        operator.lower = vec![Node::char('i')];
+        operator.upper = vec![Node::char('n')];
+        let upper = operator.upper_slot();
+        let mut editor = with_rows(vec![vec![operator]]);
+        editor.set_caret(Pos::new(0, 1));
+        editor.move_h(false, false);
+        assert_eq!(
+            editor.nested_cursor().map(|cursor| cursor.path.clone()),
+            Some(vec![(0, upper)])
+        );
+    }
+
+    #[test]
     fn moving_down_keeps_the_column_within_the_line() {
         let mut editor = editor("long line\nab");
         editor.set_caret(Pos::new(0, 9));
         editor.move_v(true, false);
         assert_eq!(editor.primary().head, Pos::new(1, 2));
+    }
+
+    #[test]
+    fn vertical_movement_skips_empty_annotations_and_continues_to_the_next_line() {
+        let operator = Node::big_op("∑".into());
+        let lower = operator.lower_slot();
+        let mut editor = with_rows(vec![
+            vec![Node::char('a')],
+            vec![Node::char('b'), operator],
+            vec![Node::char('c'), Node::char('d')],
+        ]);
+        let at = Pos::new(1, 1);
+        assert!(editor.enter_at(
+            at,
+            &Cursor {
+                path: vec![(1, lower)],
+                index: 0,
+                anchor: 0,
+                fills: Vec::new(),
+            },
+        ));
+
+        editor.move_v(true, false);
+
+        assert!(editor.nested_cursor().is_none());
+        assert_eq!(editor.primary().head, Pos::new(2, 1));
+    }
+
+    #[test]
+    fn vertical_movement_enters_a_nonempty_annotation() {
+        let mut operator = Node::big_op("∑".into());
+        operator.upper = vec![Node::char('n')];
+        let upper = operator.upper_slot();
+        let mut editor = with_rows(vec![
+            vec![Node::char('a')],
+            vec![Node::char('b'), operator],
+            vec![Node::char('c')],
+        ]);
+        let at = Pos::new(1, 1);
+        assert!(editor.enter_at(at, &Cursor::root(2)));
+
+        editor.move_v(false, false);
+
+        assert_eq!(editor.primary().head, at);
+        assert_eq!(
+            editor.nested_cursor().expect("inside annotation").path,
+            vec![(1, upper)]
+        );
+    }
+
+    #[test]
+    fn moving_from_a_top_level_annotation_returns_to_its_text() {
+        let mut editor = editor("abc");
+        editor.set_sels(vec![Sel::range(Pos::new(0, 0), Pos::new(0, 3))]);
+        assert!(matches!(editor.annotate(true), Did::Changed));
+        editor.insert_text("n");
+        editor.move_v(true, false);
+        assert_eq!(
+            editor.nested_cursor().expect("inside base").path,
+            vec![(0, 0)]
+        );
+        editor.insert_text("X");
+        assert_eq!(
+            crate::structure::plain::row(&editor.text().line(0).to_vec()),
+            "aXbc^n"
+        );
     }
 
     #[test]

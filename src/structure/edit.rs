@@ -1,24 +1,22 @@
-//! アイランド内のカーソル移動と編集コマンド。
+//! 文書行と入れ子Rowで共通に使うカーソル移動・編集コマンド。
 
-use super::ast::{is_arrow, row_at, row_at_mut, Between, Cursor, Delim, Node, Row};
+use super::ast::{is_arrow, row_at, row_at_mut, Between, Cursor, Delim, Node, NodeKind, Row};
 use super::vocabulary;
 
 /// カーソルが吸収できなかった編集の結果。そのため、周囲のテキスト エディタが代わりに反応する必要があります。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Escape {
-    /// キャレットが数式の左端から外れました。
+    /// キャレットが編集中のRowの左端から外れました。
     Left,
-    /// キャレットが数式の右端から外れました。
+    /// キャレットが編集中のRowの右端から外れました。
     Right,
-    /// 数式は空で、ユーザーが再度 Backspace キーを押しました。
+    /// Rowが空で、ユーザーが再度 Backspace キーを押しました。
     Delete,
-    /// ユーザーは数式を終了するよう要求しました (Escape / Enter)。
-    Done,
 }
 
-/// アイランドは、編集済み: ドキュメントから借用した構造自体、およびその中を移動するカーソル。
+/// ドキュメントから借用したRowと、その中を移動するCursorへ編集操作を適用します。
 ///
-/// ここには何もコピーされず、履歴も保持されません。アイランドはドキュメントに属しているため、アイランド内の編集はドキュメントの編集となり、他の編集と同じ履歴によって元に戻されます。
+/// Rowはコピーせずその場で変更し、履歴は呼び出し元のEditorが管理します。
 pub struct Editing<'a> {
     pub root: &'a mut Row,
     pub cursor: &'a mut Cursor,
@@ -29,13 +27,7 @@ impl<'a> Editing<'a> {
         Editing { root, cursor }
     }
 
-    pub fn set_cursor(&mut self, cursor: Cursor) {
-        if row_at(self.root, &cursor.path).is_some_and(|r| cursor.index <= r.len()) {
-            *self.cursor = cursor;
-        }
-    }
-
-    fn current_row(&self) -> &Row {
+    fn current_row(&self) -> &[Node] {
         row_at(self.root, &self.cursor.path).unwrap_or(self.root)
     }
 
@@ -84,7 +76,7 @@ impl<'a> Editing<'a> {
         self.cursor.index = to.index.min(self.current_row().len());
     }
 
-    /// キャレットを保持する行内で、キャレットが含まれる構造を選択します。したがって、選択すると文字、その周囲の構造、その周囲の構造、そして最後に数式全体が広がり、周囲のテキストが引き継ぎます。
+    /// 選択を現在の文字から、それを含む構造、さらに外側の構造へ順に広げます。
     fn select_around(&mut self, forward: bool) -> Option<Escape> {
         let Some((node, _)) = self.cursor.path.pop() else {
             return Some(if forward { Escape::Right } else { Escape::Left });
@@ -153,11 +145,15 @@ impl<'a> Editing<'a> {
     fn place(&mut self, node: Node) {
         self.take_selection();
         let waits = waits_for_one(&node);
-        let enter = node.slot_count() > 0;
+        let entry = if matches!(&node.kind, NodeKind::BigOp(_)) {
+            Some(node.lower_slot())
+        } else {
+            node.horizontal_slots().first().copied()
+        };
         let index = self.cursor.index;
         self.current_row_mut().insert(index, node);
-        if enter {
-            self.cursor.path.push((index, 0));
+        if let Some(entry) = entry {
+            self.cursor.path.push((index, entry));
             self.caret_at(0);
             if waits {
                 self.wait_for_one();
@@ -177,17 +173,17 @@ impl<'a> Editing<'a> {
         self.cursor.fills.push(self.cursor.path.len());
     }
 
-    /// そこに書き込まれる 1 つのものを待機していたすべての行からキャレットを戻します。これにより、構造体の後に書き込みが続行されます。数式自体は待機状態になる可能性があります。つまり、「1/」と入力して開始された数式は、その分数に対してのみ存在します。その後、キャレットはテキストに戻りますが、これは呼び出し元だけが行うことができます。
+    /// 1まとまりの入力を待っていた内側Rowから、待機元のRowへキャレットを戻します。
     #[must_use]
-    fn settle(&mut self, leave_formula: bool) -> Option<Escape> {
+    fn settle(&mut self, leave_root: bool) -> Option<Escape> {
         while self.cursor.fills.last() == Some(&self.cursor.path.len()) {
             match self.cursor.path.pop() {
                 Some((node, _)) => {
                     self.cursor.fills.pop();
                     self.caret_at(node + 1);
                 }
-                // 数式は、その上に構築されたものを保持し続けるため、「a/b/c」はスタックされます。通常のテキストが続いて初めて終了します。
-                None if !leave_formula => return None,
+                // `/`やスクリプトが続く場合は、直前に作った構造へさらに積み重ねます。
+                None if !leave_root => return None,
                 None => {
                     self.cursor.fills.pop();
                     return Some(Escape::Right);
@@ -210,18 +206,24 @@ impl<'a> Editing<'a> {
             Some(start) => {
                 let name: String = row[start + 1..index]
                     .iter()
-                    .filter_map(|node| match node {
-                        Node::Char(c) => Some(*c),
+                    .filter_map(|node| match &node.kind {
+                        NodeKind::Char(c) => Some(*c),
                         _ => None,
                     })
                     .collect();
-                match vocabulary::node_for(&name) {
-                    Some(node) => (start, node),
-                    None => return false,
+                if let Some(node) = vocabulary::structure_for(&name) {
+                    (start, node)
+                } else if let Some(text) = vocabulary::text_for(&name) {
+                    self.current_row_mut().drain(start..index);
+                    self.caret_at(start);
+                    self.insert_row(text.chars().map(Node::char).collect());
+                    return true;
+                } else {
+                    return false;
                 }
             }
-            None => match row.get(index.wrapping_sub(1)) {
-                Some(Node::Char(c)) => match vocabulary::node_for_glyph(*c) {
+            None => match row.get(index.wrapping_sub(1)).map(|node| &node.kind) {
+                Some(NodeKind::Char(c)) => match vocabulary::node_for_glyph(*c) {
                     Some(node) => (index - 1, node),
                     None => return false,
                 },
@@ -234,7 +236,7 @@ impl<'a> Editing<'a> {
         true
     }
 
-    /// 文字が数式の外に属する場合、エスケープを報告します。呼び出し側は、その文字をテキストに書き込みます。ここには書かれていません。
+    /// 待機中の構造を抜ける文字ではEscapeを返し、呼び出し側が外側Rowへ入力します。
     pub fn insert_char(&mut self, c: char) -> Option<Escape> {
         // 待機中の行には、上の行に持ち上げられる文字 `/` と同じ文字列が含まれます。それ以外の書き込みは構造体の外側で行われるため、「a/b + 1」は入力されたとおりに読み取られます。すぐに開いた括弧は、代わりに `a/(b + 1)` という 1 つのことです。
         if self.waiting()
@@ -248,20 +250,17 @@ impl<'a> Editing<'a> {
         match c {
             '/' => self.insert_stack(Between::Rule),
             c if is_arrow(c) => self.insert_stack(Between::Arrow(c)),
-            '^' => self.insert(Node::Sup(Row::new())),
-            '_' => self.insert(Node::Sub(Row::new())),
-            '(' | '[' => self.insert(Node::Group {
-                delim: Delim::from_open(c).unwrap(),
-                body: Row::new(),
-            }),
+            '^' => self.insert(Node::sup(Row::new())),
+            '_' => self.insert(Node::sub(Row::new())),
+            '(' | '[' => self.insert(Node::group(Delim::from_open(c).unwrap(), Row::new())),
             ')' | ']' => return self.leave_group(),
             // グリッドは、キャレットがある列ごとに拡大します。それ以外の `&` は単なる文字です。
             '&' => {
                 if !self.grow_matrix(false) {
-                    self.insert(Node::Char('&'));
+                    self.insert(Node::char('&'));
                 }
             }
-            _ => self.insert(Node::Char(c)),
+            _ => self.insert(Node::char(c)),
         }
         None
     }
@@ -275,11 +274,7 @@ impl<'a> Editing<'a> {
             above_start(row, index)
         };
         let above: Row = self.current_row_mut().drain(start..index).collect();
-        let node = Node::Stack {
-            above,
-            below: Row::new(),
-            between,
-        };
+        let node = Node::stack(above, Row::new(), between);
         self.current_row_mut().insert(start, node);
         self.cursor.path.push((start, 1));
         self.caret_at(0);
@@ -292,7 +287,10 @@ impl<'a> Editing<'a> {
         while depth > 0 {
             let (node, _) = self.cursor.path[depth - 1];
             let parent = &self.cursor.path[..depth - 1];
-            if matches!(self.node_at(parent, node), Some(Node::Group { .. })) {
+            if self
+                .node_at(parent, node)
+                .is_some_and(|node| matches!(&node.kind, NodeKind::Group { .. }))
+            {
                 self.cursor.path.truncate(depth - 1);
                 self.cursor.fills.retain(|&at| at <= self.cursor.path.len());
                 self.caret_at(node + 1);
@@ -373,9 +371,8 @@ impl<'a> Editing<'a> {
         if self.cursor.index > 0 {
             let index = self.cursor.index - 1;
             let node = self.current_row()[index].clone();
-            if node.slot_count() > 0 {
-                let slot = node.exit_slot();
-                let len = node.slot(slot).map(|r| r.len()).unwrap_or(0);
+            if let Some(slot) = node.horizontal_slots().last().copied() {
+                let len = node.slot(slot).map(Vec::len).unwrap_or(0);
                 self.cursor.path.push((index, slot));
                 self.caret_at(len);
             } else {
@@ -385,14 +382,21 @@ impl<'a> Editing<'a> {
         }
         match self.cursor.path.pop() {
             Some((node, slot)) => {
-                if slot > 0 {
-                    let parent = self.cursor.path.clone();
+                let parent = self.cursor.path.clone();
+                let previous = self.node_at(&parent, node).and_then(|n| {
+                    let slots = n.horizontal_slots();
+                    slots
+                        .iter()
+                        .position(|candidate| *candidate == slot)
+                        .and_then(|at| at.checked_sub(1).map(|before| slots[before]))
+                });
+                if let Some(previous) = previous {
                     let len = self
                         .node_at(&parent, node)
-                        .and_then(|n| n.slot(slot - 1))
-                        .map(|r| r.len())
+                        .and_then(|n| n.slot(previous))
+                        .map(Vec::len)
                         .unwrap_or(0);
-                    self.cursor.path.push((node, slot - 1));
+                    self.cursor.path.push((node, previous));
                     self.caret_at(len);
                 } else {
                     self.caret_at(node);
@@ -412,8 +416,8 @@ impl<'a> Editing<'a> {
         if self.cursor.index < len {
             let index = self.cursor.index;
             let node = self.current_row()[index].clone();
-            if node.slot_count() > 0 {
-                self.cursor.path.push((index, node.entry_slot()));
+            if let Some(slot) = node.horizontal_slots().first().copied() {
+                self.cursor.path.push((index, slot));
                 self.caret_at(0);
             } else {
                 self.caret_at(index + 1);
@@ -423,12 +427,15 @@ impl<'a> Editing<'a> {
         match self.cursor.path.pop() {
             Some((node, slot)) => {
                 let parent = self.cursor.path.clone();
-                let slots = self
-                    .node_at(&parent, node)
-                    .map(|n| n.slot_count())
-                    .unwrap_or(0);
-                if slot + 1 < slots {
-                    self.cursor.path.push((node, slot + 1));
+                let next = self.node_at(&parent, node).and_then(|n| {
+                    let slots = n.horizontal_slots();
+                    slots
+                        .iter()
+                        .position(|candidate| *candidate == slot)
+                        .and_then(|at| slots.get(at + 1).copied())
+                });
+                if let Some(next) = next {
+                    self.cursor.path.push((node, next));
                     self.caret_at(0);
                 } else {
                     self.caret_at(node + 1);
@@ -437,6 +444,37 @@ impl<'a> Editing<'a> {
             }
             None => Some(Escape::Right),
         }
+    }
+
+    pub fn annotate(&mut self, upper: bool) -> bool {
+        self.stop_waiting();
+        let (start, end) = if self.cursor.is_caret() {
+            let len = self.current_row().len();
+            if self.cursor.index > 0 {
+                (self.cursor.index - 1, self.cursor.index)
+            } else if self.cursor.index < len {
+                (self.cursor.index, self.cursor.index + 1)
+            } else {
+                return false;
+            }
+        } else {
+            (self.cursor.start(), self.cursor.end())
+        };
+        let selected: Row = self.current_row_mut().drain(start..end).collect();
+        let node = if selected.len() == 1 {
+            selected.into_iter().next().expect("one selected node")
+        } else {
+            Node::container(selected)
+        };
+        let slot = if upper {
+            node.upper_slot()
+        } else {
+            node.lower_slot()
+        };
+        self.current_row_mut().insert(start, node);
+        self.cursor.path.push((start, slot));
+        self.caret_at(0);
+        true
     }
 
     pub fn move_up(&mut self) -> bool {
@@ -451,25 +489,48 @@ impl<'a> Editing<'a> {
     fn move_vertically(&mut self, up: bool) -> bool {
         self.stop_waiting();
         self.collapse(!up);
+        let adjacent = if self.cursor.index > 0 {
+            Some(self.cursor.index - 1)
+        } else if self.cursor.index < self.current_row().len() {
+            Some(self.cursor.index)
+        } else {
+            None
+        };
+        if let Some(node_index) = adjacent {
+            let node = self.current_row()[node_index].clone();
+            let slot = if up {
+                node.upper_slot()
+            } else {
+                node.lower_slot()
+            };
+            if node.slot(slot).is_some_and(|row| !row.is_empty()) {
+                self.cursor.path.push((node_index, slot));
+                self.caret_at(0);
+                return true;
+            }
+        }
         for depth in (0..self.cursor.path.len()).rev() {
             let (node_index, slot) = self.cursor.path[depth];
             let parent_path = self.cursor.path[..depth].to_vec();
             let Some(node) = self.node_at(&parent_path, node_index).cloned() else {
                 continue;
             };
-            let target = match &node {
-                Node::Stack { .. } => match (up, slot) {
+            let lower = node.lower_slot();
+            let upper = node.upper_slot();
+            let in_annotation = slot == upper || slot == lower;
+            let annotation = match (up, in_annotation) {
+                (true, false) if !node.upper.is_empty() => Some(upper),
+                (false, false) if !node.lower.is_empty() => Some(lower),
+                _ => None,
+            };
+            let intrinsic = match &node.kind {
+                NodeKind::Stack { .. } => match (up, slot) {
                     (true, 1) => Some(0),
                     (false, 0) => Some(1),
                     _ => None,
                 },
-                Node::Limits { .. } => match (up, slot) {
-                    (true, 0) => Some(1),
-                    (false, 1) => Some(0),
-                    _ => None,
-                },
-                Node::Matrix { cells, .. } => {
-                    let cols = cells.first().map(|r| r.len()).unwrap_or(1).max(1);
+                NodeKind::Matrix { cells, .. } => {
+                    let cols = cells.first().map(Vec::len).unwrap_or(1).max(1);
                     let (row, col) = (slot / cols, slot % cols);
                     if up && row > 0 {
                         Some((row - 1) * cols + col)
@@ -481,6 +542,7 @@ impl<'a> Editing<'a> {
                 }
                 _ => None,
             };
+            let target = intrinsic.or(annotation);
             if let Some(target) = target {
                 self.cursor.path.truncate(depth);
                 self.cursor.path.push((node_index, target));
@@ -489,6 +551,25 @@ impl<'a> Editing<'a> {
                     .map(|r| r.len().min(self.cursor.index))
                     .unwrap_or(0);
                 self.caret_at(index);
+                return true;
+            }
+            if (up && slot == lower) || (!up && slot == upper) {
+                self.cursor.path.truncate(depth);
+                let base = if up {
+                    node.horizontal_slots().last().copied()
+                } else {
+                    node.horizontal_slots().first().copied()
+                };
+                if let Some(base) = base {
+                    self.cursor.path.push((node_index, base));
+                    let index = node
+                        .slot(base)
+                        .map(|row| row.len().min(self.cursor.index))
+                        .unwrap_or(0);
+                    self.caret_at(index);
+                } else {
+                    self.caret_at(node_index + usize::from(!up));
+                }
                 return true;
             }
         }
@@ -505,11 +586,13 @@ impl<'a> Editing<'a> {
         self.caret_at(self.current_row().len());
     }
 
-    /// 右側の周囲のテキストからフィールドにキャレットが入るときに使用される、数式の最後にキャレットを配置します。
+    /// 右側から構造へ入るとき、編集中のRowの末尾へキャレットを置きます。
+    #[cfg(test)]
     pub fn move_to_end(&mut self) {
         *self.cursor = Cursor::root(self.root.len());
     }
 
+    #[cfg(test)]
     pub fn move_to_start(&mut self) {
         *self.cursor = Cursor::root(0);
     }
@@ -528,7 +611,11 @@ impl<'a> Editing<'a> {
             let Some(row) = row_at_mut(self.root, &parent_path) else {
                 return false;
             };
-            let Some(Node::Matrix { cells, .. }) = row.get_mut(node_index) else {
+            let Some(Node {
+                kind: NodeKind::Matrix { cells, .. },
+                ..
+            }) = row.get_mut(node_index)
+            else {
                 return false;
             };
             let cols = cells.first().map(|r| r.len()).unwrap_or(1).max(1);
@@ -556,7 +643,7 @@ fn builds_on(c: char) -> bool {
     matches!(c, '/' | '^' | '_') || is_arrow(c)
 }
 
-/// 入力された文字が待機行の一部であるかどうか: 実行 `/` 自体が上の行に移動するか、書き込まれているコマンド (`\alpha`、`√`)、またはそれに続く実行にバインドされるスクリプトです。これらは、他の何かが終了しても数式を継続します。
+/// 入力された文字が、現在の構造を作る1まとまりとして続くかを判定します。
 fn carries_on(c: char) -> bool {
     c.is_alphanumeric()
         || matches!(c, '.' | '\\' | '^' | '_')
@@ -566,22 +653,22 @@ fn carries_on(c: char) -> bool {
 /// この構造体が開く行が 1 つのことを実行してからキャレットを戻すかどうか。これらは、1 次元の読み取りで括弧なしで書き込まれる構造 (`√2 + 1`、`x^2 + 1`) なので、書き込みは同じ方法で終了する必要があります。それより長いものは括弧で囲まれます: `√(a + b)`。
 fn waits_for_one(node: &Node) -> bool {
     matches!(
-        node,
-        Node::Sqrt { index: None, .. } | Node::Sup(_) | Node::Sub(_)
+        &node.kind,
+        NodeKind::Sqrt { index: None, .. } | NodeKind::Sup(_) | NodeKind::Sub(_)
     )
 }
 
 /// `/` が入力されたときに暗黙的に上の行が始まる場所を見つけます。つまり、キャレットの直前の一連の文字 (または単一のグループ) です。
-fn above_start(row: &Row, index: usize) -> usize {
+fn above_start(row: &[Node], index: usize) -> usize {
     if index == 0 {
         return 0;
     }
-    match &row[index - 1] {
-        Node::Char(c) if c.is_alphanumeric() || *c == '.' => {
+    match &row[index - 1].kind {
+        NodeKind::Char(c) if c.is_alphanumeric() || *c == '.' => {
             let mut start = index - 1;
             while start > 0 {
-                match &row[start - 1] {
-                    Node::Char(c) if c.is_alphanumeric() || *c == '.' => start -= 1,
+                match &row[start - 1].kind {
+                    NodeKind::Char(c) if c.is_alphanumeric() || *c == '.' => start -= 1,
                     _ => break,
                 }
             }
@@ -592,12 +679,12 @@ fn above_start(row: &Row, index: usize) -> usize {
 }
 
 /// キャレットで終わるコマンド ワードを開始する `\` を見つけます。
-fn command_start(row: &Row, index: usize) -> Option<usize> {
+fn command_start(row: &[Node], index: usize) -> Option<usize> {
     let mut start = index;
     while start > 0 {
-        match &row[start - 1] {
-            Node::Char(c) if c.is_ascii_alphabetic() => start -= 1,
-            Node::Char('\\') => return (start < index).then_some(start - 1),
+        match &row[start - 1].kind {
+            NodeKind::Char(c) if c.is_ascii_alphabetic() => start -= 1,
+            NodeKind::Char('\\') => return (start < index).then_some(start - 1),
             _ => return None,
         }
     }
@@ -610,24 +697,24 @@ mod tests {
     /// ここでのフィクスチャのみが表記法を通過します。この層のテスト以外には、構造体がどのように書かれているかを知るものは何もありません。
     use crate::format::notation;
 
-    /// 独立したアイランドで、それを保持するドキュメントの代わりをします。
-    struct Island {
+    /// 編集対象のRowとCursorをまとめたテスト用フィクスチャ。
+    struct Fixture {
         root: Row,
         cursor: Cursor,
     }
 
-    impl Island {
-        fn new() -> Island {
-            Island {
+    impl Fixture {
+        fn new() -> Fixture {
+            Fixture {
                 root: Row::new(),
                 cursor: Cursor::default(),
             }
         }
 
-        fn from_notation(source: &str) -> Island {
+        fn from_notation(source: &str) -> Fixture {
             let root = notation::parse_island(source);
             let cursor = Cursor::root(root.len());
-            Island { root, cursor }
+            Fixture { root, cursor }
         }
 
         fn edit(&mut self) -> Editing<'_> {
@@ -647,14 +734,14 @@ mod tests {
 
     #[test]
     fn typing_builds_a_row() {
-        let mut island = Island::new();
+        let mut island = Fixture::new();
         island.type_in("x+1");
         assert_eq!(island.to_notation(), "x+1");
     }
 
     #[test]
     fn backslash_shortcut_expands_into_a_structure() {
-        let mut island = Island::new();
+        let mut island = Fixture::new();
         island.type_in("\\sqrt");
         assert!(island.edit().commit_command());
         island.type_in("2");
@@ -663,7 +750,7 @@ mod tests {
 
     #[test]
     fn typed_glyph_expands_like_its_command() {
-        let mut island = Island::new();
+        let mut island = Fixture::new();
         island.type_in("√");
         assert!(island.edit().commit_command());
         island.type_in("2");
@@ -672,14 +759,14 @@ mod tests {
 
     #[test]
     fn unknown_backslash_shortcut_is_left_alone() {
-        let mut island = Island::new();
+        let mut island = Fixture::new();
         island.type_in("\\nope");
         assert!(!island.edit().commit_command());
     }
 
     #[test]
     fn slash_takes_the_preceding_run_as_the_upper_row() {
-        let mut island = Island::new();
+        let mut island = Fixture::new();
         island.type_in("1+ab/");
         island.type_in("2c");
         assert_eq!(island.to_notation(), "1+$(ab/2c)");
@@ -687,7 +774,7 @@ mod tests {
 
     #[test]
     fn a_closing_bracket_leaves_the_brackets_from_inside_a_fraction() {
-        let mut island = Island::new();
+        let mut island = Fixture::new();
         island.type_in("1/(2/3)+4");
         // `+4` は、その下の行に落ちずに分数をたどります。
         assert_eq!(island.to_notation(), "$(1/($(2/3)))+4");
@@ -696,42 +783,42 @@ mod tests {
     /// 下の行は、`/` 自体が持ち上げられてキャレットを戻すので、入力された内容は、行に書かれたとおりに読み取られます。
     #[test]
     fn a_lower_row_takes_one_run_and_then_hands_the_caret_back() {
-        let mut island = Island::new();
+        let mut island = Fixture::new();
         island.type_in("a/b + 1");
         assert_eq!(island.to_notation(), "$(a/b) + 1");
     }
 
     #[test]
     fn a_longer_lower_row_is_written_in_brackets() {
-        let mut island = Island::new();
+        let mut island = Fixture::new();
         island.type_in("a/(b + c) + 1");
         assert_eq!(island.to_notation(), "$(a/(b + c)) + 1");
     }
 
     #[test]
     fn a_digit_run_stays_in_the_lower_row() {
-        let mut island = Island::new();
+        let mut island = Fixture::new();
         island.type_in("1/12+3");
         assert_eq!(island.to_notation(), "$(1/12)+3");
     }
 
     #[test]
     fn brackets_after_the_lower_row_are_not_part_of_it() {
-        let mut island = Island::new();
+        let mut island = Fixture::new();
         island.type_in("c/d(e/f) +g");
         assert_eq!(island.to_notation(), "$(c/d)($(e/f)) +g");
     }
 
     #[test]
     fn a_second_slash_stacks_on_the_first_fraction() {
-        let mut island = Island::new();
+        let mut island = Fixture::new();
         island.type_in("a/b/c");
         assert_eq!(island.to_notation(), "$(a/b)/c");
     }
 
     #[test]
     fn a_root_takes_one_run_the_same_way() {
-        let mut island = Island::new();
+        let mut island = Fixture::new();
         island.type_in("√");
         assert!(island.edit().commit_command());
         island.type_in("2 + 1");
@@ -740,21 +827,21 @@ mod tests {
 
     #[test]
     fn a_script_belongs_to_the_run_it_follows() {
-        let mut island = Island::new();
+        let mut island = Fixture::new();
         island.type_in("a/b^2 + 1");
         assert_eq!(island.to_notation(), "$(a/b$(^ 2)) + 1");
     }
 
     #[test]
     fn a_closing_bracket_with_no_brackets_open_changes_nothing() {
-        let mut island = Island::new();
+        let mut island = Fixture::new();
         island.type_in("a)b");
         assert_eq!(island.to_notation(), "ab");
     }
 
     #[test]
     fn caret_enters_and_leaves_a_stack() {
-        let mut island = Island::from_notation("a/b");
+        let mut island = Fixture::from_notation("a/b");
         island.edit().move_to_start();
         assert_eq!(island.edit().move_right(), None);
         assert_eq!(island.cursor.path, vec![(0, 0)]);
@@ -765,7 +852,7 @@ mod tests {
 
     #[test]
     fn up_and_down_switch_between_the_upper_and_lower_row() {
-        let mut island = Island::from_notation("a/b");
+        let mut island = Fixture::from_notation("a/b");
         island.edit().move_to_start();
         island.edit().move_right();
         assert!(island.edit().move_down());
@@ -776,21 +863,21 @@ mod tests {
 
     #[test]
     fn backspace_keeps_the_content_of_a_deleted_structure() {
-        let mut island = Island::from_notation("ab/c");
+        let mut island = Fixture::from_notation("ab/c");
         island.edit().move_to_end();
         assert_eq!(island.edit().backspace(), None);
         assert_eq!(island.to_notation(), "abc");
     }
 
     #[test]
-    fn backspace_reports_escape_on_an_empty_formula() {
-        let mut island = Island::new();
+    fn backspace_reports_escape_on_an_empty_root_row() {
+        let mut island = Fixture::new();
         assert_eq!(island.edit().backspace(), Some(Escape::Delete));
     }
 
     #[test]
     fn arrow_past_the_edge_reports_escape() {
-        let mut island = Island::from_notation("x");
+        let mut island = Fixture::from_notation("x");
         island.edit().move_to_end();
         assert_eq!(island.edit().move_right(), Some(Escape::Right));
         island.edit().move_to_start();
@@ -799,14 +886,14 @@ mod tests {
 
     #[test]
     fn closing_paren_steps_out_of_the_group() {
-        let mut island = Island::new();
+        let mut island = Fixture::new();
         island.type_in("(x)+");
         assert_eq!(island.to_notation(), "(x)+");
     }
 
     #[test]
     fn selecting_reaches_the_whole_row_then_the_structure_around_it() {
-        let mut island = Island::from_notation("1/2");
+        let mut island = Fixture::from_notation("1/2");
         island.edit().move_to_end();
         island.edit().move_left();
         // 右から分数に移動すると、その分数に移動します。
@@ -823,7 +910,7 @@ mod tests {
 
     #[test]
     fn select_row_takes_everything_in_the_row() {
-        let mut island = Island::from_notation("ab");
+        let mut island = Fixture::from_notation("ab");
         island.edit().select_row();
         assert_eq!((island.cursor.start(), island.cursor.end()), (0, 2));
         island.edit().backspace();
@@ -834,7 +921,7 @@ mod tests {
     /// ペーストすると、構造がそのまま挿入されます。ショートカットは再度実行されません。
     #[test]
     fn a_pasted_row_goes_in_at_the_caret() {
-        let mut island = Island::from_notation("x");
+        let mut island = Fixture::from_notation("x");
         island.edit().insert_row(notation::parse_island("1/2"));
         assert_eq!(island.to_notation(), "x$(1/2)");
         assert!(island.cursor.is_caret());
@@ -843,15 +930,65 @@ mod tests {
 
     #[test]
     fn a_paste_replaces_the_selection() {
-        let mut island = Island::from_notation("ab");
+        let mut island = Fixture::from_notation("ab");
         island.edit().select_row();
         island.edit().insert_row(notation::parse_island("c"));
         assert_eq!(island.to_notation(), "c");
     }
 
     #[test]
+    fn vertical_movement_skips_empty_and_enters_nonempty_annotations() {
+        let mut island = Fixture::from_notation("x");
+        assert!(!island.edit().move_up());
+        island.root[0].upper = vec![Node::char('n')];
+        island.cursor = Cursor::root(1);
+        assert!(island.edit().move_up());
+        assert_eq!(island.cursor.path, vec![(0, island.root[0].upper_slot())]);
+        assert!(island.edit().move_down());
+        assert_eq!(island.cursor, Cursor::root(1));
+    }
+
+    #[test]
+    fn explicit_annotation_enters_an_empty_slot() {
+        let mut island = Fixture::from_notation("ab");
+        island.cursor.anchor = 0;
+        assert!(island.edit().annotate(true));
+        assert!(island.root[0].upper.is_empty());
+        assert_eq!(island.cursor.path, vec![(0, island.root[0].upper_slot())]);
+    }
+
+    #[test]
+    fn moving_from_an_annotation_returns_to_the_wrapped_base() {
+        let mut island = Fixture::from_notation("abc");
+        island.edit().select_row();
+        assert!(island.edit().annotate(true));
+        island.root[0].lower = vec![Node::char('l')];
+        island.edit().insert_char('n');
+        assert!(island.edit().move_down());
+        assert_eq!(island.cursor.path, vec![(0, 0)]);
+    }
+
+    #[test]
+    fn inserting_a_big_operator_enters_its_empty_lower_annotation() {
+        let mut island = Fixture::new();
+        island.edit().insert(Node::big_op("∑".into()));
+        assert_eq!(island.cursor.path, vec![(0, island.root[0].lower_slot())]);
+    }
+
+    #[test]
+    fn horizontal_movement_does_not_enter_annotations() {
+        let mut island = Fixture::from_notation("x");
+        island.root[0].upper = vec![Node::char('n')];
+        island.cursor = Cursor::root(0);
+        assert_eq!(island.edit().move_right(), None);
+        assert_eq!(island.cursor, Cursor::root(1));
+        assert_eq!(island.edit().move_left(), None);
+        assert_eq!(island.cursor, Cursor::root(0));
+    }
+
+    #[test]
     fn matrix_grows_by_row_and_column() {
-        let mut island = Island::new();
+        let mut island = Fixture::new();
         island.edit().insert(super::super::ast::matrix(
             super::super::ast::MatrixKind::Grid,
             1,
@@ -859,12 +996,18 @@ mod tests {
         ));
         assert!(island.edit().grow_matrix(true));
         match &island.root[0] {
-            Node::Matrix { cells, .. } => assert_eq!(cells.len(), 2),
+            Node {
+                kind: NodeKind::Matrix { cells, .. },
+                ..
+            } => assert_eq!(cells.len(), 2),
             other => panic!("expected a matrix, got {other:?}"),
         }
         assert!(island.edit().grow_matrix(false));
         match &island.root[0] {
-            Node::Matrix { cells, .. } => assert_eq!(cells[0].len(), 3),
+            Node {
+                kind: NodeKind::Matrix { cells, .. },
+                ..
+            } => assert_eq!(cells[0].len(), 3),
             other => panic!("expected a matrix, got {other:?}"),
         }
     }

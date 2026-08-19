@@ -12,21 +12,23 @@ use std::ops::Range;
 
 use web_sys::{Document, Element, HtmlElement};
 
-use crate::structure::ast::Cursor;
-use crate::structure::text::{Item, Pos, Sel, Text};
+use crate::structure::ast::{Cursor, Node, NodeKind};
+use crate::structure::text::{Pos, Sel, Text};
 use crate::view::measure::{self, Box2, Hit};
-use crate::view::row::{self, Path, Preedit, Renderer, FIELD_CLASS, PATH_ATTR, TAB_CLASS};
+use crate::view::row::{self, Path, Preedit, Renderer, PATH_ATTR, TAB_CLASS};
 use crate::view::viewport::Viewport;
 
 pub const LINE_CLASS: &str = "mn-line";
 pub(super) const LINE_ATTR: &str = "data-line";
-/// 線の横に表示される数字。これは行の外側のマージンに配置されるため、テキストを測定する人が行の一部と間違えることはありません。
+/// 線の横に表示される数字。ガターだけに配置されるため、テキストの描画、測定、ヒットテストには入りません。
 const NUMBER_CLASS: &str = "mn-number";
 
 pub struct View {
     /// スクロールし、マウスを受け取ります。
     pub root: HtmlElement,
-    lines: Element,
+    content: Element,
+    document: Element,
+    gutter: Element,
     overlay: Element,
     /// どの行をページに出すかと、ビューをどこへ持っていくか。
     viewport: Viewport,
@@ -47,11 +49,7 @@ impl Caret<'_> {
     fn place(&self) -> (Vec<(usize, usize)>, usize) {
         match self.inside {
             None => (Vec::new(), self.at.col),
-            Some(cursor) => {
-                let mut path = vec![(self.at.col, 0)];
-                path.extend_from_slice(&cursor.path);
-                (path, cursor.index)
-            }
+            Some(cursor) => (cursor.path.clone(), cursor.index),
         }
     }
 }
@@ -62,15 +60,19 @@ impl View {
         let doc = root.owner_document()?;
         root.set_inner_html("");
         let content = element(&doc, "div", "mn-content")?;
+        let gutter = element(&doc, "div", "mn-gutter")?;
+        let document = element(&doc, "div", "mn-document")?;
         let overlay = element(&doc, "div", "mn-overlay")?;
-        let lines = element(&doc, "div", "mn-lines")?;
+        append(&content, &gutter);
+        append(&content, &document);
         append(&content, &overlay);
-        append(&content, &lines);
         append(&root, &content);
         Some(Self {
-            viewport: Viewport::new(root.clone(), lines.clone()),
+            viewport: Viewport::new(root.clone(), document.clone()),
             root,
-            lines,
+            content,
+            document,
+            gutter,
             overlay,
         })
     }
@@ -93,10 +95,20 @@ impl View {
         focused: bool,
         follow_caret: bool,
     ) {
+        let wrap = crate::settings::wrap();
+        if wrap {
+            self.content.class_list().remove_1("mn-nowrap").ok();
+        } else {
+            self.content.class_list().add_1("mn-nowrap").ok();
+        }
         self.fit_numbers(text.line_count());
         // IME が作成しているテキストは、どの行にあってもキャレットに属します。行を描画するコンポーネントがそれをそこに配置します。
         let (path, index) = caret.place();
-        let preedit = caret.composing.map(|text| Preedit { path, index, text });
+        let preedit = caret.composing.map(|text| Preedit {
+            path: path.clone(),
+            index,
+            text,
+        });
         let draw_line = |doc: &Document, line: usize| {
             // キャレットがある行のみ、構成内容が表示されます。
             let here = preedit
@@ -107,10 +119,12 @@ impl View {
                     index: preedit.index,
                     text: preedit.text,
                 });
-            self.draw_line(doc, text, line, here.as_ref())
+            let active = (caret.at.line == line).then_some(path.as_slice());
+            self.draw_line(doc, text, line, here.as_ref(), active)
         };
         let finish = |window: &Range<usize>| {
             self.align_columns(text, window);
+            self.rebuild_numbers(window);
             if let Some(doc) = self.overlay.owner_document() {
                 self.draw_carets(&doc, sels, caret, focused);
             }
@@ -124,11 +138,38 @@ impl View {
         let style = self.root.style();
         if !crate::settings::line_numbers() {
             style.remove_property("--setting-gutter").ok();
+            self.gutter.set_inner_html("");
             return;
         }
         let digits = count.max(1).to_string().len();
         let width = format!("calc({digits}ch + 1.4em)");
         style.set_property("--setting-gutter", &width).ok();
+    }
+
+    fn rebuild_numbers(&self, window: &Range<usize>) {
+        self.gutter.set_inner_html("");
+        if !crate::settings::line_numbers() {
+            return;
+        }
+        let Some(doc) = self.gutter.owner_document() else {
+            return;
+        };
+        let origin = self.gutter.get_bounding_client_rect().top();
+        for line in window.clone() {
+            let Some(holder) = self.line_element(line) else {
+                continue;
+            };
+            let Some(rect) = measure::first_base_fragment(&holder) else {
+                continue;
+            };
+            let Some(number) = element(&doc, "span", NUMBER_CLASS) else {
+                continue;
+            };
+            number.set_text_content(Some(&(line + 1).to_string()));
+            let top = rect.top + rect.height / 2.0 - origin;
+            number.set_attribute("style", &format!("top:{top}px")).ok();
+            append(&self.gutter, &number);
+        }
     }
 
     fn draw_line(
@@ -137,16 +178,13 @@ impl View {
         text: &Text,
         line: usize,
         preedit: Option<&Preedit<'_>>,
+        active: Option<&crate::view::row::Path>,
     ) -> Option<Element> {
         let holder = element(doc, "div", LINE_CLASS)?;
         holder.set_attribute(LINE_ATTR, &line.to_string()).ok();
-        if crate::settings::line_numbers() {
-            if let Some(number) = element(doc, "span", NUMBER_CLASS) {
-                number.set_text_content(Some(&(line + 1).to_string()));
-                append(&holder, &number);
-            }
-        }
-        let renderer = Renderer::new(doc).with_preedit(preedit);
+        let renderer = Renderer::new(doc)
+            .with_preedit(preedit)
+            .with_active_path(active);
         append(&holder, &renderer.line(text.line(line)));
         Some(holder)
     }
@@ -195,7 +233,7 @@ impl View {
     /// テキスト内と構造内に同じようにすべてのキャレットとすべての選択範囲を描画します。それらはすべて、描画されたものから測定された長方形です。
     fn draw_carets(&self, doc: &Document, sels: &[Sel], caret: &Caret<'_>, focused: bool) {
         self.overlay.set_inner_html("");
-        let origin = self.lines.get_bounding_client_rect();
+        let origin = self.document.get_bounding_client_rect();
         // IME の作成中、下線付きのテキストは、
         let show_carets = focused && caret.composing.is_none();
         if let Some(cursor) = caret.inside {
@@ -319,21 +357,18 @@ impl View {
         match self.hit(text, x, y) {
             Hit::Text(at) => at,
             // 島内の点は島にあり、ポインタが右半分に来ると島を通過するため、1 つ上をドラッグすると島が取り込まれます。
-            Hit::Inside(at, _) => match self.island_box(at) {
+            Hit::Inside(at, _) => match self.node_box(at) {
                 Some(rect) if x > rect.left + rect.width / 2.0 => Pos::new(at.line, at.col + 1),
                 _ => at,
             },
         }
     }
 
-    fn island_box(&self, at: Pos) -> Option<Box2> {
+    fn node_box(&self, at: Pos) -> Option<Box2> {
         let row = self.line_row(at.line)?;
         let children = row.children();
         for i in 0..children.length() {
             let child = children.item(i)?;
-            if !child.class_list().contains(FIELD_CLASS) {
-                continue;
-            }
             if measure::start_of(&child) == Some(at.col) {
                 return Some(measure::box_of(&child.get_bounding_client_rect()));
             }
@@ -365,8 +400,8 @@ fn set_box(element: &Element, rect: Box2, origin: &web_sys::DomRect) {
     element.set_attribute("style", &style).ok();
 }
 
-pub(super) fn has_tab(items: &[Item]) -> bool {
-    items.contains(&Item::Tab)
+pub(super) fn has_tab(nodes: &[Node]) -> bool {
+    nodes.iter().any(|node| matches!(node.kind, NodeKind::Tab))
 }
 
 fn children_of_class(holder: &Element, class: &str) -> Vec<Element> {

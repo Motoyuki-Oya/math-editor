@@ -161,7 +161,7 @@ pub fn scrolled(session: &Rc<RefCell<Session>>) {
 fn caret_of(session: &Session) -> Caret<'_> {
     Caret {
         at: session.editor.primary().head,
-        inside: session.editor.inside(),
+        inside: session.editor.nested_cursor(),
         composing: (!session.preedit.is_empty()).then_some(session.preedit.as_str()),
     }
 }
