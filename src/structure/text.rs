@@ -66,7 +66,8 @@ pub enum SourceLine {
 }
 
 /// 1 行。素のテキストの行は、1 文字を 1 [`Node`] に展開すると元の何十倍もの
-/// メモリを使うので、見られるまで文字列のまま保つ。
+/// メモリを使うので、見られるまで文字列のまま保つ。まだ届いていない行は
+/// [`Line::Absent`] で、範囲読みの読み込みが終わるまで空の行として見える。
 #[derive(Clone, Debug)]
 enum Line {
     Raw {
@@ -77,6 +78,7 @@ enum Line {
         nodes: OnceCell<Row>,
     },
     Rows(Row),
+    Absent,
 }
 
 impl Line {
@@ -92,6 +94,7 @@ impl Line {
         match self {
             Line::Raw { source, count, .. } => *count.get_or_init(|| source.chars().count()),
             Line::Rows(row) => row.len(),
+            Line::Absent => 0,
         }
     }
 
@@ -101,6 +104,7 @@ impl Line {
                 nodes.get_or_init(|| source.chars().map(Node::char).collect())
             }
             Line::Rows(row) => row,
+            Line::Absent => &[],
         }
     }
 
@@ -112,9 +116,12 @@ impl Line {
                 .unwrap_or_else(|| source.chars().map(Node::char).collect());
             *self = Line::Rows(row);
         }
+        if matches!(self, Line::Absent) {
+            *self = Line::Rows(Row::new());
+        }
         match self {
             Line::Rows(row) => row,
-            Line::Raw { .. } => unreachable!("raw lines were just replaced"),
+            _ => unreachable!("other lines were just replaced"),
         }
     }
 }
@@ -176,6 +183,32 @@ impl Text {
             Some(Line::Raw { source, .. }) => Some(source),
             _ => None,
         }
+    }
+
+    /// 行数だけが分かっている文書。行の中身は [`Text::fill_line`] で後から届く。
+    pub fn pending(line_count: usize) -> Self {
+        Self {
+            lines: vec![Rc::new(Line::Absent); line_count.max(1)],
+        }
+    }
+
+    /// まだ届いていない行へ中身を入れる。既に届いた行はそのまま。
+    pub fn fill_line(&mut self, line: usize, source: SourceLine) {
+        let Some(slot) = self.lines.get_mut(line) else {
+            return;
+        };
+        if !matches!(slot.as_ref(), Line::Absent) {
+            return;
+        }
+        *slot = Rc::new(match source {
+            SourceLine::Plain(source) => Line::raw(source),
+            SourceLine::Parsed(row) => Line::Rows(row),
+        });
+    }
+
+    /// `from` 以降で最初のまだ届いていない行。読み込みの続きがどこかを答える。
+    pub fn first_absent(&self, from: usize) -> Option<usize> {
+        (from..self.lines.len()).find(|&i| matches!(self.lines[i].as_ref(), Line::Absent))
     }
 
     pub fn line_count(&self) -> usize {

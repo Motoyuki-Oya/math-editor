@@ -15,6 +15,6 @@ pub use commands::{
 };
 pub use search::SearchOptions;
 pub use session::{
-    close_pane, document_of, focus_pane, init, load, park, redraw_all, restore, set_on_change,
-    stats, to_document, Parked,
+    close_pane, document_of, feed_pane, focus_pane, init, load, load_pending, loading, park,
+    redraw_all, restore, set_on_change, stats, to_document, Parked,
 };

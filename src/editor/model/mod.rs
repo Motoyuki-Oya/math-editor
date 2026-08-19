@@ -54,6 +54,9 @@ pub struct Editor {
     cursor: Option<Cursor>,
     /// 本文トリガーが今回構造を作る文書行内の位置。
     transient_structure: Option<usize>,
+    /// 範囲読みの読み込みが進行中。行が全部届くまで文書を変更できない。
+    /// 行の出し入れが読み込み側の行番号とずれないように。
+    loading: bool,
     history: History,
 }
 
@@ -64,6 +67,7 @@ impl Default for Editor {
             sels: vec![Sel::caret(Pos::default())],
             cursor: None,
             transient_structure: None,
+            loading: false,
             history: History::default(),
         }
     }
@@ -88,7 +92,34 @@ impl Editor {
         self.text = text;
         self.sels = vec![Sel::caret(Pos::default())];
         self.cursor = None;
+        self.loading = false;
         self.history.clear();
+    }
+
+    /// 行数だけ分かっている文書を表示し、行が届くのを待ちます。
+    /// 全部届くまで文書は読むだけになります。
+    pub fn load_pending(&mut self, line_count: usize) {
+        self.load(Text::pending(line_count));
+        self.loading = true;
+    }
+
+    /// 届いた行を `from` から順に入れます。まだ読み込み中なら `true` を返し、
+    /// すべての行が届いたら読み込みを終えて編集を許します。
+    pub fn feed(&mut self, from: usize, lines: Vec<crate::structure::text::SourceLine>) -> bool {
+        if !self.loading {
+            return false;
+        }
+        for (offset, line) in lines.into_iter().enumerate() {
+            self.text.fill_line(from + offset, line);
+        }
+        if self.text.first_absent(0).is_none() {
+            self.loading = false;
+        }
+        true
+    }
+
+    pub fn is_loading(&self) -> bool {
+        self.loading
     }
 
     fn edit_each(&mut self, step: Step, edit: impl Fn(&Text, Sel) -> (Pos, Pos, Vec<Row>)) {
@@ -111,6 +142,9 @@ impl Editor {
     }
 
     pub fn insert(&mut self, what: Vec<Row>) {
+        if self.loading {
+            return;
+        }
         let typing = what.len() == 1 && what[0].len() == 1;
         let step = if typing { Step::Typing } else { Step::Other };
         self.edit_each(step, move |_, sel| (sel.start(), sel.end(), what.clone()));
@@ -118,6 +152,9 @@ impl Editor {
 
     /// キャレットがどこにあっても、そのキャレットにテキストを挿入します。単一の文字が入力されるため、構造内のショートカットは引き続き実行されます。それ以上のものはペーストなのでそのまま入ります。
     pub fn insert_text(&mut self, text: &str) -> Did {
+        if self.loading {
+            return Did::Nothing;
+        }
         if self.cursor.is_some() {
             let mut chars = text.chars();
             match (chars.next(), chars.next()) {
@@ -138,6 +175,9 @@ impl Editor {
 
     /// ドキュメントからコピーされた部分を、元の形状のまま元に戻します。他の場所からのテキストは、[`Self::insert_text`] を介して文字として到着します。
     pub fn insert_clip(&mut self, clip: &Clip) -> Did {
+        if self.loading {
+            return Did::Nothing;
+        }
         if self.cursor.is_some() {
             self.insert_nested_row(clip.row());
         } else {
@@ -147,6 +187,9 @@ impl Editor {
     }
 
     pub fn annotate(&mut self, upper: bool) -> Did {
+        if self.loading {
+            return Did::Nothing;
+        }
         if let Some(cursor) = &self.cursor {
             let can_annotate = row_at(self.text.line(self.primary().head.line), &cursor.path)
                 .is_some_and(|row| {
@@ -214,6 +257,9 @@ impl Editor {
 
     /// 本文では列区切りを挿入し、入れ子構造では次のスロットへ移動します。
     pub fn tab(&mut self, back: bool) -> Did {
+        if self.loading {
+            return Did::Nothing;
+        }
         if self
             .cursor
             .as_ref()
@@ -237,6 +283,9 @@ impl Editor {
 
     /// 本文では行を分割し、入れ子構造の編集中なら改行せず構造を抜けます。
     pub fn split_line(&mut self) -> Did {
+        if self.loading {
+            return Did::Nothing;
+        }
         if self.leave_structure() {
             return Did::Moved;
         }
@@ -250,6 +299,9 @@ impl Editor {
     }
 
     pub fn backspace(&mut self) -> Did {
+        if self.loading {
+            return Did::Nothing;
+        }
         if self.cursor.is_some() {
             self.with_cursor(Inside::Change, |editing| editing.backspace());
             return Did::Changed;
@@ -269,6 +321,9 @@ impl Editor {
     }
 
     pub fn delete_forward(&mut self) -> Did {
+        if self.loading {
+            return Did::Nothing;
+        }
         if self.cursor.is_some() {
             self.with_cursor(Inside::Change, |editing| {
                 editing.delete_forward();
@@ -288,6 +343,9 @@ impl Editor {
 
     /// ケアトのグリッドは、構造内のものだけを意味し、列によって成長します。
     pub fn grow_matrix(&mut self) -> Did {
+        if self.loading {
+            return Did::Nothing;
+        }
         if self.cursor.is_none() {
             return Did::Nothing;
         }
@@ -305,6 +363,9 @@ impl Editor {
 
     /// カラムの区切り文字よりも多くの文字を入れる置換のために、アイテムと範囲を置換します。
     pub fn replace_range_with(&mut self, from: Pos, to: Pos, with: Vec<Row>) {
+        if self.loading {
+            return;
+        }
         self.record(Step::Other);
         self.cursor = None;
         let at = self.text.remove(from, to);
@@ -619,6 +680,42 @@ pub(crate) mod tests {
         let text = editor.text();
         let rows = text.slice(Pos::default(), text.end());
         crate::structure::plain::lines(&rows)
+    }
+
+    #[test]
+    fn a_loading_document_rejects_edits_until_all_lines_arrive() {
+        use crate::structure::text::SourceLine;
+        let mut editor = Editor::default();
+        editor.load_pending(3);
+        assert!(editor.is_loading());
+        editor.insert_text("x");
+        editor.split_line();
+        editor.backspace();
+        assert!(!editor.undo());
+        assert_eq!(editor.text().line_count(), 3);
+        assert_eq!(editor.text().line_len(0), 0);
+        assert!(editor.feed(0, vec![SourceLine::Plain("ab".into())]));
+        assert!(editor.is_loading());
+        assert!(editor.feed(
+            1,
+            vec![SourceLine::Plain("cd".into()), SourceLine::Plain("ef".into())]
+        ));
+        assert!(!editor.is_loading());
+        editor.set_caret(Pos::new(0, 2));
+        editor.insert_text("X");
+        assert_eq!(plain(&editor), "abX\ncd\nef");
+    }
+
+    #[test]
+    fn feeding_fills_only_lines_that_have_not_arrived() {
+        use crate::structure::text::SourceLine;
+        let mut editor = Editor::default();
+        editor.load_pending(2);
+        assert!(editor.feed(1, vec![SourceLine::Plain("late".into())]));
+        assert_eq!(editor.text().first_absent(0), Some(0));
+        assert!(editor.feed(0, vec![SourceLine::Plain("first".into())]));
+        assert_eq!(editor.text().first_absent(0), None);
+        assert_eq!(plain(&editor), "first\nlate");
     }
 
     #[test]

@@ -26,6 +26,10 @@ thread_local! {
 
 /// `editor_pane` のドキュメントに注意してください。
 pub(super) fn touch(tab: Tab, editor_pane: usize) {
+    // 下書きは全文を書き出すので、大きすぎる文書には書かない。
+    if tab.large.get_untracked() {
+        return;
+    }
     PENDING.with(|pending| {
         pending
             .borrow_mut()
@@ -69,6 +73,9 @@ fn flush() {
 
 /// 一時停止を待たずに、1 つのドキュメントの下書きを今すぐ書き込みます。ドキュメントが画面から出ようとするときに使用されます。
 pub(super) fn write(tab: Tab, editor_pane: usize) {
+    if tab.large.get_untracked() {
+        return;
+    }
     let Some(contents) = editor::document_of(editor_pane) else {
         return;
     };

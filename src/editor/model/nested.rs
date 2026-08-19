@@ -21,6 +21,9 @@ impl Editor {
 
     /// Begin direct editing at the top-level insertion point. No wrapper node is created.
     pub fn start_structure(&mut self) {
+        if self.is_loading() {
+            return;
+        }
         let at = self.primary().head;
         self.cursor = Some(Cursor::root(at.col));
         self.transient_structure = None;
@@ -128,6 +131,9 @@ impl Editor {
     }
 
     pub fn replace_nested(&mut self, at: Pos, cursor: Cursor, with: &str) -> bool {
+        if self.is_loading() {
+            return false;
+        }
         if !self.select_nested(at, cursor) {
             return false;
         }
@@ -170,6 +176,9 @@ impl Editor {
     }
 
     pub fn insert_node(&mut self, node: Node) -> bool {
+        if self.is_loading() {
+            return false;
+        }
         self.with_cursor(Inside::Change, |editing| {
             editing.insert(node);
             None
@@ -177,6 +186,9 @@ impl Editor {
     }
 
     pub fn insert_nested_row(&mut self, nodes: Row) -> bool {
+        if self.is_loading() {
+            return false;
+        }
         self.with_cursor(Inside::Change, |editing| {
             editing.insert_row(nodes);
             None

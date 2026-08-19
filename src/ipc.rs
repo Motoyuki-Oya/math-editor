@@ -112,9 +112,37 @@ pub async fn pick_save_path(default_name: &str) -> Option<String> {
         .as_string()
 }
 
-pub async fn read_document(path: &str) -> Result<String, String> {
-    let value = call("read_document", PathArg { path }).await?;
-    Ok(value.as_string().unwrap_or_default())
+/// 範囲読みで開いた文書。行は [`read_lines`] で取り寄せる。
+#[derive(Deserialize)]
+pub struct OpenedDocument {
+    pub handle: u64,
+    pub line_count: usize,
+    pub chars: usize,
+}
+
+/// 文書を全文の文字列で受け取らずに開きます。ネイティブ側が行で保持します。
+pub async fn open_document(path: &str) -> Result<OpenedDocument, String> {
+    let value = call("open_document", PathArg { path }).await?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
+}
+
+pub async fn read_lines(handle: u64, from: usize, count: usize) -> Result<Vec<String>, String> {
+    #[derive(Serialize)]
+    struct Args {
+        handle: u64,
+        from: usize,
+        count: usize,
+    }
+    let value = call("read_lines", Args { handle, from, count }).await?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
+}
+
+pub async fn close_document(handle: u64) {
+    #[derive(Serialize)]
+    struct HandleArg {
+        handle: u64,
+    }
+    let _ = call("close_document", HandleArg { handle }).await;
 }
 
 pub async fn write_document(path: &str, contents: &str) -> Result<(), String> {

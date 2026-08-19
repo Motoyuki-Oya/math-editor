@@ -128,9 +128,9 @@ fn the_layers_do_not_reach_into_each_other() {
     }
 }
 
-/// この形式はドキュメント全体をファイルに変換し、それ以外は何も変換しません。
+/// この形式はファイルの読み書きだけに使われ、それ以外は何も変換しません。
 ///
-/// 以前はコピーがそれを通過し、表記法がクリップボードに置かれていました。別のプログラムでもこのプログラムでも、分数は `$(a/b)` として出力されました。エントリ ポイントを `read` と `write` に維持することが、この問題の再発を防ぐ方法です。ここには、呼び出すファイル以外に何もありません。
+/// 以前はコピーがそれを通過し、表記法がクリップボードに置かれていました。別のプログラムでもこのプログラムでも、分数は `$(a/b)` として出力されました。エントリ ポイントをファイルの読み書き（全体の `read` / `write` と、範囲読みの読み込みが使う行単位の `read_line`）に維持することが、この問題の再発を防ぐ方法です。ここには、呼び出すファイル以外に何もありません。
 #[test]
 fn the_format_only_converts_whole_documents() {
     let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/format/document.rs");
@@ -142,7 +142,7 @@ fn the_format_only_converts_whole_documents() {
         .collect();
     assert_eq!(
         names,
-        ["read", "write"],
+        ["read", "read_line", "write"],
         "{} hands out more than a file needs",
         file.display(),
     );

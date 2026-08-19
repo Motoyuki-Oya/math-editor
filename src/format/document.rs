@@ -8,26 +8,26 @@ use crate::structure::text::{SourceLine, Text};
 pub const TAB_SOURCE: &str = "t";
 
 pub fn read(source: &str) -> Text {
-    let lines = source
-        .split('\n')
-        .map(|line| {
-            // `$` を含まない行には島もエスケープもないので、文字列のまま持ち、
-            // そのまま書き戻せる。巨大なファイルの大部分がこの形で済む。
-            if !line.contains('$') {
-                return SourceLine::Plain(line.to_string());
-            }
-            let row = islands::parse_line(line)
-                .into_iter()
-                .flat_map(|segment| match segment {
-                    Segment::Text(text) => text.chars().map(Node::char).collect::<Row>(),
-                    Segment::Island(source) if source.trim() == TAB_SOURCE => vec![Node::tab()],
-                    Segment::Island(source) => parse_island(&source),
-                })
-                .collect();
-            SourceLine::Parsed(row)
+    Text::compose(source.split('\n').map(read_line).collect())
+}
+
+/// ファイルの 1 行を読み取ります。範囲読みの読み込みが、届いた行をここで
+/// 変換します。ファイル以外（クリップボードなど）がここを通ってはいけません。
+pub fn read_line(line: &str) -> SourceLine {
+    // `$` を含まない行には島もエスケープもないので、文字列のまま持ち、
+    // そのまま書き戻せる。巨大なファイルの大部分がこの形で済む。
+    if !line.contains('$') {
+        return SourceLine::Plain(line.to_string());
+    }
+    let row = islands::parse_line(line)
+        .into_iter()
+        .flat_map(|segment| match segment {
+            Segment::Text(text) => text.chars().map(Node::char).collect::<Row>(),
+            Segment::Island(source) if source.trim() == TAB_SOURCE => vec![Node::tab()],
+            Segment::Island(source) => parse_island(&source),
         })
         .collect();
-    Text::compose(lines)
+    SourceLine::Parsed(row)
 }
 
 pub fn write(text: &Text) -> String {

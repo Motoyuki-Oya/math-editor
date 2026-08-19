@@ -94,6 +94,9 @@ impl Editor {
     }
 
     pub fn undo(&mut self) -> bool {
+        if self.is_loading() {
+            return false;
+        }
         let Some(previous) = self.history.past.pop() else {
             return false;
         };
@@ -104,6 +107,9 @@ impl Editor {
     }
 
     pub fn redo(&mut self) -> bool {
+        if self.is_loading() {
+            return false;
+        }
         let Some(next) = self.history.future.pop() else {
             return false;
         };

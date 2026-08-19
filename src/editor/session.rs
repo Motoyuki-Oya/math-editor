@@ -190,6 +190,14 @@ pub struct Parked {
     editor: Editor,
 }
 
+impl Parked {
+    /// 画面の外にある文書にも、届いた行は同じように入ります。
+    pub fn feed(&mut self, from: usize, lines: &[String]) -> bool {
+        self.editor
+            .feed(from, lines.iter().map(|line| document::read_line(line)).collect())
+    }
+}
+
 /// ペインのドキュメントを取り出して、別のペインがその場所に移動できるようにします。
 pub fn park(pane: usize) -> Option<Parked> {
     let session = pane_session(pane)?;
@@ -214,6 +222,33 @@ pub fn load(text: &str) {
     let Some(session) = session() else { return };
     session.borrow_mut().editor.load(document::read(text));
     changed(&session);
+}
+
+/// 行数だけ分かっている文書を出し、行が届くのを待ちます。範囲読みの開始。
+pub fn load_pending(line_count: usize) {
+    let Some(session) = session() else { return };
+    session.borrow_mut().editor.load_pending(line_count);
+    changed(&session);
+}
+
+/// 画面上のペインへ届いた行を入れます。文書がもう待っていなければ `false`。
+pub fn feed_pane(pane: usize, from: usize, lines: &[String]) -> bool {
+    let Some(session) = pane_session(pane) else {
+        return false;
+    };
+    let fed = session
+        .borrow_mut()
+        .editor
+        .feed(from, lines.iter().map(|line| document::read_line(line)).collect());
+    if fed {
+        redraw(&session);
+    }
+    fed
+}
+
+/// 入力を受けるペインの文書がまだ行を待っているかどうか。
+pub fn loading() -> bool {
+    session().is_some_and(|session| session.borrow().editor.is_loading())
 }
 
 pub fn to_document() -> String {

@@ -1,5 +1,6 @@
 mod menu;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -10,6 +11,9 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 struct AppState {
     dirty: Mutex<bool>,
     started: Instant,
+    /// 範囲読みで開いている途中の文書。frontend が行を取り終えたら閉じる。
+    opening: Mutex<HashMap<u64, Vec<String>>>,
+    next_document: Mutex<u64>,
 }
 
 fn pick_path<F>(run: F) -> Option<PathBuf>
@@ -54,9 +58,57 @@ async fn pick_save_path(app: tauri::AppHandle, default_name: String) -> Option<S
     .map(|p| p.to_string_lossy().into_owned())
 }
 
+/// 範囲読みの開き方の答え: 文書の取っ手と、行数と文字数。
+#[derive(serde::Serialize)]
+struct OpenedDocument {
+    handle: u64,
+    line_count: usize,
+    chars: usize,
+}
+
+/// 文書を全部 1 つの文字列で webview へ渡さずに開きます。ファイルはネイティブ側で
+/// 行に分けて保持し、frontend は `read_lines` で範囲を取り寄せます。
 #[tauri::command]
-fn read_document(path: String) -> Result<String, String> {
-    std::fs::read_to_string(&path).map_err(|e| format!("{path} を読み込めませんでした: {e}"))
+fn open_document(state: State<'_, AppState>, path: String) -> Result<OpenedDocument, String> {
+    let source = std::fs::read_to_string(&path)
+        .map_err(|e| format!("{path} を読み込めませんでした: {e}"))?;
+    let lines: Vec<String> = source.split('\n').map(str::to_string).collect();
+    drop(source);
+    let chars = lines.iter().map(|line| line.chars().count()).sum();
+    let line_count = lines.len();
+    let handle = {
+        let mut next = state.next_document.lock().unwrap();
+        *next += 1;
+        *next
+    };
+    state.opening.lock().unwrap().insert(handle, lines);
+    Ok(OpenedDocument {
+        handle,
+        line_count,
+        chars,
+    })
+}
+
+/// 開いている途中の文書から行の範囲を返します。
+#[tauri::command]
+fn read_lines(
+    state: State<'_, AppState>,
+    handle: u64,
+    from: usize,
+    count: usize,
+) -> Result<Vec<String>, String> {
+    let opening = state.opening.lock().unwrap();
+    let Some(lines) = opening.get(&handle) else {
+        return Err("文書はもう開き終えています".to_string());
+    };
+    let to = from.saturating_add(count).min(lines.len());
+    Ok(lines[from.min(lines.len())..to].to_vec())
+}
+
+/// 行を取り終えた文書を手放します。
+#[tauri::command]
+fn close_document(state: State<'_, AppState>, handle: u64) {
+    state.opening.lock().unwrap().remove(&handle);
 }
 
 #[tauri::command]
@@ -298,6 +350,8 @@ pub fn run() {
         .manage(AppState {
             dirty: Mutex::new(false),
             started: Instant::now(),
+            opening: Mutex::new(HashMap::new()),
+            next_document: Mutex::new(0),
         })
         .setup(|app| {
             restore_window_size(app.handle());
@@ -316,7 +370,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             pick_open_path,
             pick_save_path,
-            read_document,
+            open_document,
+            read_lines,
+            close_document,
             write_document,
             set_dirty,
             frontend_ready,

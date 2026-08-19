@@ -10,6 +10,13 @@ use crate::ipc;
 
 const UNTITLED: &str = "無題";
 
+/// 一度に取り寄せる行数。1 回の IPC が数百キロバイトで済む程度。
+const CHUNK_LINES: usize = 20_000;
+
+/// これより大きい文書は下書き（自動控え）を書かない。下書きは全文を
+/// 書き出すので、巨大なファイルでは一時停止のたびに数百 MB を書くことになる。
+const LARGE_CHARS: usize = 5_000_000;
+
 thread_local! {
     /// 次のタブに名前を付けます。タブの番号はそのドラフトの名前でもあるため、タブ自体よりも存続する必要があります。復元されたドラフトではその番号が保持されます。
     static NEXT_ID: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -28,6 +35,8 @@ pub(super) struct Tab {
     pub(super) id: RwSignal<usize>,
     pub(super) path: RwSignal<Option<String>>,
     pub(super) dirty: RwSignal<bool>,
+    /// 下書きを書くには大きすぎる文書。
+    pub(super) large: RwSignal<bool>,
     pub(super) parked: StoredValue<Option<editor::Parked>, LocalStorage>,
 }
 
@@ -37,6 +46,7 @@ impl Tab {
             id: RwSignal::new(next_id()),
             path: RwSignal::new(None),
             dirty: RwSignal::new(false),
+            large: RwSignal::new(false),
             parked: StoredValue::new_local(None),
         }
     }
@@ -376,18 +386,71 @@ impl Shell {
             let Some(path) = ipc::pick_open_path().await else {
                 return;
             };
-            match ipc::read_document(&path).await {
-                Ok(text) => {
+            match ipc::open_document(&path).await {
+                Ok(doc) => {
                     let pane = shell.pane_untracked();
                     let tab = shell.add_tab(pane);
-                    editor::load(&text);
+                    tab.large.set(doc.chars > LARGE_CHARS);
+                    editor::load_pending(doc.line_count);
                     tab.path.set(Some(path));
-                    shell.status.set("開きました".into());
                     shell.mark_clean();
+                    shell.stream(tab, doc).await;
                 }
                 Err(error) => shell.status.set(error),
             }
         });
+    }
+
+    /// 開いた文書の行を順に取り寄せ、タブの文書へ入れます。文書は全文を 1 つの
+    /// 文字列で渡さず、この範囲読みだけで届きます。読み込み中は文書は読むだけです。
+    async fn stream(&self, tab: Tab, doc: ipc::OpenedDocument) {
+        // タブが閉じられたり使い回されたりしたら、届け先はもうこの文書ではない。
+        let generation = tab.id.get_untracked();
+        let mut from = 0;
+        while from < doc.line_count && tab.id.get_untracked() == generation {
+            let count = CHUNK_LINES.min(doc.line_count - from);
+            let Ok(lines) = ipc::read_lines(doc.handle, from, count).await else {
+                break;
+            };
+            if !self.feed(tab, from, &lines) {
+                break;
+            }
+            from += count;
+            if from < doc.line_count {
+                self.status
+                    .set(format!("読み込んでいます… {}%", from * 100 / doc.line_count));
+            }
+            self.refresh();
+        }
+        ipc::close_document(doc.handle).await;
+        if tab.id.get_untracked() == generation && from >= doc.line_count {
+            self.status.set("開きました".into());
+            self.refresh();
+        }
+    }
+
+    /// 届いた行をタブの文書へ入れます。タブが画面上ならそのペインへ、
+    /// 駐車中ならその文書へ。もう届け先がなければ `false`。
+    fn feed(&self, tab: Tab, from: usize, lines: &[String]) -> bool {
+        if tab.parked.with_value(Option::is_some) {
+            return tab
+                .parked
+                .try_update_value(|parked| {
+                    parked.as_mut().is_some_and(|parked| parked.feed(from, lines))
+                })
+                .unwrap_or(false);
+        }
+        let id = tab.id.get_untracked();
+        let pane = self.panes.with_untracked(|panes| {
+            panes
+                .iter()
+                .find(|pane| pane.tab_untracked().id.get_untracked() == id)
+                .copied()
+        });
+        match pane {
+            Some(pane) => editor::feed_pane(pane.editor_pane(), from, lines),
+            None => false,
+        }
     }
 
     /// アプリケーションが最後に停止したときに画面に表示されていたものを開きます。ドラフトは未保存のタブとして返され、番号が保持されるため、2 番目のストップで同じドラフトが上書きされます。
@@ -411,6 +474,10 @@ impl Shell {
     }
 
     pub(super) fn save(&self, force_dialog: bool) {
+        if editor::loading() {
+            self.status.set("読み込みが終わるまで保存できません".into());
+            return;
+        }
         let shell = *self;
         let tab = self.tab_untracked();
         let current = tab.path.get_untracked();
