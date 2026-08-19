@@ -71,7 +71,7 @@ pub fn insert_text(session: &Rc<RefCell<Session>>, text: &str) {
     changed(session);
 }
 
-/// キャレットにアイランドを配置し、編集を開始します。
+/// キャレット位置で構造編集を開始します。ラッパーとなるノードは作りません。
 pub fn insert_structure() {
     let Some(session) = session() else { return };
     session.borrow_mut().editor.start_structure();

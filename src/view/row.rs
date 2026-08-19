@@ -1,6 +1,6 @@
 //! 行を描画する 1 つのコンポーネントです。
 //!
-//! 行は、ドキュメントの行、アイランドの内部、分数の分子など、どこにあっても行です。これらはすべてこのコンポーネントによって描画されるため、文字、IME のコミットされていないテキスト、およびネストされた構造は、どの深さでも同じように動作します。行はパスからその行がどこにあるかを認識しており、それが唯一の違いです。ドキュメントの行のパスは空で、行は列区切り文字を受け入れる唯一の行です。
+//! 行は、ドキュメントの行、構造の内部、分数の分子など、どこにあっても行です。これらはすべてこのコンポーネントによって描画されるため、文字、IME のコミットされていないテキスト、およびネストされた構造は、どの深さでも同じように動作します。行はパスからその行がどこにあるかを認識しており、それが唯一の違いです。ドキュメントの行のパスは空で、行は列区切り文字を受け入れる唯一の行です。
 
 use web_sys::{Document, Element};
 
@@ -342,64 +342,24 @@ impl<'a> Renderer<'a> {
             }
             return base;
         }
-        if matches!(&node.kind, NodeKind::BigOp(_)) {
-            let container = self.el("span", "mn-bigop mn-bigop-stacked");
-            if show_upper {
-                let upper = self.el("span", "mn-limit mn-limit-upper");
-                upper
-                    .append_child(&self.child_row(
-                        node,
-                        upper_slot,
-                        path,
-                        index,
-                        font_size * LIMIT_SCALE,
-                    ))
-                    .ok();
-                container.append_child(&upper).ok();
-            }
-            container.append_child(&base).ok();
-            if show_lower {
-                let lower = self.el("span", "mn-limit mn-limit-lower");
-                lower
-                    .append_child(&self.child_row(
-                        node,
-                        lower_slot,
-                        path,
-                        index,
-                        font_size * LIMIT_SCALE,
-                    ))
-                    .ok();
-                container.append_child(&lower).ok();
-            }
-            return container;
-        }
-        let container = self.el("span", "mn-annotated");
-        if show_upper {
-            let upper = self.el("span", "mn-limit mn-limit-upper");
-            upper
-                .append_child(&self.child_row(
-                    node,
-                    upper_slot,
-                    path,
-                    index,
-                    font_size * LIMIT_SCALE,
-                ))
+        let container = if matches!(&node.kind, NodeKind::BigOp(_)) {
+            self.el("span", "mn-bigop mn-bigop-stacked")
+        } else {
+            self.el("span", "mn-annotated")
+        };
+        let limit = |slot, side| {
+            let holder = self.el("span", &format!("mn-limit mn-limit-{side}"));
+            holder
+                .append_child(&self.child_row(node, slot, path, index, font_size * LIMIT_SCALE))
                 .ok();
-            container.append_child(&upper).ok();
+            container.append_child(&holder).ok();
+        };
+        if show_upper {
+            limit(upper_slot, "upper");
         }
         container.append_child(&base).ok();
         if show_lower {
-            let lower = self.el("span", "mn-limit mn-limit-lower");
-            lower
-                .append_child(&self.child_row(
-                    node,
-                    lower_slot,
-                    path,
-                    index,
-                    font_size * LIMIT_SCALE,
-                ))
-                .ok();
-            container.append_child(&lower).ok();
+            limit(lower_slot, "lower");
         }
         container
     }

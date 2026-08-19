@@ -558,16 +558,6 @@ body {
   align-items: center;
 }
 
-.mn-bigop-side {
-  flex-direction: row-reverse;
-  align-items: center;
-}
-
-.mn-bigop-side .mn-limit {
-  display: flex;
-  flex-direction: column;
-}
-
 .mn-bigop-symbol {
   font-size: 1.5em;
   line-height: 1;
@@ -581,10 +571,6 @@ body {
 .mn-limit {
   font-size: 0.68em;
   line-height: 1.1;
-}
-
-.mn-limit-empty:not(:focus-within) .mn-placeholder {
-  visibility: hidden;
 }
 
 /* グリッドには配置するテキスト行がないため、軸の中央に配置されます。 */

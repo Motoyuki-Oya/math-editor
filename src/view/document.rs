@@ -45,7 +45,7 @@ pub struct Caret<'a> {
 }
 
 impl Caret<'_> {
-    /// キャレットが含まれる行と、その行のどこまで入っているか。テキスト内のキャレットはその行の行にあります。構造内のキャレットは、その構造の行内にあり、`at` にあるアイランドを通って到達します。
+    /// キャレットが含まれる行と、その行のどこまで入っているか。テキスト内のキャレットは文書行そのものにあります。構造内のキャレットは、その構造の行内にあり、`at` にある構造を通って到達します。
     fn place(&self) -> (Vec<(usize, usize)>, usize) {
         match self.inside {
             None => (Vec::new(), self.at.col),
@@ -234,7 +234,7 @@ impl View {
     fn draw_carets(&self, doc: &Document, sels: &[Sel], caret: &Caret<'_>, focused: bool) {
         self.overlay.set_inner_html("");
         let origin = self.document.get_bounding_client_rect();
-        // IME の作成中、下線付きのテキストは、
+        // IME の変換中は下線付きのテキストが着地点を示すので、キャレットは隠す。
         let show_carets = focused && caret.composing.is_none();
         if let Some(cursor) = caret.inside {
             if !cursor.is_caret() {
@@ -352,11 +352,11 @@ impl View {
         }
     }
 
-    /// テキスト内のクリックが着地した場所。島全体を示します。
+    /// テキスト内のクリックが着地した場所。構造は全体を 1 つとして示します。
     pub fn pos_at_point(&self, text: &Text, x: f64, y: f64) -> Pos {
         match self.hit(text, x, y) {
             Hit::Text(at) => at,
-            // 島内の点は島にあり、ポインタが右半分に来ると島を通過するため、1 つ上をドラッグすると島が取り込まれます。
+            // 構造内の点は構造の位置にあり、ポインタが右半分に来ると構造を通過するため、上をドラッグすると構造が取り込まれます。
             Hit::Inside(at, _) => match self.node_box(at) {
                 Some(rect) if x > rect.left + rect.width / 2.0 => Pos::new(at.line, at.col + 1),
                 _ => at,
