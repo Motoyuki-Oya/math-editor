@@ -77,6 +77,11 @@ impl View {
         })
     }
 
+    /// いまページに出ている行の範囲。届いた行を描き直すかの判断に使われます。
+    pub fn drawn(&self) -> Range<usize> {
+        self.viewport.drawn()
+    }
+
     /// 変更後に描画し、キャレットの行をページ内に移動します。
     pub fn draw(&self, text: &Text, sels: &[Sel], caret: &Caret<'_>, focused: bool) {
         self.paint(text, sels, caret, focused, true);

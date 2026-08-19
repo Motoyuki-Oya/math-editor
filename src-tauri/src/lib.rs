@@ -8,11 +8,30 @@ use std::time::Instant;
 use tauri::{Manager, State, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
+/// 範囲読みで開いている途中の文書。本文は 1 枚のまま持ち、行の頭の位置だけを
+/// 索引にする。行ごとの文字列は `read_lines` が範囲を切り出すときにだけ作る。
+struct OpenDocument {
+    source: String,
+    /// 各行が `source` のどこから始まるか。行数はこの長さ。
+    starts: Vec<usize>,
+}
+
+impl OpenDocument {
+    fn line(&self, index: usize) -> &str {
+        let start = self.starts[index];
+        let end = match self.starts.get(index + 1) {
+            Some(next) => next - 1, // 区切りの '\n' は行に含めない
+            None => self.source.len(),
+        };
+        &self.source[start..end]
+    }
+}
+
 struct AppState {
     dirty: Mutex<bool>,
     started: Instant,
     /// 範囲読みで開いている途中の文書。frontend が行を取り終えたら閉じる。
-    opening: Mutex<HashMap<u64, Vec<String>>>,
+    opening: Mutex<HashMap<u64, OpenDocument>>,
     next_document: Mutex<u64>,
 }
 
@@ -58,34 +77,43 @@ async fn pick_save_path(app: tauri::AppHandle, default_name: String) -> Option<S
     .map(|p| p.to_string_lossy().into_owned())
 }
 
-/// 範囲読みの開き方の答え: 文書の取っ手と、行数と文字数。
+/// 範囲読みの開き方の答え: 文書の取っ手と、行数と大きさ。
 #[derive(serde::Serialize)]
 struct OpenedDocument {
     handle: u64,
     line_count: usize,
-    chars: usize,
+    bytes: usize,
 }
 
 /// 文書を全部 1 つの文字列で webview へ渡さずに開きます。ファイルはネイティブ側で
-/// 行に分けて保持し、frontend は `read_lines` で範囲を取り寄せます。
+/// 保持し、frontend は `read_lines` で範囲を取り寄せます。開く時点でやるのは
+/// 読み込みと改行の走査だけです。async なのは UI を待たせないため。
 #[tauri::command]
-fn open_document(state: State<'_, AppState>, path: String) -> Result<OpenedDocument, String> {
+async fn open_document(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<OpenedDocument, String> {
     let source = std::fs::read_to_string(&path)
         .map_err(|e| format!("{path} を読み込めませんでした: {e}"))?;
-    let lines: Vec<String> = source.split('\n').map(str::to_string).collect();
-    drop(source);
-    let chars = lines.iter().map(|line| line.chars().count()).sum();
-    let line_count = lines.len();
+    let mut starts = Vec::with_capacity(source.len() / 32 + 1);
+    starts.push(0);
+    starts.extend(memchr::memchr_iter(b'\n', source.as_bytes()).map(|at| at + 1));
+    let line_count = starts.len();
+    let bytes = source.len();
     let handle = {
         let mut next = state.next_document.lock().unwrap();
         *next += 1;
         *next
     };
-    state.opening.lock().unwrap().insert(handle, lines);
+    state
+        .opening
+        .lock()
+        .unwrap()
+        .insert(handle, OpenDocument { source, starts });
     Ok(OpenedDocument {
         handle,
         line_count,
-        chars,
+        bytes,
     })
 }
 
@@ -98,11 +126,11 @@ fn read_lines(
     count: usize,
 ) -> Result<Vec<String>, String> {
     let opening = state.opening.lock().unwrap();
-    let Some(lines) = opening.get(&handle) else {
+    let Some(doc) = opening.get(&handle) else {
         return Err("文書はもう開き終えています".to_string());
     };
-    let to = from.saturating_add(count).min(lines.len());
-    Ok(lines[from.min(lines.len())..to].to_vec())
+    let to = from.saturating_add(count).min(doc.starts.len());
+    Ok((from.min(to)..to).map(|i| doc.line(i).to_string()).collect())
 }
 
 /// 行を取り終えた文書を手放します。

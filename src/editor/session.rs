@@ -240,7 +240,15 @@ pub fn feed_pane(pane: usize, from: usize, lines: &[String]) -> bool {
         .borrow_mut()
         .editor
         .feed(from, lines.iter().map(|line| document::read_line(line)).collect());
-    if fed {
+    // 描き直すのは届いた行が画面に見えるときだけ。読み込みは数百チャンク届くので、
+    // 見えない行のために毎回描き直すと読み込みより描画が高くつく。
+    let visible = {
+        let borrowed = session.borrow();
+        let drawn = borrowed.view.drawn();
+        let done = !borrowed.editor.is_loading();
+        done || (from < drawn.end && from + lines.len() > drawn.start)
+    };
+    if fed && visible {
         redraw(&session);
     }
     fed

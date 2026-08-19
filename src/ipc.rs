@@ -117,7 +117,7 @@ pub async fn pick_save_path(default_name: &str) -> Option<String> {
 pub struct OpenedDocument {
     pub handle: u64,
     pub line_count: usize,
-    pub chars: usize,
+    pub bytes: usize,
 }
 
 /// 文書を全文の文字列で受け取らずに開きます。ネイティブ側が行で保持します。

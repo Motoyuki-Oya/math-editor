@@ -15,7 +15,7 @@ const CHUNK_LINES: usize = 20_000;
 
 /// これより大きい文書は下書き（自動控え）を書かない。下書きは全文を
 /// 書き出すので、巨大なファイルでは一時停止のたびに数百 MB を書くことになる。
-const LARGE_CHARS: usize = 5_000_000;
+const LARGE_BYTES: usize = 5_000_000;
 
 thread_local! {
     /// 次のタブに名前を付けます。タブの番号はそのドラフトの名前でもあるため、タブ自体よりも存続する必要があります。復元されたドラフトではその番号が保持されます。
@@ -390,7 +390,7 @@ impl Shell {
                 Ok(doc) => {
                     let pane = shell.pane_untracked();
                     let tab = shell.add_tab(pane);
-                    tab.large.set(doc.chars > LARGE_CHARS);
+                    tab.large.set(doc.bytes > LARGE_BYTES);
                     editor::load_pending(doc.line_count);
                     tab.path.set(Some(path));
                     shell.mark_clean();
@@ -417,10 +417,11 @@ impl Shell {
             }
             from += count;
             if from < doc.line_count {
+                // 文字数の集計や再描画は届いた行が画面に関わるときだけ。毎チャンク
+                // 全行を数え直すと、読み込み自体より高くつく。
                 self.status
                     .set(format!("読み込んでいます… {}%", from * 100 / doc.line_count));
             }
-            self.refresh();
         }
         ipc::close_document(doc.handle).await;
         if tab.id.get_untracked() == generation && from >= doc.line_count {
