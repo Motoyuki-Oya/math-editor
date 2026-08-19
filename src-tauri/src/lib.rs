@@ -1,4 +1,5 @@
 mod menu;
+mod store;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -8,31 +9,29 @@ use std::time::Instant;
 use tauri::{Manager, State, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
-/// 範囲読みで開いている途中の文書。本文は 1 枚のまま持ち、行の頭の位置だけを
-/// 索引にする。行ごとの文字列は `read_lines` が範囲を切り出すときにだけ作る。
-struct OpenDocument {
-    source: String,
-    /// 各行が `source` のどこから始まるか。行数はこの長さ。
-    starts: Vec<usize>,
-}
-
-impl OpenDocument {
-    fn line(&self, index: usize) -> &str {
-        let start = self.starts[index];
-        let end = match self.starts.get(index + 1) {
-            Some(next) => next - 1, // 区切りの '\n' は行に含めない
-            None => self.source.len(),
-        };
-        &self.source[start..end]
-    }
-}
-
 struct AppState {
     dirty: Mutex<bool>,
     started: Instant,
-    /// 範囲読みで開いている途中の文書。frontend が行を取り終えたら閉じる。
-    opening: Mutex<HashMap<u64, OpenDocument>>,
+    /// 開いている文書の本体。webview は行の窓だけを取り寄せ、編集は
+    /// 行範囲の置き換えとして届く。タブが閉じられると手放す。
+    docs: Mutex<HashMap<u64, store::Document>>,
     next_document: Mutex<u64>,
+}
+
+impl AppState {
+    fn adopt(&self, doc: store::Document) -> OpenedDocument {
+        let opened = OpenedDocument {
+            handle: {
+                let mut next = self.next_document.lock().unwrap();
+                *next += 1;
+                *next
+            },
+            line_count: doc.line_count(),
+            bytes: doc.bytes(),
+        };
+        self.docs.lock().unwrap().insert(opened.handle, doc);
+        opened
+    }
 }
 
 fn pick_path<F>(run: F) -> Option<PathBuf>
@@ -77,7 +76,7 @@ async fn pick_save_path(app: tauri::AppHandle, default_name: String) -> Option<S
     .map(|p| p.to_string_lossy().into_owned())
 }
 
-/// 範囲読みの開き方の答え: 文書の取っ手と、行数と大きさ。
+/// 開き方の答え: 文書の取っ手と、行数と大きさ。
 #[derive(serde::Serialize)]
 struct OpenedDocument {
     handle: u64,
@@ -85,8 +84,8 @@ struct OpenedDocument {
     bytes: usize,
 }
 
-/// 文書を全部 1 つの文字列で webview へ渡さずに開きます。ファイルはネイティブ側で
-/// 保持し、frontend は `read_lines` で範囲を取り寄せます。開く時点でやるのは
+/// 文書を全部 1 つの文字列で webview へ渡さずに開きます。本体はネイティブ側の
+/// ストアに置き、frontend は `read_lines` で窓を取り寄せます。開く時点でやるのは
 /// 読み込みと改行の走査だけです。async なのは UI を待たせないため。
 #[tauri::command]
 async fn open_document(
@@ -95,29 +94,16 @@ async fn open_document(
 ) -> Result<OpenedDocument, String> {
     let source = std::fs::read_to_string(&path)
         .map_err(|e| format!("{path} を読み込めませんでした: {e}"))?;
-    let mut starts = Vec::with_capacity(source.len() / 32 + 1);
-    starts.push(0);
-    starts.extend(memchr::memchr_iter(b'\n', source.as_bytes()).map(|at| at + 1));
-    let line_count = starts.len();
-    let bytes = source.len();
-    let handle = {
-        let mut next = state.next_document.lock().unwrap();
-        *next += 1;
-        *next
-    };
-    state
-        .opening
-        .lock()
-        .unwrap()
-        .insert(handle, OpenDocument { source, starts });
-    Ok(OpenedDocument {
-        handle,
-        line_count,
-        bytes,
-    })
+    Ok(state.adopt(store::Document::open(source)))
 }
 
-/// 開いている途中の文書から行の範囲を返します。
+/// 新しい空の文書をストアに作ります。すべての文書の本体がネイティブ側にあります。
+#[tauri::command]
+fn create_document(state: State<'_, AppState>) -> OpenedDocument {
+    state.adopt(store::Document::empty())
+}
+
+/// 文書から行の範囲を返します。
 #[tauri::command]
 fn read_lines(
     state: State<'_, AppState>,
@@ -125,18 +111,67 @@ fn read_lines(
     from: usize,
     count: usize,
 ) -> Result<Vec<String>, String> {
-    let opening = state.opening.lock().unwrap();
-    let Some(doc) = opening.get(&handle) else {
-        return Err("文書はもう開き終えています".to_string());
+    let docs = state.docs.lock().unwrap();
+    let Some(doc) = docs.get(&handle) else {
+        return Err("文書はもう閉じられています".to_string());
     };
-    let to = from.saturating_add(count).min(doc.starts.len());
-    Ok((from.min(to)..to).map(|i| doc.line(i).to_string()).collect())
+    Ok(doc.read(from, count))
 }
 
-/// 行を取り終えた文書を手放します。
+/// 編集の到着: `from..to` の行を `lines` へ置き換えます。同じ `group` が続く間は
+/// 元に戻す履歴の 1 ステップにつながります。新しい行数を返します。
+#[tauri::command]
+fn replace_lines(
+    state: State<'_, AppState>,
+    handle: u64,
+    from: usize,
+    to: usize,
+    lines: Vec<String>,
+    group: u64,
+    before: String,
+    after: String,
+) -> Result<usize, String> {
+    let mut docs = state.docs.lock().unwrap();
+    let Some(doc) = docs.get_mut(&handle) else {
+        return Err("文書はもう閉じられています".to_string());
+    };
+    doc.replace(from, to, lines, group, &before, &after)
+}
+
+/// 元に戻す・やり直すの結果。`state` は frontend が預けた控えそのもの。
+#[derive(serde::Serialize)]
+struct RestoredLines {
+    state: String,
+    touched_from: usize,
+    line_count: usize,
+}
+
+#[tauri::command]
+fn undo_lines(state: State<'_, AppState>, handle: u64, redo: bool) -> Option<RestoredLines> {
+    let mut docs = state.docs.lock().unwrap();
+    let doc = docs.get_mut(&handle)?;
+    let restored = if redo { doc.redo() } else { doc.undo() }?;
+    Some(RestoredLines {
+        state: restored.state,
+        touched_from: restored.touched_from,
+        line_count: restored.line_count,
+    })
+}
+
+/// 文書をストアからディスクへ直接書きます。全文は webview を通りません。
+#[tauri::command]
+async fn save_document(state: State<'_, AppState>, handle: u64, path: String) -> Result<(), String> {
+    let docs = state.docs.lock().unwrap();
+    let Some(doc) = docs.get(&handle) else {
+        return Err("文書はもう閉じられています".to_string());
+    };
+    doc.save(&path)
+}
+
+/// 閉じられたタブの文書を手放します。
 #[tauri::command]
 fn close_document(state: State<'_, AppState>, handle: u64) {
-    state.opening.lock().unwrap().remove(&handle);
+    state.docs.lock().unwrap().remove(&handle);
 }
 
 #[tauri::command]
@@ -378,7 +413,7 @@ pub fn run() {
         .manage(AppState {
             dirty: Mutex::new(false),
             started: Instant::now(),
-            opening: Mutex::new(HashMap::new()),
+            docs: Mutex::new(HashMap::new()),
             next_document: Mutex::new(0),
         })
         .setup(|app| {
@@ -399,7 +434,11 @@ pub fn run() {
             pick_open_path,
             pick_save_path,
             open_document,
+            create_document,
             read_lines,
+            replace_lines,
+            undo_lines,
+            save_document,
             close_document,
             write_document,
             set_dirty,
