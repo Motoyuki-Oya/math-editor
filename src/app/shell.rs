@@ -37,6 +37,9 @@ pub(super) struct Tab {
     pub(super) dirty: RwSignal<bool>,
     /// 下書きを書くには大きすぎる文書。
     pub(super) large: RwSignal<bool>,
+    /// このタブの文書の本体を指す、ネイティブ側ストアの取っ手。
+    /// 新しいタブでは作成が非同期に届くまで `None`。
+    pub(super) doc: RwSignal<Option<u64>>,
     pub(super) parked: StoredValue<Option<editor::Parked>, LocalStorage>,
 }
 
@@ -47,7 +50,31 @@ impl Tab {
             path: RwSignal::new(None),
             dirty: RwSignal::new(false),
             large: RwSignal::new(false),
+            doc: RwSignal::new(None),
             parked: StoredValue::new_local(None),
+        }
+    }
+
+    /// ネイティブ側に空の文書を作り、届いたら取っ手を持つ。
+    pub(super) fn assign_document(&self) {
+        let tab = *self;
+        spawn_local(async move {
+            if let Some(doc) = ipc::create_document().await {
+                // 取っ手が既にある（開くが先に済んだ）なら、作った文書は要らない。
+                if tab.doc.get_untracked().is_some() {
+                    ipc::close_document(doc.handle).await;
+                } else {
+                    tab.doc.set(Some(doc.handle));
+                }
+            }
+        });
+    }
+
+    /// タブが手放す文書。閉じるときに呼ぶ。
+    pub(super) fn release_document(&self) {
+        if let Some(handle) = self.doc.get_untracked() {
+            self.doc.set(None);
+            spawn_local(async move { ipc::close_document(handle).await });
         }
     }
 
@@ -73,9 +100,11 @@ pub(super) struct Pane {
 
 impl Pane {
     pub(super) fn new(key: usize) -> Pane {
+        let tab = Tab::new();
+        tab.assign_document();
         Pane {
             editor: StoredValue::new(None),
-            tabs: RwSignal::new(vec![Tab::new()]),
+            tabs: RwSignal::new(vec![tab]),
             current: RwSignal::new(0),
             key,
         }
@@ -140,7 +169,9 @@ impl Shell {
     }
 
     pub(super) fn new_tab(&self) -> Tab {
-        self.root.with_value(|owner| owner.with(Tab::new))
+        let tab = self.root.with_value(|owner| owner.with(Tab::new));
+        tab.assign_document();
+        tab
     }
 
     pub(super) fn new_pane(&self, key: usize) -> Pane {
@@ -311,11 +342,14 @@ impl Shell {
             }
             // わざと捨てた。
             drafts::forget(tab);
+            tab.release_document();
             let current = pane.current.get_untracked();
             if pane.tabs.with_untracked(Vec::len) == 1 {
                 // 最後のタブは空のままなので、常にドキュメントが存在します。下書きに関しては、新しいタブになります。
                 tab.id.set(next_id());
                 tab.path.set(None);
+                tab.large.set(false);
+                tab.assign_document();
                 editor::restore(pane.editor_pane(), None);
                 tab.dirty.set(false);
                 shell.sync_dirty();
@@ -390,6 +424,10 @@ impl Shell {
                 Ok(doc) => {
                     let pane = shell.pane_untracked();
                     let tab = shell.add_tab(pane);
+                    // 空のタブを使い回したときは、そのタブの空文書を手放して
+                    // 開いた文書の取っ手に替える。
+                    tab.release_document();
+                    tab.doc.set(Some(doc.handle));
                     tab.large.set(doc.bytes > LARGE_BYTES);
                     editor::load_pending(doc.line_count);
                     tab.path.set(Some(path));
@@ -423,7 +461,7 @@ impl Shell {
                     .set(format!("読み込んでいます… {}%", from * 100 / doc.line_count));
             }
         }
-        ipc::close_document(doc.handle).await;
+        // 文書の本体はタブが閉じるまでネイティブ側に居続ける。ここでは手放さない。
         if tab.id.get_untracked() == generation && from >= doc.line_count {
             self.status.set("開きました".into());
             self.refresh();

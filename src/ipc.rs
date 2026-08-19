@@ -120,10 +120,16 @@ pub struct OpenedDocument {
     pub bytes: usize,
 }
 
-/// 文書を全文の文字列で受け取らずに開きます。ネイティブ側が行で保持します。
+/// 文書を全文の文字列で受け取らずに開きます。ネイティブ側が本体を保持します。
 pub async fn open_document(path: &str) -> Result<OpenedDocument, String> {
     let value = call("open_document", PathArg { path }).await?;
     serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
+}
+
+/// 新しい空の文書をネイティブ側のストアに作ります。
+pub async fn create_document() -> Option<OpenedDocument> {
+    let value = call("create_document", NoArgs {}).await.ok()?;
+    serde_wasm_bindgen::from_value(value).ok()
 }
 
 pub async fn read_lines(handle: u64, from: usize, count: usize) -> Result<Vec<String>, String> {
