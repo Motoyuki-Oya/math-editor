@@ -101,6 +101,14 @@ mod tests {
     }
 
     #[test]
+    fn a_document_with_many_structures_survives_a_load_and_save() {
+        let source = "x = $(1/2) + $(√ y$(^ 2))\n$({[x>0, 正][x<0, 負])\na $(t) b $(t) c\n$(↨ Σ, n, i=1)i";
+        let text = read(source);
+        assert_eq!(write(&text), source);
+        assert_eq!(read(&write(&text)), text);
+    }
+
+    #[test]
     fn grouped_plain_characters_may_save_canonically() {
         let text = read("a + $(b/c) + d");
         assert_eq!(write(&text), "a + $(b/c) + d");

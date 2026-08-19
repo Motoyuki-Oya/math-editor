@@ -711,5 +711,35 @@ mod tests {
         let _ = parse_island("√[3");
         let _ = parse_island("$(");
         let _ = parse_island("[a, b");
+        let _ = parse_island("");
+        let _ = parse_island("$(a$(b");
+        let _ = parse_island("↨ ,");
+        let _ = parse_island("{[");
+    }
+
+    #[test]
+    fn empty_upper_and_lower_are_left_out_when_writing() {
+        // 上下欄が空なら普通の文字のまま書かれる。
+        assert_eq!(island_text(&vec![Node::char('x')]), "x");
+        // 片方でも内容があれば ↨ 形式になり、読み直すと同じ構造へ戻る。
+        let mut annotated = Node::char('x');
+        annotated.upper = vec![Node::char('n')];
+        let written = island_text(&vec![annotated.clone()]);
+        assert!(written.starts_with(LIMITS_MARK));
+        assert_eq!(parse_island(&written), vec![annotated]);
+    }
+
+    #[test]
+    fn every_special_character_doubles_into_an_ordinary_one() {
+        for c in SPECIAL {
+            let source = format!("a{c}{c}b");
+            assert_eq!(
+                parse_island(&source),
+                vec![Node::char('a'), Node::char(c), Node::char('b')],
+                "{source}",
+            );
+            assert_eq!(roundtrip(&source), source);
+        }
+        assert_eq!(roundtrip("a→→b"), "a→→b");
     }
 }

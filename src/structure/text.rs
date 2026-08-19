@@ -182,3 +182,58 @@ pub fn as_char(node: &Node) -> Option<char> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(source: &str) -> Text {
+        Text::from_lines(nodes_of(source))
+    }
+
+    fn line_str(text: &Text, line: usize) -> String {
+        text.line(line).iter().filter_map(as_char).collect()
+    }
+
+    #[test]
+    fn clamp_keeps_positions_inside_the_document() {
+        let text = text("ab\ncdef");
+        assert_eq!(text.clamp(Pos::new(9, 9)), Pos::new(1, 4));
+        assert_eq!(text.clamp(Pos::new(0, 9)), Pos::new(0, 2));
+    }
+
+    #[test]
+    fn slice_takes_rows_across_lines() {
+        let text = text("abc\ndef\nghi");
+        let rows = text.slice(Pos::new(0, 1), Pos::new(2, 2));
+        assert_eq!(rows, nodes_of("bc\ndef\ngh"));
+    }
+
+    #[test]
+    fn remove_joins_the_surrounding_lines() {
+        let mut text = text("abc\ndef\nghi");
+        let at = text.remove(Pos::new(0, 2), Pos::new(2, 1));
+        assert_eq!(at, Pos::new(0, 2));
+        assert_eq!(text.line_count(), 1);
+        assert_eq!(line_str(&text, 0), "abhi");
+    }
+
+    #[test]
+    fn inserting_one_row_stays_on_the_line() {
+        let mut text = text("abcd");
+        let end = text.insert(Pos::new(0, 2), nodes_of("XY"));
+        assert_eq!(end, Pos::new(0, 4));
+        assert_eq!(text.line_count(), 1);
+        assert_eq!(line_str(&text, 0), "abXYcd");
+    }
+
+    #[test]
+    fn inserting_lines_splits_the_line_and_reports_the_end() {
+        let mut text = text("abcd");
+        let end = text.insert(Pos::new(0, 2), nodes_of("X\nY"));
+        assert_eq!(end, Pos::new(1, 1));
+        assert_eq!(text.line_count(), 2);
+        assert_eq!(line_str(&text, 0), "abX");
+        assert_eq!(line_str(&text, 1), "Ycd");
+    }
+}
