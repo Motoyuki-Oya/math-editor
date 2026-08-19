@@ -1,4 +1,4 @@
-//! `docs/notation.md` で説明されているように、アイランドが記述される表記法です。
+//! `docs/notation.md` で説明されているように、島が記述される表記法です。
 //!
 //! `$(` … `)` 内のすべてがここで読み取られ、ここで書き戻されるため、保存されたファイルはプレーン テキストのままであり、他の形式は関与しません。
 
@@ -9,7 +9,7 @@ pub const LIMITS_MARK: char = '↨';
 pub const ROOT_MARK: char = '√';
 pub const ROOT_WORD: &str = "sqrt";
 
-/// 構造的に何かを意味する文字なので、1 つを通常の文字として書くことは 2 回書くことになります。
+/// 矢印と合わせて構造的に何かを意味する文字。通常の文字として書くには 2 回重ねます。
 const SPECIAL: [char; 7] = ['$', '/', '-', ',', ';', '[', ']'];
 
 fn is_special(c: char) -> bool {
@@ -18,7 +18,7 @@ fn is_special(c: char) -> bool {
 
 // ---------------------------------------------------------------- reading
 
-/// アイランドの内容を読み取ります (テキスト
+/// 島の内容 (外側の `$(` … `)` を除いたテキスト) を読み取ります。
 pub fn parse_island(src: &str) -> Row {
     let chars: Vec<char> = src.chars().collect();
     content(&chars)
@@ -45,7 +45,7 @@ fn starts_with(chars: &[char], word: &str) -> bool {
         .eq(word.chars())
 }
 
-/// `chars` の最上位にある構造文字の位置: ネストされたアイランド、グループ、または行内ではなく、二重化されていません。
+/// `chars` の最上位にある構造文字の位置: ネストされた島、グループ、または行内ではなく、二重化されていません。
 fn top_level(chars: &[char]) -> Vec<(usize, char)> {
     let mut out = Vec::new();
     let mut depth = 0usize;
@@ -118,7 +118,7 @@ fn arg(args: &[&[char]], i: usize) -> Row {
     args.get(i).map(|a| row(a)).unwrap_or_default()
 }
 
-/// アイランド全体を読み取ります: 最も外側の構造
+/// 島全体を読み取ります: 最も外側の構造は裸で書かれていることがあります。
 fn content(chars: &[char]) -> Row {
     let chars = trim(chars);
     if chars.is_empty() {
@@ -222,7 +222,7 @@ fn root(chars: &[char]) -> Row {
     out
 }
 
-/// 1 つのチャンク: 文字、グループ、またはネストされたアイランド、およびそれに関連付けられたスクリプト。また、使用した `chars` の量もレポートします。
+/// 1 つのチャンク: 文字、グループ、またはネストされた島、およびそれに関連付けられたスクリプト。また、使用した `chars` の量もレポートします。
 fn chunk(chars: &[char]) -> (Row, usize) {
     let mut out = Row::new();
     let mut i = 0;
@@ -386,7 +386,7 @@ fn node_at(chars: &[char], i: usize) -> Option<(Node, usize)> {
     Some((Node::char(c), i + 1))
 }
 
-/// `at` で始まるアイランドを閉じる `)` のインデックス。
+/// `at` で始まる島を閉じる `)` のインデックス。
 pub fn island_end(chars: &[char], at: usize) -> Option<usize> {
     let mut depth = 0usize;
     let mut i = at;
@@ -418,7 +418,7 @@ pub fn island_end(chars: &[char], at: usize) -> Option<usize> {
 
 // ---------------------------------------------------------------- 書き込み
 
-/// アイランドの内容として行を書き込みます。最も外側の単一の構造は裸で書き込まれ、それ以外はすべて独自のアイランドを取得します。
+/// 島の内容として行を書き込みます。最も外側の単一の構造は裸で書き込まれ、それ以外はすべて独自の島を取得します。
 pub fn island_text(root: &Row) -> String {
     match root.as_slice() {
         [node] if node.slot_count() > 0 => bare(node),
@@ -426,7 +426,7 @@ pub fn island_text(root: &Row) -> String {
     }
 }
 
-/// 行内に表示されるノード: 構造には独自のアイランドが必要です。
+/// 行内に表示されるノード: 構造には独自の島が必要です。
 fn inline(node: &Node) -> String {
     if !node.upper.is_empty() || !node.lower.is_empty() {
         return format!("$({})", bare(node));
@@ -448,7 +448,7 @@ fn text(row: &Row) -> String {
     row.iter().map(inline).collect()
 }
 
-/// A
+/// 外側の `$( … )` を付けない、構造そのものの書き方。
 fn bare(node: &Node) -> String {
     if !node.upper.is_empty() || !node.lower.is_empty() {
         let base = match &node.kind {

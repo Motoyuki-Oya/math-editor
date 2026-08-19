@@ -1,6 +1,6 @@
 //! ドキュメントの編集: 選択内容、適用されるコマンド、および元に戻す履歴。
 //!
-//! すべてのコマンドは、複数のカーソルが予期される動作として、単一のステップとしてすべての選択に適用されます。ドキュメント自体は [`crate::structural::text`] であり、表記や画面については何も知りません。
+//! すべてのコマンドは、複数のカーソルが予期される動作として、単一のステップとしてすべての選択に適用されます。ドキュメント自体は [`crate::structure::text`] であり、表記や画面については何も知りません。
 
 mod history;
 mod nested;
@@ -12,7 +12,7 @@ use super::clipboard::Clip;
 use crate::structure::ast::{row_at, Cursor, Node, Row};
 use crate::structure::text::{as_char, nodes_of, Pos, Sel, Text};
 
-/// `to` までのテキストが `end` で終わるテキストに置き換えられると、`p​​os` が終了します。
+/// `to` までのテキストが `end` で終わるテキストに置き換えられたとき、`pos` がどこへ移るか。
 fn shifted(pos: Pos, to: Pos, end: Pos) -> Pos {
     if pos <= to {
         // 編集が飲み込んだものはすべて最後に残ります。
@@ -29,7 +29,7 @@ fn shifted(pos: Pos, to: Pos, end: Pos) -> Pos {
 /// コマンドが何をしたか、つまり呼び出し元が反応するために必要なのはそれだけです。質問するモードはなく、何かが移動または変更されたかどうかだけを尋ねます。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Did {
-    /// 鍵はここには何も意味しませんので、他の誰にも所属しています。
+    /// キーはここでは何も意味しなかったので、他の担当に任せる。
     Nothing,
     /// キャレットまたは選択範囲が移動しました。
     Moved,
@@ -286,7 +286,7 @@ impl Editor {
         Did::Changed
     }
 
-    /// ケアトのグリッドは、構造内のものだけを意味し、列によって成長します。
+    /// キャレットの入っている行列に行を追加する。構造内でだけ意味を持つ。
     pub fn grow_matrix(&mut self) -> Did {
         if self.cursor.is_none() {
             return Did::Nothing;

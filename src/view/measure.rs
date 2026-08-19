@@ -35,7 +35,7 @@ impl Box2 {
     }
 }
 
-/// すごいクリックです。着地: テキスト内の場所、またはそこに立っている島内の場所。
+/// クリックの着地点: テキスト内の場所、またはそこに立っている構造内の場所。
 pub enum Hit {
     Text(Pos),
     Inside(Pos, Cursor),
@@ -264,7 +264,7 @@ pub(super) fn boundary(row: &Element, index: usize) -> Option<Box2> {
         .or_else(|| places.last().map(|(_, rect)| *rect))
 }
 
-/// テキスト ランが保持する文字数、または島や構造物など、独自の 1 つの場所を占めるものについては `None` を表します。
+/// テキスト ランが保持する文字数、または構造など、独自の 1 つの場所を占めるものについては `None` を表します。
 fn run_length(child: &Element) -> Option<usize> {
     child
         .class_list()
