@@ -142,7 +142,7 @@ fn the_format_only_converts_whole_documents() {
         .collect();
     assert_eq!(
         names,
-        ["read", "read_line", "write"],
+        ["read", "read_line", "write", "write_line"],
         "{} hands out more than a file needs",
         file.display(),
     );

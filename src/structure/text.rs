@@ -136,16 +136,36 @@ impl PartialEq for Line {
 
 impl Eq for Line {}
 
+/// 編集で行がどう入れ替わったか: 今の文書の `from` 行からの `inserted` 行が、
+/// 元の `removed` 行の代わりに立っている。文書の本体を別に持つものが、
+/// 同じ入れ替えを再現するために読む。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LineChange {
+    pub from: usize,
+    pub removed: usize,
+    pub inserted: usize,
+}
+
 /// Document lines. A document always has at least one line.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq)]
 pub struct Text {
     lines: Vec<Rc<Line>>,
+    /// まだ回収されていない行の入れ替え。互いに重ならず、今の行番号の昇順。
+    changes: Vec<LineChange>,
+}
+
+/// 行の中身が同じなら同じ文書。入れ替えの控えは持ち方の話で、意味ではない。
+impl PartialEq for Text {
+    fn eq(&self, other: &Text) -> bool {
+        self.lines == other.lines
+    }
 }
 
 impl Default for Text {
     fn default() -> Self {
         Self {
             lines: vec![Rc::new(Line::Rows(Row::new()))],
+            changes: Vec::new(),
         }
     }
 }
@@ -173,7 +193,65 @@ impl Text {
                     })
                 })
                 .collect(),
+            changes: Vec::new(),
         }
+    }
+
+    /// まだ回収されていない行の入れ替えを渡し、控えを空にする。
+    /// 返る入れ替えは重ならず昇順で、`from` と `inserted` は今の文書の行番号。
+    pub fn take_changes(&mut self) -> Vec<LineChange> {
+        std::mem::take(&mut self.changes)
+    }
+
+    /// 文書全体を 1 つの入れ替えとして控える。読み込んだ内容を、1 行の空文書
+    /// しか持っていない本体へまるごと届けるときに使う。
+    pub fn mark_all_changed(&mut self) {
+        self.changes = vec![LineChange {
+            from: 0,
+            removed: 1,
+            inserted: self.lines.len(),
+        }];
+    }
+
+    /// 行の入れ替えを控えへ合成する。既にある入れ替えと重なれば窓を広げて
+    /// 1 つにまとめ、後ろの入れ替えは行番号を今の文書に合わせてずらす。
+    /// `from` と `removed` は入れ替え前の今の文書、`inserted` は入れ替え後の行数。
+    fn record(&mut self, from: usize, removed: usize, inserted: usize) {
+        let mut before = Vec::new();
+        let mut overlapping = Vec::new();
+        let mut after = Vec::new();
+        for span in std::mem::take(&mut self.changes) {
+            if span.from + span.inserted <= from {
+                before.push(span);
+            } else if span.from >= from + removed {
+                after.push(LineChange {
+                    from: span.from + inserted - removed,
+                    ..span
+                });
+            } else {
+                overlapping.push(span);
+            }
+        }
+        // 重なった入れ替えと今回の入れ替えを覆う窓。窓の中で以前の入れ替えが
+        // 入れた行以外は元の文書の行なので、まとめて removed に数える
+        // （触っていない行も混ざるが、同じ内容を送り直すだけで害はない）。
+        let start = overlapping
+            .first()
+            .map_or(from, |span| span.from.min(from));
+        let end = overlapping
+            .last()
+            .map_or(from + removed, |span| (span.from + span.inserted).max(from + removed));
+        let window = end - start;
+        let span_inserted: usize = overlapping.iter().map(|span| span.inserted).sum();
+        let span_removed: usize = overlapping.iter().map(|span| span.removed).sum();
+        let merged = LineChange {
+            from: start,
+            removed: span_removed + (window - span_inserted),
+            inserted: window - removed + inserted,
+        };
+        before.push(merged);
+        before.extend(after);
+        self.changes = before;
     }
 
     /// まだ素の文字列のまま持っている行。保存形式の層がそのまま書き戻すための
@@ -189,7 +267,17 @@ impl Text {
     pub fn pending(line_count: usize) -> Self {
         Self {
             lines: vec![Rc::new(Line::Absent); line_count.max(1)],
+            changes: Vec::new(),
         }
+    }
+
+    /// 文書の本体が巻き戻ったのに合わせる: `from` から先の手元の行を捨てて
+    /// 届き直しを待ち、行数を合わせる。これは編集ではないので控えには残らない。
+    pub fn reset_from(&mut self, from: usize, line_count: usize) {
+        let line_count = line_count.max(1);
+        self.lines.truncate(from.min(line_count));
+        self.lines.resize(line_count, Rc::new(Line::Absent));
+        self.changes.clear();
     }
 
     /// まだ届いていない行へ中身を入れる。既に届いた行はそのまま。
@@ -220,7 +308,11 @@ impl Text {
     }
 
     pub fn line_mut(&mut self, line: usize) -> Option<&mut Row> {
-        Some(Rc::make_mut(self.lines.get_mut(line)?).row_mut())
+        if line >= self.lines.len() {
+            return None;
+        }
+        self.record(line, 1, 1);
+        Some(Rc::make_mut(&mut self.lines[line]).row_mut())
     }
 
     pub fn line_len(&self, line: usize) -> usize {
@@ -262,9 +354,11 @@ impl Text {
         // 行を丸ごと消すときは、境界の行に触らない。大きいファイルの行の
         // 出し入れが、素の行を展開せずに済むように。
         if from.col == 0 && to.col == 0 {
+            self.record(from.line, to.line - from.line, 0);
             self.lines.drain(from.line..to.line);
             return from;
         }
+        self.record(from.line, to.line - from.line + 1, 1);
         let tail = self.line(to.line)[to.col..].to_vec();
         let first = Rc::make_mut(&mut self.lines[from.line]).row_mut();
         first.truncate(from.col);
@@ -278,6 +372,7 @@ impl Text {
         if what.is_empty() {
             return at;
         }
+        self.record(at.line, 1, what.len());
         let first_line = Rc::make_mut(&mut self.lines[at.line]).row_mut();
         let tail: Row = first_line.split_off(at.col);
         if what.len() == 1 {
@@ -406,6 +501,86 @@ mod tests {
                 Node::char('i')
             ][..]
         );
+    }
+
+    #[test]
+    fn edits_are_collected_as_line_changes() {
+        let mut text = raw_text(&["ab", "cd", "ef"]);
+        text.line_mut(1);
+        assert_eq!(
+            text.take_changes(),
+            vec![LineChange {
+                from: 1,
+                removed: 1,
+                inserted: 1
+            }]
+        );
+        assert_eq!(text.take_changes(), Vec::new());
+    }
+
+    #[test]
+    fn overlapping_changes_merge_into_one_window() {
+        let mut text = raw_text(&["a", "b", "c"]);
+        // 1 行の編集に、同じ行を 3 行へ広げる挿入が重なる。
+        text.line_mut(1);
+        text.insert(Pos::new(1, 0), nodes_of("x\ny\nz"));
+        assert_eq!(
+            text.take_changes(),
+            vec![LineChange {
+                from: 1,
+                removed: 1,
+                inserted: 3
+            }]
+        );
+    }
+
+    #[test]
+    fn a_later_change_above_shifts_the_recorded_lines_below() {
+        let mut text = raw_text(&["a", "b", "c", "d"]);
+        // 下の行を先に触り、その上へ行を増やす編集が続く（すべて置換の逆順など）。
+        text.line_mut(2);
+        text.insert(Pos::new(0, 0), nodes_of("x\ny"));
+        let changes = text.take_changes();
+        assert_eq!(
+            changes,
+            vec![
+                LineChange {
+                    from: 0,
+                    removed: 1,
+                    inserted: 2
+                },
+                LineChange {
+                    from: 3,
+                    removed: 1,
+                    inserted: 1
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn whole_line_removals_are_recorded() {
+        let mut text = raw_text(&["a", "b", "c"]);
+        text.remove(Pos::new(0, 0), Pos::new(2, 0));
+        assert_eq!(
+            text.take_changes(),
+            vec![LineChange {
+                from: 0,
+                removed: 2,
+                inserted: 0
+            }]
+        );
+    }
+
+    #[test]
+    fn resetting_forgets_local_lines_and_changes() {
+        let mut text = raw_text(&["a", "b", "c"]);
+        text.line_mut(2);
+        text.reset_from(1, 4);
+        assert_eq!(text.take_changes(), Vec::new());
+        assert_eq!(text.line_count(), 4);
+        assert_eq!(text.raw_line(0), Some("a"));
+        assert_eq!(text.first_absent(0), Some(1));
     }
 
     #[test]

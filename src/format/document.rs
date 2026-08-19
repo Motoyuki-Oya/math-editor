@@ -35,10 +35,15 @@ pub fn write(text: &Text) -> String {
         .map(|line| match text.raw_line(line) {
             // 素のままの行は `$` を含まないので、エスケープなしで元の文字列のまま。
             Some(source) => source.to_string(),
-            None => islands::serialize_line(&line_segments(text.line(line))),
+            None => write_line(text.line(line)),
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// ファイルの 1 行を書き出します。編集された行を文書の本体へ届けるときに使います。
+pub fn write_line(row: &[Node]) -> String {
+    islands::serialize_line(&line_segments(row))
 }
 
 fn line_segments(row: &[Node]) -> islands::Line {
