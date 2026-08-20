@@ -77,12 +77,6 @@ struct PathArg<'a> {
 }
 
 #[derive(Serialize)]
-struct WriteArgs<'a> {
-    path: &'a str,
-    contents: &'a str,
-}
-
-#[derive(Serialize)]
 struct DirtyArg {
     dirty: bool,
 }
@@ -151,10 +145,87 @@ pub async fn close_document(handle: u64) {
     let _ = call("close_document", HandleArg { handle }).await;
 }
 
-pub async fn write_document(path: &str, contents: &str) -> Result<(), String> {
-    call("write_document", WriteArgs { path, contents })
-        .await
-        .map(|_| ())
+/// 編集の到着: 文書の本体の `from..to` の行を `lines` へ置き換えます。
+pub async fn replace_lines(
+    handle: u64,
+    from: usize,
+    to: usize,
+    lines: &[String],
+    group: u64,
+    before: &str,
+    after: &str,
+) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        handle: u64,
+        from: usize,
+        to: usize,
+        lines: &'a [String],
+        group: u64,
+        before: &'a str,
+        after: &'a str,
+    }
+    call(
+        "replace_lines",
+        Args {
+            handle,
+            from,
+            to,
+            lines,
+            group,
+            before,
+            after,
+        },
+    )
+    .await
+    .map(|_| ())
+}
+
+/// 元に戻す・やり直すの結果。`state` は預けたキャレットの控えそのもの。
+#[derive(Deserialize)]
+pub struct RestoredLines {
+    pub state: String,
+    pub touched_from: usize,
+    pub line_count: usize,
+}
+
+pub async fn undo_lines(handle: u64, redo: bool) -> Option<RestoredLines> {
+    #[derive(Serialize)]
+    struct Args {
+        handle: u64,
+        redo: bool,
+    }
+    let value = call("undo_lines", Args { handle, redo }).await.ok()?;
+    serde_wasm_bindgen::from_value(value).ok()
+}
+
+/// 文書の本体からディスクへ直接保存します。全文は webview を通りません。
+pub async fn save_document(handle: u64, path: &str) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        handle: u64,
+        path: &'a str,
+    }
+    call("save_document", Args { handle, path }).await.map(|_| ())
+}
+
+/// 文書の本体から下書きを書きます。
+pub async fn save_draft(handle: u64, id: usize, path: Option<&str>) {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        handle: u64,
+        id: String,
+        path: Option<&'a str>,
+    }
+    let _ = call(
+        "save_draft",
+        Args {
+            handle,
+            id: id.to_string(),
+            path,
+        },
+    )
+    .await;
 }
 
 pub async fn set_dirty(dirty: bool) {
@@ -183,24 +254,6 @@ pub struct Draft {
     pub id: usize,
     pub path: Option<String>,
     pub contents: String,
-}
-
-pub async fn write_draft(id: usize, path: Option<&str>, contents: &str) {
-    #[derive(Serialize)]
-    struct DraftArgs<'a> {
-        id: String,
-        path: Option<&'a str>,
-        contents: &'a str,
-    }
-    let _ = call(
-        "write_draft",
-        DraftArgs {
-            id: id.to_string(),
-            path,
-            contents,
-        },
-    )
-    .await;
 }
 
 pub async fn remove_draft(id: usize) {

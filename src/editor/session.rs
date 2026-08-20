@@ -6,7 +6,7 @@ use std::rc::Rc;
 use web_sys::{HtmlElement, HtmlTextAreaElement};
 
 use super::input;
-use super::model::Editor;
+use super::model::{Editor, Flush};
 use super::search;
 use crate::format::document;
 use crate::view::document::{Caret, View};
@@ -229,9 +229,21 @@ pub struct Parked {
 
 impl Parked {
     /// 画面の外にある文書にも、届いた行は同じように入ります。
-    pub fn feed(&mut self, from: usize, lines: &[String]) -> bool {
-        self.editor
-            .feed(from, lines.iter().map(|line| document::read_line(line)).collect())
+    pub fn feed(&mut self, from: usize, lines: &[String]) {
+        self.editor.feed(
+            from,
+            lines.iter().map(|line| document::read_line(line)).collect(),
+        );
+    }
+
+    /// 画面の外にある文書の、たまった編集。
+    pub fn take_flush(&mut self) -> Option<FlushBatch> {
+        take_flush_of(&mut self.editor)
+    }
+
+    /// 画面の外にある文書も、本体の巻き戻しに合わせます。
+    pub fn apply_restored(&mut self, state: &str, touched_from: usize, line_count: usize) {
+        self.editor.apply_restored(state, touched_from, line_count);
     }
 }
 
@@ -255,58 +267,111 @@ pub fn restore(pane: usize, parked: Option<Parked>) {
     changed(&session);
 }
 
+/// 読み込んだ内容を表示し、文書の本体（1 行の空文書）へまるごと届くようにします。
+/// 下書きの復元で使われます。
 pub fn load(text: &str) {
     let Some(session) = session() else { return };
-    session.borrow_mut().editor.load(document::read(text));
+    session
+        .borrow_mut()
+        .editor
+        .load_contents(document::read(text));
     changed(&session);
 }
 
-/// 行数だけ分かっている文書を出し、行が届くのを待ちます。範囲読みの開始。
+/// 行数だけ分かっている文書を出します。行は見えた場所から取り寄せられます。
 pub fn load_pending(line_count: usize) {
     let Some(session) = session() else { return };
     session.borrow_mut().editor.load_pending(line_count);
     changed(&session);
 }
 
-/// 画面上のペインへ届いた行を入れます。文書がもう待っていなければ `false`。
-pub fn feed_pane(pane: usize, from: usize, lines: &[String]) -> bool {
+/// 画面上のペインへ届いた行を入れます。
+pub fn feed_pane(pane: usize, from: usize, lines: &[String]) {
     let Some(session) = pane_session(pane) else {
-        return false;
+        return;
     };
-    let fed = session
-        .borrow_mut()
-        .editor
-        .feed(from, lines.iter().map(|line| document::read_line(line)).collect());
-    // 描き直すのは届いた行が画面に見えるときだけ。読み込みは数百チャンク届くので、
-    // 見えない行のために毎回描き直すと読み込みより描画が高くつく。
+    session.borrow_mut().editor.feed(
+        from,
+        lines.iter().map(|line| document::read_line(line)).collect(),
+    );
+    // 描き直すのは届いた行が画面に見えるときだけ。見えない行のために毎回
+    // 描き直すと、取り寄せより描画が高くつく。
     let visible = {
-        let borrowed = session.borrow();
-        let drawn = borrowed.view.drawn();
-        let done = !borrowed.editor.is_loading();
-        done || (from < drawn.end && from + lines.len() > drawn.start)
+        let drawn = session.borrow().view.drawn();
+        from < drawn.end && from + lines.len() > drawn.start
     };
-    if fed && visible {
+    if visible {
         redraw(&session);
     }
-    fed
 }
 
-/// 入力を受けるペインの文書がまだ行を待っているかどうか。
-pub fn loading() -> bool {
-    session().is_some_and(|session| session.borrow().editor.is_loading())
-}
-
-pub fn to_document() -> String {
-    session()
-        .map(|session| document::write(session.borrow().editor.text()))
-        .unwrap_or_default()
-}
-
-/// 1 つのペインのドキュメント（入力されているペインのいずれか）。変更元のペインに続くドラフトで使用されます。
-pub fn document_of(pane: usize) -> Option<String> {
+/// たまった編集を、文書の本体へ送れる形で渡します。何もなければ `None`。
+pub fn take_flush(pane: usize) -> Option<FlushBatch> {
     let session = pane_session(pane)?;
-    let text = document::write(session.borrow().editor.text());
-    Some(text)
+    let mut borrowed = session.borrow_mut();
+    take_flush_of(&mut borrowed.editor)
+}
+
+/// 入れ替えの行番号は本体側（編集前）の行番号で、後ろの入れ替えから先に
+/// 適用すれば前の行番号が狂いません。
+fn take_flush_of(editor: &mut Editor) -> Option<FlushBatch> {
+    let flush: Flush = editor.take_flush()?;
+    let text = editor.text();
+    // 入れ替えは今の行番号の昇順で届く。本体の行番号へは、前の入れ替えが
+    // 増減させた行数の分だけ戻す。
+    let mut delta = 0isize;
+    let mut edits: Vec<FlushEdit> = flush
+        .changes
+        .into_iter()
+        .map(|change| {
+            let from = (change.from as isize - delta) as usize;
+            delta += change.inserted as isize - change.removed as isize;
+            FlushEdit {
+                from,
+                to: from + change.removed,
+                lines: (change.from..change.from + change.inserted)
+                    .map(|line| match text.raw_line(line) {
+                        Some(source) => source.to_string(),
+                        None => document::write_line(text.line(line)),
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+    edits.reverse();
+    Some(FlushBatch {
+        group: flush.group,
+        before: flush.before,
+        after: flush.after,
+        edits,
+    })
+}
+
+/// 文書の本体の履歴で 1 ステップになる、編集のひとかたまり。
+pub struct FlushBatch {
+    pub group: u64,
+    pub before: String,
+    pub after: String,
+    /// 本体側の行番号で表した入れ替え。この順（後ろの行から）で適用する。
+    pub edits: Vec<FlushEdit>,
+}
+
+pub struct FlushEdit {
+    pub from: usize,
+    pub to: usize,
+    pub lines: Vec<String>,
+}
+
+/// 文書の本体が巻き戻ったのに合わせます。
+pub fn apply_restored(pane: usize, state: &str, touched_from: usize, line_count: usize) {
+    let Some(session) = pane_session(pane) else {
+        return;
+    };
+    session
+        .borrow_mut()
+        .editor
+        .apply_restored(state, touched_from, line_count);
+    redraw(&session);
 }
 
 pub fn stats() -> (usize, usize) {

@@ -107,20 +107,6 @@ pub fn insert_node(node: Node) {
     changed(&session);
 }
 
-pub fn undo() {
-    let Some(session) = session() else { return };
-    if session.borrow_mut().editor.undo() {
-        changed(&session);
-    }
-}
-
-pub fn redo() {
-    let Some(session) = session() else { return };
-    if session.borrow_mut().editor.redo() {
-        changed(&session);
-    }
-}
-
 /// キャレットがある場所すべてを選択します。キャレットが含まれる構造の行、または全体文書。システム独自の全選択アイテムは、テキストではなく非表示の入力要素に到達するため、これは独自のアイテムです。
 pub fn select_all() {
     let Some(session) = session() else { return };
@@ -206,20 +192,23 @@ pub fn replace_all(
     }
     {
         let mut borrowed = session.borrow_mut();
-        // 後ろから前に置き換えると、以前の位置が有効になります。
-        for found in matches.iter().rev() {
-            let text = search::expand(&found.groups, replacement, options);
-            match &found.place {
-                Place::Text(sel) => borrowed.editor.replace_range_with(
-                    sel.start(),
-                    sel.end(),
-                    search::replacement_nodes(&text),
-                ),
-                Place::Inside { at, cursor } => {
-                    borrowed.editor.replace_nested(*at, cursor.clone(), &text);
+        // すべての置き換えが履歴の 1 ステップに入り、1 回の元に戻すで全部戻る。
+        borrowed.editor.one_step(|editor| {
+            // 後ろから前に置き換えると、以前の位置が有効になります。
+            for found in matches.iter().rev() {
+                let text = search::expand(&found.groups, replacement, options);
+                match &found.place {
+                    Place::Text(sel) => editor.replace_range_with(
+                        sel.start(),
+                        sel.end(),
+                        search::replacement_nodes(&text),
+                    ),
+                    Place::Inside { at, cursor } => {
+                        editor.replace_nested(*at, cursor.clone(), &text);
+                    }
                 }
             }
-        }
+        });
         borrowed.editor.leave_structure();
     }
     changed(&session);

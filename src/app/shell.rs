@@ -5,13 +5,11 @@ use leptos::reactive::owner::{LocalStorage, Owner};
 use leptos::task::spawn_local;
 
 use super::drafts;
+use super::sync;
 use crate::editor;
 use crate::ipc;
 
 const UNTITLED: &str = "無題";
-
-/// 一度に取り寄せる行数。1 回の IPC が数百キロバイトで済む程度。
-const CHUNK_LINES: usize = 20_000;
 
 /// これより大きい文書は下書き（自動控え）を書かない。下書きは全文を
 /// 書き出すので、巨大なファイルでは一時停止のたびに数百 MB を書くことになる。
@@ -126,13 +124,10 @@ impl Pane {
     }
 
     /// 表示されているドキュメントを画面から外し、タブを付けたままにします。
+    /// 下書きは文書の本体から書かれるので、画面から外れても書けます。
     pub(super) fn park(&self) {
         let pane = self.editor_pane();
         let tab = self.tab_untracked();
-        // 現在作成中: ドキュメントが画面から消えると、下書きはペインからそれを読み取ることができなくなります。
-        if tab.dirty.get_untracked() {
-            drafts::write(tab, pane);
-        }
         tab.parked.set_value(editor::park(pane));
     }
 }
@@ -216,18 +211,66 @@ impl Shell {
         spawn_local(ipc::set_dirty(any));
     }
 
-    /// エディターのペインに表示されているタブの文書の取っ手。
-    pub(super) fn document_of(&self, editor_pane: usize) -> Option<u64> {
+    /// エディターのペインに表示されているタブ。
+    pub(super) fn tab_of(&self, editor_pane: usize) -> Option<Tab> {
         self.panes.with_untracked(|panes| {
             panes
                 .iter()
                 .find(|pane| pane.editor.get_value() == Some(editor_pane))
-                .and_then(|pane| pane.tab_untracked().doc.get_untracked())
+                .map(|pane| pane.tab_untracked())
         })
     }
 
-    /// 変更元のペインのドキュメントをマークします。
+    /// 届いた行をタブの文書へ入れます。タブが画面上ならそのペインへ、
+    /// 駐車中ならその文書へ。
+    pub(super) fn feed(&self, tab: Tab, from: usize, lines: &[String]) {
+        if tab.parked.with_value(Option::is_some) {
+            tab.parked.update_value(|parked| {
+                if let Some(parked) = parked {
+                    parked.feed(from, lines);
+                }
+            });
+            return;
+        }
+        if let Some(pane) = self.pane_showing(tab) {
+            editor::feed_pane(pane.editor_pane(), from, lines);
+        }
+    }
+
+    /// 文書の本体が巻き戻ったのを、タブがどこにいても手元へ映します。
+    pub(super) fn apply_restored(
+        &self,
+        tab: Tab,
+        state: &str,
+        touched_from: usize,
+        line_count: usize,
+    ) {
+        if tab.parked.with_value(Option::is_some) {
+            tab.parked.update_value(|parked| {
+                if let Some(parked) = parked {
+                    parked.apply_restored(state, touched_from, line_count);
+                }
+            });
+            return;
+        }
+        if let Some(pane) = self.pane_showing(tab) {
+            editor::apply_restored(pane.editor_pane(), state, touched_from, line_count);
+        }
+    }
+
+    fn pane_showing(&self, tab: Tab) -> Option<Pane> {
+        let id = tab.id.get_untracked();
+        self.panes.with_untracked(|panes| {
+            panes
+                .iter()
+                .find(|pane| pane.tab_untracked().id.get_untracked() == id)
+                .copied()
+        })
+    }
+
+    /// 変更元のペインのドキュメントをマークし、たまった編集を本体へ送ります。
     pub(super) fn mark_dirty(&self, editor_pane: usize) {
+        sync::flush(*self, editor_pane);
         let pane = self
             .panes
             .with_untracked(|panes| {
@@ -237,18 +280,24 @@ impl Shell {
                     .copied()
             })
             .unwrap_or_else(|| self.pane_untracked());
-        let tab = pane.tab_untracked();
+        self.mark_dirty_tab(pane.tab_untracked());
+    }
+
+    pub(super) fn mark_dirty_tab(&self, tab: Tab) {
         if !tab.dirty.get_untracked() {
             tab.dirty.set(true);
             self.sync_dirty();
         }
-        drafts::touch(tab, editor_pane);
+        drafts::touch(tab);
         self.refresh();
     }
 
     /// ドキュメントがそのファイルと一致するようになったので、そのドラフトには復元するものは何もありません。
     pub(super) fn mark_clean(&self) {
-        let tab = self.tab_untracked();
+        self.mark_clean_tab(self.tab_untracked());
+    }
+
+    pub(super) fn mark_clean_tab(&self, tab: Tab) {
         tab.dirty.set(false);
         drafts::forget(tab);
         self.sync_dirty();
@@ -439,67 +488,16 @@ impl Shell {
                     tab.release_document();
                     tab.doc.set(Some(doc.handle));
                     tab.large.set(doc.bytes > LARGE_BYTES);
+                    // 行は見えた場所から取り寄せられる。最初の描き直しが
+                    // 見えている窓を要求する。
                     editor::load_pending(doc.line_count);
                     tab.path.set(Some(path));
+                    shell.status.set("開きました".into());
                     shell.mark_clean();
-                    shell.stream(tab, doc).await;
                 }
                 Err(error) => shell.status.set(error),
             }
         });
-    }
-
-    /// 開いた文書の行を順に取り寄せ、タブの文書へ入れます。文書は全文を 1 つの
-    /// 文字列で渡さず、この範囲読みだけで届きます。読み込み中は文書は読むだけです。
-    async fn stream(&self, tab: Tab, doc: ipc::OpenedDocument) {
-        // タブが閉じられたり使い回されたりしたら、届け先はもうこの文書ではない。
-        let generation = tab.id.get_untracked();
-        let mut from = 0;
-        while from < doc.line_count && tab.id.get_untracked() == generation {
-            let count = CHUNK_LINES.min(doc.line_count - from);
-            let Ok(lines) = ipc::read_lines(doc.handle, from, count).await else {
-                break;
-            };
-            if !self.feed(tab, from, &lines) {
-                break;
-            }
-            from += count;
-            if from < doc.line_count {
-                // 文字数の集計や再描画は届いた行が画面に関わるときだけ。毎チャンク
-                // 全行を数え直すと、読み込み自体より高くつく。
-                self.status
-                    .set(format!("読み込んでいます… {}%", from * 100 / doc.line_count));
-            }
-        }
-        // 文書の本体はタブが閉じるまでネイティブ側に居続ける。ここでは手放さない。
-        if tab.id.get_untracked() == generation && from >= doc.line_count {
-            self.status.set("開きました".into());
-            self.refresh();
-        }
-    }
-
-    /// 届いた行をタブの文書へ入れます。タブが画面上ならそのペインへ、
-    /// 駐車中ならその文書へ。もう届け先がなければ `false`。
-    fn feed(&self, tab: Tab, from: usize, lines: &[String]) -> bool {
-        if tab.parked.with_value(Option::is_some) {
-            return tab
-                .parked
-                .try_update_value(|parked| {
-                    parked.as_mut().is_some_and(|parked| parked.feed(from, lines))
-                })
-                .unwrap_or(false);
-        }
-        let id = tab.id.get_untracked();
-        let pane = self.panes.with_untracked(|panes| {
-            panes
-                .iter()
-                .find(|pane| pane.tab_untracked().id.get_untracked() == id)
-                .copied()
-        });
-        match pane {
-            Some(pane) => editor::feed_pane(pane.editor_pane(), from, lines),
-            None => false,
-        }
     }
 
     /// アプリケーションが最後に停止したときに画面に表示されていたものを開きます。ドラフトは未保存のタブとして返され、番号が保持されるため、2 番目のストップで同じドラフトが上書きされます。
@@ -522,12 +520,9 @@ impl Shell {
         self.status.set("前回の編集内容を復元しました".into());
     }
 
+    /// 保存は文書の本体がディスクへ直接行います。たまった編集と同じ列に並ぶ
+    /// ので、送信中の編集を追い越しません。
     pub(super) fn save(&self, force_dialog: bool) {
-        if editor::loading() {
-            self.status.set("読み込みが終わるまで保存できません".into());
-            return;
-        }
-        let shell = *self;
         let tab = self.tab_untracked();
         let current = tab.path.get_untracked();
         let default_name = tab.name();
@@ -539,15 +534,7 @@ impl Shell {
                     None => return,
                 },
             };
-            let contents = editor::to_document();
-            match ipc::write_document(&path, &contents).await {
-                Ok(()) => {
-                    tab.path.set(Some(path));
-                    shell.status.set("保存しました".into());
-                    shell.mark_clean();
-                }
-                Err(error) => shell.status.set(error),
-            }
+            sync::save(tab, path);
         });
     }
 }

@@ -44,8 +44,8 @@ pub(super) fn choose(shell: Shell, name: &str, from: From) {
         }
         "preferences" => shell.preferences.update(|open| *open = !*open),
         "select_all" => editor::select_all(),
-        "undo" => editor::undo(),
-        "redo" => editor::redo(),
+        "undo" => super::sync::undo(shell, false),
+        "redo" => super::sync::undo(shell, true),
         "find" => shell.find(Field::Query),
         "replace" => shell.find(Field::Replacement),
         "insert_structure" => editor::insert_structure(),

@@ -1,11 +1,12 @@
-//! ドキュメントの編集: 選択内容、適用されるコマンド、および元に戻す履歴。
+//! ドキュメントの編集: 選択内容と、適用されるコマンド。
 //!
-//! すべてのコマンドは、複数のカーソルが予期される動作として、単一のステップとしてすべての選択に適用されます。ドキュメント自体は [`crate::structural::text`] であり、表記や画面については何も知りません。
+//! すべてのコマンドは、複数のカーソルが予期される動作として、単一のステップとしてすべての選択に適用されます。ドキュメント自体は [`crate::structure::text`] であり、表記や画面については何も知りません。編集は行の入れ替えとして控えられ、文書の本体（元に戻す履歴を持つ側）へ引き渡されます。
 
 mod history;
 mod nested;
 
-use history::{History, Step};
+pub use history::Flush;
+use history::{Recorder, Step};
 pub use nested::Inside;
 
 use super::clipboard::Clip;
@@ -54,10 +55,7 @@ pub struct Editor {
     cursor: Option<Cursor>,
     /// 本文トリガーが今回構造を作る文書行内の位置。
     transient_structure: Option<usize>,
-    /// 範囲読みの読み込みが進行中。行が全部届くまで文書を変更できない。
-    /// 行の出し入れが読み込み側の行番号とずれないように。
-    loading: bool,
-    history: History,
+    recorder: Recorder,
 }
 
 impl Default for Editor {
@@ -67,8 +65,7 @@ impl Default for Editor {
             sels: vec![Sel::caret(Pos::default())],
             cursor: None,
             transient_structure: None,
-            loading: false,
-            history: History::default(),
+            recorder: Recorder::default(),
         }
     }
 }
@@ -87,39 +84,42 @@ impl Editor {
         *self.sels.last().expect("at least one selection")
     }
 
-    /// ファイルから読み取られたばかりのドキュメントを表示し、履歴を削除します。
+    /// ファイルから読み取られたばかりのドキュメントを表示します。
     pub fn load(&mut self, text: Text) {
         self.text = text;
         self.sels = vec![Sel::caret(Pos::default())];
         self.cursor = None;
-        self.loading = false;
-        self.history.clear();
+        self.recorder = Recorder::default();
     }
 
-    /// 行数だけ分かっている文書を表示し、行が届くのを待ちます。
-    /// 全部届くまで文書は読むだけになります。
+    /// 読み込んだ内容をまるごと文書の本体へ届くようにする。本体が
+    /// 1 行の空文書のときに使う（下書きの復元）。
+    pub fn load_contents(&mut self, text: Text) {
+        self.load(text);
+        self.record(Step::Other);
+        self.text.mark_all_changed();
+    }
+
+    /// 行数だけ分かっている文書を表示し、行は見えた場所から届く。
     pub fn load_pending(&mut self, line_count: usize) {
         self.load(Text::pending(line_count));
-        self.loading = true;
     }
 
-    /// 届いた行を `from` から順に入れます。まだ読み込み中なら `true` を返し、
-    /// すべての行が届いたら読み込みを終えて編集を許します。
-    pub fn feed(&mut self, from: usize, lines: Vec<crate::structure::text::SourceLine>) -> bool {
-        if !self.loading {
-            return false;
-        }
+    /// 届いた行を `from` から順に入れます。既にある行はそのまま。
+    pub fn feed(&mut self, from: usize, lines: Vec<crate::structure::text::SourceLine>) {
         for (offset, line) in lines.into_iter().enumerate() {
             self.text.fill_line(from + offset, line);
         }
-        if self.text.first_absent(0).is_none() {
-            self.loading = false;
-        }
-        true
     }
 
-    pub fn is_loading(&self) -> bool {
-        self.loading
+    /// 選択のいずれかが、まだ届いていない行に触れているか。届く前の行は
+    /// 空に見えているだけなので、そこへの編集は中身を黙って壊してしまう。
+    fn touches_absent(&self) -> bool {
+        self.sels.iter().any(|sel| {
+            self.text
+                .first_absent(sel.start().line)
+                .is_some_and(|absent| absent <= sel.end().line)
+        })
     }
 
     fn edit_each(&mut self, step: Step, edit: impl Fn(&Text, Sel) -> (Pos, Pos, Vec<Row>)) {
@@ -142,7 +142,7 @@ impl Editor {
     }
 
     pub fn insert(&mut self, what: Vec<Row>) {
-        if self.loading {
+        if self.touches_absent() {
             return;
         }
         let typing = what.len() == 1 && what[0].len() == 1;
@@ -152,7 +152,7 @@ impl Editor {
 
     /// キャレットがどこにあっても、そのキャレットにテキストを挿入します。単一の文字が入力されるため、構造内のショートカットは引き続き実行されます。それ以上のものはペーストなのでそのまま入ります。
     pub fn insert_text(&mut self, text: &str) -> Did {
-        if self.loading {
+        if self.touches_absent() {
             return Did::Nothing;
         }
         if self.cursor.is_some() {
@@ -175,7 +175,7 @@ impl Editor {
 
     /// ドキュメントからコピーされた部分を、元の形状のまま元に戻します。他の場所からのテキストは、[`Self::insert_text`] を介して文字として到着します。
     pub fn insert_clip(&mut self, clip: &Clip) -> Did {
-        if self.loading {
+        if self.touches_absent() {
             return Did::Nothing;
         }
         if self.cursor.is_some() {
@@ -187,7 +187,7 @@ impl Editor {
     }
 
     pub fn annotate(&mut self, upper: bool) -> Did {
-        if self.loading {
+        if self.touches_absent() {
             return Did::Nothing;
         }
         if let Some(cursor) = &self.cursor {
@@ -257,7 +257,7 @@ impl Editor {
 
     /// 本文では列区切りを挿入し、入れ子構造では次のスロットへ移動します。
     pub fn tab(&mut self, back: bool) -> Did {
-        if self.loading {
+        if self.touches_absent() {
             return Did::Nothing;
         }
         if self
@@ -283,7 +283,7 @@ impl Editor {
 
     /// 本文では行を分割し、入れ子構造の編集中なら改行せず構造を抜けます。
     pub fn split_line(&mut self) -> Did {
-        if self.loading {
+        if self.touches_absent() {
             return Did::Nothing;
         }
         if self.leave_structure() {
@@ -299,7 +299,7 @@ impl Editor {
     }
 
     pub fn backspace(&mut self) -> Did {
-        if self.loading {
+        if self.touches_absent() {
             return Did::Nothing;
         }
         if self.cursor.is_some() {
@@ -321,7 +321,7 @@ impl Editor {
     }
 
     pub fn delete_forward(&mut self) -> Did {
-        if self.loading {
+        if self.touches_absent() {
             return Did::Nothing;
         }
         if self.cursor.is_some() {
@@ -343,7 +343,7 @@ impl Editor {
 
     /// ケアトのグリッドは、構造内のものだけを意味し、列によって成長します。
     pub fn grow_matrix(&mut self) -> Did {
-        if self.loading {
+        if self.touches_absent() {
             return Did::Nothing;
         }
         if self.cursor.is_none() {
@@ -363,7 +363,11 @@ impl Editor {
 
     /// カラムの区切り文字よりも多くの文字を入れる置換のために、アイテムと範囲を置換します。
     pub fn replace_range_with(&mut self, from: Pos, to: Pos, with: Vec<Row>) {
-        if self.loading {
+        if self
+            .text
+            .first_absent(from.line)
+            .is_some_and(|absent| absent <= to.line)
+        {
             return;
         }
         self.record(Step::Other);
@@ -462,7 +466,7 @@ impl Editor {
     }
 
     fn map_sels(&mut self, extend: bool, step: impl Fn(&Text, Pos) -> Pos) {
-        self.history.cut();
+        self.recorder.cut();
         self.cursor = None;
         for sel in &mut self.sels {
             // 他のエディタと同様に、Shift を使用せずに選択範囲を折りたたむと、近くの端が維持されます。
@@ -481,13 +485,13 @@ impl Editor {
     }
 
     pub fn set_caret(&mut self, at: Pos) {
-        self.history.cut();
+        self.recorder.cut();
         self.cursor = None;
         self.sels = vec![Sel::caret(self.text.clamp(at))];
     }
 
     pub fn extend_to(&mut self, at: Pos) {
-        self.history.cut();
+        self.recorder.cut();
         self.cursor = None;
         let at = self.text.clamp(at);
         if let Some(sel) = self.sels.last_mut() {
@@ -497,7 +501,7 @@ impl Editor {
     }
 
     pub fn add_caret(&mut self, at: Pos) {
-        self.history.cut();
+        self.recorder.cut();
         self.cursor = None;
         self.sels.push(Sel::caret(self.text.clamp(at)));
         self.merge_sels();
@@ -512,13 +516,13 @@ impl Editor {
             });
             return Did::Moved;
         }
-        self.history.cut();
+        self.recorder.cut();
         self.sels = vec![Sel::range(Pos::default(), self.text.end())];
         Did::Moved
     }
 
     pub fn set_sels(&mut self, sels: Vec<Sel>) {
-        self.history.cut();
+        self.recorder.cut();
         self.cursor = None;
         if sels.is_empty() {
             return;
@@ -542,7 +546,7 @@ impl Editor {
         if self.cursor.is_some() {
             return false;
         }
-        self.history.cut();
+        self.recorder.cut();
         let primary = self.primary();
         if primary.is_caret() {
             let Some(word) = word_at(&self.text, primary.head) else {
@@ -683,26 +687,23 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_loading_document_rejects_edits_until_all_lines_arrive() {
+    fn edits_touching_lines_that_have_not_arrived_do_nothing() {
         use crate::structure::text::SourceLine;
         let mut editor = Editor::default();
         editor.load_pending(3);
-        assert!(editor.is_loading());
         editor.insert_text("x");
         editor.split_line();
         editor.backspace();
-        assert!(!editor.undo());
         assert_eq!(editor.text().line_count(), 3);
         assert_eq!(editor.text().line_len(0), 0);
-        assert!(editor.feed(0, vec![SourceLine::Plain("ab".into())]));
-        assert!(editor.is_loading());
-        assert!(editor.feed(
-            1,
-            vec![SourceLine::Plain("cd".into()), SourceLine::Plain("ef".into())]
-        ));
-        assert!(!editor.is_loading());
+        editor.feed(0, vec![SourceLine::Plain("ab".into())]);
+        // 届いた行は編集できる。まだの行はそのまま。
         editor.set_caret(Pos::new(0, 2));
         editor.insert_text("X");
+        editor.feed(
+            1,
+            vec![SourceLine::Plain("cd".into()), SourceLine::Plain("ef".into())],
+        );
         assert_eq!(plain(&editor), "abX\ncd\nef");
     }
 
@@ -711,11 +712,59 @@ pub(crate) mod tests {
         use crate::structure::text::SourceLine;
         let mut editor = Editor::default();
         editor.load_pending(2);
-        assert!(editor.feed(1, vec![SourceLine::Plain("late".into())]));
+        editor.feed(1, vec![SourceLine::Plain("late".into())]);
         assert_eq!(editor.text().first_absent(0), Some(0));
-        assert!(editor.feed(0, vec![SourceLine::Plain("first".into())]));
+        editor.feed(0, vec![SourceLine::Plain("first".into())]);
         assert_eq!(editor.text().first_absent(0), None);
         assert_eq!(plain(&editor), "first\nlate");
+    }
+
+    /// 履歴の 1 ステップは文書の本体が持つ。ここではグループ番号の付き方
+    /// （入力の結合、1 操作へのまとめ）と、控えの回収を確かめる。
+    #[test]
+    fn typed_characters_share_one_group_and_other_edits_start_new_ones() {
+        let mut editor = editor("ab");
+        editor.set_caret(Pos::new(0, 1));
+        editor.insert_text("X");
+        let first = editor.take_flush().expect("typing changed the text");
+        editor.insert_text("Y");
+        let second = editor.take_flush().expect("typing changed the text");
+        assert_eq!(first.group, second.group);
+        assert_eq!(second.before, "");
+        editor.set_caret(Pos::new(0, 0));
+        editor.insert_text("Z");
+        let third = editor.take_flush().expect("typing changed the text");
+        assert_ne!(second.group, third.group);
+        // 控えは編集直前のキャレット。元に戻すとここへ帰る。
+        assert_eq!(third.before, "0.0-0.0");
+    }
+
+    #[test]
+    fn one_step_keeps_every_edit_in_one_group() {
+        let mut editor = editor("ab");
+        editor.set_caret(Pos::new(0, 2));
+        editor.one_step(|editor| {
+            editor.insert_text("X");
+            editor.split_line();
+            editor.insert_text("Y");
+        });
+        let flush = editor.take_flush().expect("the step changed the text");
+        assert_eq!(flush.changes.len(), 1);
+        editor.insert_text("Z");
+        let next = editor.take_flush().expect("typing changed the text");
+        assert_ne!(flush.group, next.group);
+    }
+
+    #[test]
+    fn restoring_forgets_local_lines_and_puts_the_caret_back() {
+        let mut editor = editor("ab\ncd");
+        editor.set_caret(Pos::new(1, 2));
+        editor.insert_text("X");
+        editor.take_flush();
+        editor.apply_restored("1.2-1.2", 1, 2);
+        assert_eq!(editor.primary().head, Pos::new(1, 0));
+        assert_eq!(editor.text().first_absent(0), Some(1));
+        assert_eq!(editor.take_flush().map(|flush| flush.changes), None);
     }
 
     #[test]
@@ -764,18 +813,18 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn undo_takes_back_a_whole_multi_cursor_edit() {
+    fn a_multi_cursor_edit_is_one_group_of_line_changes() {
         let mut editor = editor("ab\nab");
         editor.set_caret(Pos::new(0, 1));
         editor.add_caret(Pos::new(1, 1));
         editor.insert_text("X");
         editor.insert_text("Y");
         assert_eq!(plain(&editor), "aXYb\naXYb");
-        // 入力は 1 つのステップに結合されるため、1 回元に戻すと両方の文字が消去されます。
-        assert!(editor.undo());
-        assert_eq!(plain(&editor), "ab\nab");
-        assert!(editor.redo());
-        assert_eq!(plain(&editor), "aXYb\naXYb");
+        // 両方のキャレットの編集と続けた入力が、履歴の 1 ステップに入る。
+        let flush = editor.take_flush().expect("typing changed the text");
+        assert_eq!(flush.changes.len(), 2);
+        assert_eq!(flush.changes[0].from, 0);
+        assert_eq!(flush.changes[1].from, 1);
     }
 
     #[test]
@@ -794,14 +843,21 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn enter_splits_and_undo_restores() {
+    fn enter_splits_and_reports_the_line_change() {
         let mut editor = editor("ab");
         editor.set_caret(Pos::new(0, 1));
         editor.split_line();
         assert_eq!(plain(&editor), "a\nb");
         assert_eq!(editor.primary().head, Pos::new(1, 0));
-        assert!(editor.undo());
-        assert_eq!(plain(&editor), "ab");
+        let flush = editor.take_flush().expect("the split changed the text");
+        assert_eq!(
+            flush.changes,
+            vec![crate::structure::text::LineChange {
+                from: 0,
+                removed: 1,
+                inserted: 2
+            }]
+        );
     }
 
     #[test]

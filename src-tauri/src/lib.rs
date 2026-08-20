@@ -174,10 +174,7 @@ fn close_document(state: State<'_, AppState>, handle: u64) {
     state.docs.lock().unwrap().remove(&handle);
 }
 
-#[tauri::command]
-fn write_document(path: String, contents: String) -> Result<(), String> {
-    std::fs::write(&path, contents).map_err(|e| format!("{path} を保存できませんでした: {e}"))
-}
+
 
 /// 設定ファイルが存在する場所: アプリ独自の構成ディレクトリ内の `settings.toml`。
 fn settings_path(app: &tauri::AppHandle) -> Option<PathBuf> {
@@ -218,18 +215,28 @@ struct Draft {
     contents: String,
 }
 
+/// 文書の本体から下書きを書きます。最初の行はドキュメントのパス、続きが本文。
 #[tauri::command]
-fn write_draft(
+fn save_draft(
     app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    handle: u64,
     id: String,
     path: Option<String>,
-    contents: String,
 ) -> Result<(), String> {
     let Some(dir) = drafts_dir(&app) else {
         return Err("下書きの保存先がありません".to_string());
     };
-    let file = format!("{}\n{contents}", path.unwrap_or_default());
-    std::fs::write(dir.join(draft_name(&id)), file)
+    let docs = state.docs.lock().unwrap();
+    let Some(doc) = docs.get(&handle) else {
+        return Err("文書はもう閉じられています".to_string());
+    };
+    let file = std::fs::File::create(dir.join(draft_name(&id)))
+        .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+    let mut out = std::io::BufWriter::new(file);
+    use std::io::Write;
+    writeln!(out, "{}", path.unwrap_or_default())
+        .and_then(|()| doc.write_to(&mut out))
         .map_err(|e| format!("下書きを保存できませんでした: {e}"))
 }
 
@@ -440,13 +447,12 @@ pub fn run() {
             undo_lines,
             save_document,
             close_document,
-            write_document,
             set_dirty,
             frontend_ready,
             confirm_discard,
             read_settings,
             write_settings,
-            write_draft,
+            save_draft,
             remove_draft,
             read_drafts,
             file_size,

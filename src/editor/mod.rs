@@ -10,11 +10,9 @@ pub mod search;
 mod session;
 mod trigger;
 
-pub use commands::{
-    annotate, find_next, insert_node, insert_structure, redo, replace_all, select_all, undo,
-};
+pub use commands::{annotate, find_next, insert_node, insert_structure, replace_all, select_all};
 pub use search::SearchOptions;
 pub use session::{
-    close_pane, document_of, feed_pane, focus_pane, init, load, load_pending, loading, park,
-    redraw_all, restore, set_on_change, set_on_missing, stats, to_document, Parked,
+    apply_restored, close_pane, feed_pane, focus_pane, init, load, load_pending, park, redraw_all,
+    restore, set_on_change, set_on_missing, stats, take_flush, FlushBatch, Parked,
 };

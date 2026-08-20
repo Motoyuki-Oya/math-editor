@@ -1,6 +1,9 @@
 //! 下書き: 画面上にあるもの。アプリケーションが別れを告げるまでに何も失われないように脇に保管されます。
 //!
 //! ドキュメント自体のファイルは、ユーザーが保存するときにのみ書き込まれます。下書きとは、設定の横にあるコピーで、入力が止まった直後に書かれ、何も言うことがなくなるとすぐに削除されます。つまり、ファイルが保存されているか、作業が意図的に破棄されています。起動時に見つかったものは、未保存のタブとして開かれます。
+//!
+//! 書き込み自体は文書の本体（ネイティブ側）が行い、ここは「いつ書くか」だけを
+//! 決めます。
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -11,7 +14,7 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 
 use super::shell::Tab;
-use crate::editor;
+use super::sync;
 use crate::ipc;
 
 /// 下書きが書き込まれるまでに入力を停止する必要がある時間。そのため、下書きにはキーストロークごとに 1 回ではなく、一時停止ごとに 1 回の書き込みがかかります。
@@ -19,22 +22,18 @@ const IDLE_MS: i32 = 1200;
 
 thread_local! {
     /// 最後の書き込み以降に変更されたドキュメント (タブごと)。
-    static PENDING: RefCell<HashMap<usize, (Tab, usize)>> = RefCell::new(HashMap::new());
+    static PENDING: RefCell<HashMap<usize, Tab>> = RefCell::new(HashMap::new());
     /// 書き込みがすでに開始されているかどうか。そのため、バースト入力は変更ごとに 1 回ではなく 1 回のタイマーになります。
     static ARMED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// `editor_pane` のドキュメントに注意してください。
-pub(super) fn touch(tab: Tab, editor_pane: usize) {
+/// タブのドキュメントが変わったことに注意してください。
+pub(super) fn touch(tab: Tab) {
     // 下書きは全文を書き出すので、大きすぎる文書には書かない。
     if tab.large.get_untracked() {
         return;
     }
-    PENDING.with(|pending| {
-        pending
-            .borrow_mut()
-            .insert(tab.id.get_untracked(), (tab, editor_pane))
-    });
+    PENDING.with(|pending| pending.borrow_mut().insert(tab.id.get_untracked(), tab));
     arm();
 }
 
@@ -59,30 +58,16 @@ fn arm() {
 
 /// 前回の書き込み以降に変更されたすべてのドキュメントを書き込みます。
 fn flush() {
-    let pending: Vec<(Tab, usize)> = PENDING.with(|pending| {
+    let pending: Vec<Tab> = PENDING.with(|pending| {
         pending
             .borrow_mut()
             .drain()
-            .map(|(_, waiting)| waiting)
+            .map(|(_, tab)| tab)
             .collect()
     });
-    for (tab, editor_pane) in pending {
-        write(tab, editor_pane);
+    for tab in pending {
+        sync::draft(tab);
     }
-}
-
-/// 一時停止を待たずに、1 つのドキュメントの下書きを今すぐ書き込みます。ドキュメントが画面から出ようとするときに使用されます。
-pub(super) fn write(tab: Tab, editor_pane: usize) {
-    if tab.large.get_untracked() {
-        return;
-    }
-    let Some(contents) = editor::document_of(editor_pane) else {
-        return;
-    };
-    PENDING.with(|pending| pending.borrow_mut().remove(&tab.id.get_untracked()));
-    let id = tab.id.get_untracked();
-    let path = tab.path.get_untracked();
-    spawn_local(async move { ipc::write_draft(id, path.as_deref(), &contents).await });
 }
 
 /// ファイルと一致するドキュメント、または意図的に破棄されたドキュメントには、復元するものがありません。

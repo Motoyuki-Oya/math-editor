@@ -21,13 +21,13 @@ impl Editor {
 
     /// Begin direct editing at the top-level insertion point. No wrapper node is created.
     pub fn start_structure(&mut self) {
-        if self.is_loading() {
+        if self.touches_absent() {
             return;
         }
         let at = self.primary().head;
         self.cursor = Some(Cursor::root(at.col));
         self.transient_structure = None;
-        self.history.cut();
+        self.recorder.cut();
     }
 
     pub fn enter_node(&mut self, at: Pos, from_start: bool) -> bool {
@@ -53,7 +53,7 @@ impl Editor {
         {
             return false;
         }
-        self.history.cut();
+        self.recorder.cut();
         self.sels = vec![Sel::caret(at)];
         self.cursor = Some(cursor.clone());
         true
@@ -64,7 +64,7 @@ impl Editor {
             return false;
         };
         self.transient_structure = None;
-        self.history.cut();
+        self.recorder.cut();
         let col = cursor
             .path
             .first()
@@ -85,7 +85,7 @@ impl Editor {
         };
         let line = self.primary().head.line;
         match kind {
-            Inside::Move | Inside::Extend => self.history.cut(),
+            Inside::Move | Inside::Extend => self.recorder.cut(),
             Inside::Type => self.record(Step::Typing),
             Inside::Change => self.record(Step::Other),
         }
@@ -131,7 +131,7 @@ impl Editor {
     }
 
     pub fn replace_nested(&mut self, at: Pos, cursor: Cursor, with: &str) -> bool {
-        if self.is_loading() {
+        if self.touches_absent() {
             return false;
         }
         if !self.select_nested(at, cursor) {
@@ -152,7 +152,7 @@ impl Editor {
         let Some((node, _)) = cursor.path.first().copied() else {
             return false;
         };
-        self.history.cut();
+        self.recorder.cut();
         let line = self.primary().head.line;
         self.sels = vec![Sel::range(Pos::new(line, node), Pos::new(line, node + 1))];
         true
@@ -176,7 +176,7 @@ impl Editor {
     }
 
     pub fn insert_node(&mut self, node: Node) -> bool {
-        if self.is_loading() {
+        if self.touches_absent() {
             return false;
         }
         self.with_cursor(Inside::Change, |editing| {
@@ -186,7 +186,7 @@ impl Editor {
     }
 
     pub fn insert_nested_row(&mut self, nodes: Row) -> bool {
-        if self.is_loading() {
+        if self.touches_absent() {
             return false;
         }
         self.with_cursor(Inside::Change, |editing| {

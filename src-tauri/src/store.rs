@@ -196,21 +196,23 @@ impl Document {
         )
     }
 
-    /// 文書をそのままディスクへ流す。全文を 1 つの文字列に集めない。
+    /// 文書の行を書き手へ流す。全文を 1 つの文字列に集めない。
+    pub fn write_to<W: Write>(&self, out: &mut W) -> std::io::Result<()> {
+        for (index, _) in self.lines.iter().enumerate() {
+            if index > 0 {
+                out.write_all(b"\n")?;
+            }
+            out.write_all(self.line(index).as_bytes())?;
+        }
+        out.flush()
+    }
+
+    /// 文書をそのままディスクへ流す。
     pub fn save(&self, path: &str) -> Result<(), String> {
         let file = std::fs::File::create(path)
             .map_err(|e| format!("{path} を保存できませんでした: {e}"))?;
-        let mut out = BufWriter::new(file);
-        let write = |out: &mut BufWriter<std::fs::File>| -> std::io::Result<()> {
-            for (index, _) in self.lines.iter().enumerate() {
-                if index > 0 {
-                    out.write_all(b"\n")?;
-                }
-                out.write_all(self.line(index).as_bytes())?;
-            }
-            out.flush()
-        };
-        write(&mut out).map_err(|e| format!("{path} を保存できませんでした: {e}"))
+        self.write_to(&mut BufWriter::new(file))
+            .map_err(|e| format!("{path} を保存できませんでした: {e}"))
     }
 }
 
