@@ -57,4 +57,4 @@ panic = "abort"
 strip = true
 
 [workspace]
-members = ["src-tauri"]
+members = [".", "src-tauri", "gpui"]
