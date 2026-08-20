@@ -30,6 +30,10 @@ pub fn read_line(line: &str) -> SourceLine {
     SourceLine::Parsed(row)
 }
 
+/// 文書全体をファイルの形にします。書き込み自体は文書の本体（ネイティブ側）が
+/// 行うようになったため製品コードからは呼ばれないが、読み書きが往復することの
+/// 検査と、この層が形式の定義であることのために残る。
+#[allow(dead_code)]
 pub fn write(text: &Text) -> String {
     (0..text.line_count())
         .map(|line| match text.raw_line(line) {

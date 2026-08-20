@@ -236,11 +236,6 @@ impl Parked {
         );
     }
 
-    /// 画面の外にある文書の、たまった編集。
-    pub fn take_flush(&mut self) -> Option<FlushBatch> {
-        take_flush_of(&mut self.editor)
-    }
-
     /// 画面の外にある文書も、本体の巻き戻しに合わせます。
     pub fn apply_restored(&mut self, state: &str, touched_from: usize, line_count: usize) {
         self.editor.apply_restored(state, touched_from, line_count);

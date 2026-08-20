@@ -60,10 +60,6 @@ pub fn wrap() -> bool {
     CURRENT.with(|current| current.borrow().wrap)
 }
 
-pub fn history_limit() -> usize {
-    CURRENT.with(|current| current.borrow().history_limit)
-}
-
 /// 「設定」を有効にし、視覚的な設定を画面に表示します。
 pub fn apply(settings: Settings) {
     show(&settings);
