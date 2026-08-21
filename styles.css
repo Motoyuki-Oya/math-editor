@@ -109,8 +109,8 @@ body {
 
 .pal {
   min-width: 32px;
-  font-family: var(--font-math);
-  font-size: 15px;
+  font-family: inherit;
+  font-size: 13px;
 }
 
 .pal-word {

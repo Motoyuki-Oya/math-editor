@@ -145,6 +145,8 @@ pub(super) struct Shell {
     pub(super) searching: RwSignal<bool>,
     /// 設定が画面上に表示されるかどうか。
     pub(super) preferences: RwSignal<bool>,
+    /// 構造パレットが画面上に表示されるかどうか。
+    pub(super) palette: RwSignal<bool>,
     /// カーソルが画面上に表示されると、それを待機する検索バーのフィールド。
     pub(super) find_focus: RwSignal<Option<Field>>,
 }

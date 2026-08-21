@@ -89,7 +89,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
             &item("find", "検索…", Some("CmdOrCtrl+F"))?,
             &item("replace", "置換…", Some("CmdOrCtrl+R"))?,
             &separator()?,
-            &item("insert_structure", "構造を入れる", Some("CmdOrCtrl+M"))?,
+            &item("insert_structure", "構造パレット", Some("CmdOrCtrl+M"))?,
         ],
     )?;
 

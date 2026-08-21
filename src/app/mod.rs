@@ -35,6 +35,7 @@ pub fn App() -> impl IntoView {
         stats: RwSignal::new((0, 1)),
         searching: RwSignal::new(false),
         preferences: RwSignal::new(false),
+        palette: RwSignal::new(false),
         find_focus: RwSignal::new(None),
     };
 
@@ -66,7 +67,9 @@ pub fn App() -> impl IntoView {
 
     view! {
         <div class="app">
-            <Palette/>
+            <Show when=move || shell.palette.get()>
+                <Palette/>
+            </Show>
 
             <Show when=move || shell.searching.get()>
                 <FindBar shell=shell/>
