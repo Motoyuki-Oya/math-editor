@@ -54,6 +54,11 @@ body {
   border-bottom: 1px solid var(--line);
 }
 
+.palette {
+  gap: 4px;
+  padding: 4px 8px;
+}
+
 .pref {
   display: flex;
   align-items: center;
@@ -95,6 +100,10 @@ body {
   align-items: center;
 }
 
+.palette .group {
+  gap: 2px;
+}
+
 .tool,
 .pal {
   border: 1px solid var(--line);
@@ -108,10 +117,10 @@ body {
 }
 
 .pal {
-  min-width: 24px;
-  padding: 2px 6px;
+  min-width: 28px;
+  padding: 3px 7px;
   font-family: inherit;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.2;
 }
 
