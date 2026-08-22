@@ -179,7 +179,8 @@ body {
 
 .tab-name,
 .tab-close,
-.tab-add {
+.tab-add,
+.tab-palette {
   border: none;
   background: none;
   color: var(--fg);
@@ -196,13 +197,15 @@ body {
 }
 
 .tab-close,
-.tab-add {
+.tab-add,
+.tab-palette {
   padding: 5px 8px;
   color: var(--muted);
 }
 
 .tab-close:hover,
-.tab-add:hover {
+.tab-add:hover,
+.tab-palette:hover {
   color: var(--fg);
 }
 

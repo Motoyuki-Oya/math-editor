@@ -110,6 +110,14 @@ fn Tabs(shell: Shell, pane: Pane) -> impl IntoView {
             >
                 "+"
             </button>
+            <button
+                class="tab-palette"
+                title="構造パレット (Ctrl+M)"
+                on:mousedown=hold_focus
+                on:click=move |_| shell.palette.update(|open| *open = !*open)
+            >
+                "∑"
+            </button>
         </div>
     }
 }
