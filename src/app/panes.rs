@@ -56,17 +56,6 @@ pub(super) fn PaneView(shell: Shell, pane: Pane) -> impl IntoView {
 fn Tabs(shell: Shell, pane: Pane) -> impl IntoView {
     view! {
         <div class="tabbar">
-            <button
-                class="tab-open"
-                title="開く (Ctrl+O)"
-                on:mousedown=hold_focus
-                on:click=move |_| {
-                    shell.focus_on(pane);
-                    shell.open();
-                }
-            >
-                "↥"
-            </button>
             {move || {
                 let current = pane.current.get();
                 pane.tabs
