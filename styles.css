@@ -178,6 +178,7 @@ body {
 }
 
 .tab-name,
+.tab-open,
 .tab-close,
 .tab-add {
   border: none;
@@ -195,12 +196,14 @@ body {
   text-overflow: ellipsis;
 }
 
+.tab-open,
 .tab-close,
 .tab-add {
   padding: 5px 8px;
   color: var(--muted);
 }
 
+.tab-open:hover,
 .tab-close:hover,
 .tab-add:hover {
   color: var(--fg);
