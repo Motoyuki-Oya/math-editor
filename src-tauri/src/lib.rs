@@ -367,8 +367,8 @@ fn setup_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> 
                 show_main_window(app);
             }
             "quit" => {
-                if let Some(window) = app.get_webview_window("main") {
-                    if is_dirty(&window) {
+                if is_dirty(app) {
+                    if let Some(window) = app.get_webview_window("main") {
                         show_main_window(app);
                         confirm_discard_on_close(&window);
                         return;
@@ -586,16 +586,15 @@ async fn confirm_discard(app: tauri::AppHandle, message: String) -> bool {
     rx.recv().unwrap_or(false)
 }
 
-fn is_dirty(window: &tauri::Window) -> bool {
-    window
-        .state::<AppState>()
+fn is_dirty(app: &tauri::AppHandle) -> bool {
+    app.state::<AppState>()
         .dirty
         .lock()
         .map(|dirty| *dirty)
         .unwrap_or(false)
 }
 
-fn confirm_discard_on_close(window: &tauri::Window) {
+fn confirm_discard_on_close(window: &tauri::WebviewWindow) {
     let target = window.clone();
     window
         .dialog()
