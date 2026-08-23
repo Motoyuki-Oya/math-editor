@@ -23,6 +23,8 @@ pub struct Settings {
     pub column_gap: f64,
     /// 元に戻す履歴が保持されるステップ数。ファイルのみ。
     pub history_limit: usize,
+    /// グローバルショートカット (Ctrl+Alt+M) でアプリを呼び出せるかどうか。
+    pub global_shortcut: bool,
 }
 
 impl Default for Settings {
@@ -35,6 +37,7 @@ impl Default for Settings {
             line_numbers: false,
             column_gap: 18.0,
             history_limit: 500,
+            global_shortcut: true,
         }
     }
 }
@@ -106,7 +109,7 @@ fn show(settings: &Settings) {
 /// ファイルに保存されている設定を書き込みます。1 行に 1 つの `name = value` で、これは TOML の小さなコーナーです。
 pub fn write(settings: &Settings) -> String {
     format!(
-        "font_size = {}\nfont_family = \"{}\"\ncaret_blink = {}\nwrap = {}\nline_numbers = {}\ncolumn_gap = {}\nhistory_limit = {}\n",
+        "font_size = {}\nfont_family = \"{}\"\ncaret_blink = {}\nwrap = {}\nline_numbers = {}\ncolumn_gap = {}\nhistory_limit = {}\nglobal_shortcut = {}\n",
         settings.font_size,
         settings.font_family.replace('"', ""),
         settings.caret_blink,
@@ -114,6 +117,7 @@ pub fn write(settings: &Settings) -> String {
         settings.line_numbers,
         settings.column_gap,
         settings.history_limit,
+        settings.global_shortcut,
     )
 }
 
@@ -158,6 +162,11 @@ pub fn read(text: &str) -> Settings {
             "history_limit" => {
                 if let Ok(limit) = value.parse() {
                     settings.history_limit = limit;
+                }
+            }
+            "global_shortcut" => {
+                if let Ok(enabled) = value.parse() {
+                    settings.global_shortcut = enabled;
                 }
             }
             _ => {}
