@@ -702,7 +702,10 @@ pub(crate) mod tests {
         editor.insert_text("X");
         editor.feed(
             1,
-            vec![SourceLine::Plain("cd".into()), SourceLine::Plain("ef".into())],
+            vec![
+                SourceLine::Plain("cd".into()),
+                SourceLine::Plain("ef".into()),
+            ],
         );
         assert_eq!(plain(&editor), "abX\ncd\nef");
     }

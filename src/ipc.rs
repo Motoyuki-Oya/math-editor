@@ -133,7 +133,15 @@ pub async fn read_lines(handle: u64, from: usize, count: usize) -> Result<Vec<St
         from: usize,
         count: usize,
     }
-    let value = call("read_lines", Args { handle, from, count }).await?;
+    let value = call(
+        "read_lines",
+        Args {
+            handle,
+            from,
+            count,
+        },
+    )
+    .await?;
     serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
 }
 
@@ -206,7 +214,9 @@ pub async fn save_document(handle: u64, path: &str) -> Result<(), String> {
         handle: u64,
         path: &'a str,
     }
-    call("save_document", Args { handle, path }).await.map(|_| ())
+    call("save_document", Args { handle, path })
+        .await
+        .map(|_| ())
 }
 
 /// 文書の本体から下書きを書きます。

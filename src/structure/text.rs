@@ -235,12 +235,10 @@ impl Text {
         // 重なった入れ替えと今回の入れ替えを覆う窓。窓の中で以前の入れ替えが
         // 入れた行以外は元の文書の行なので、まとめて removed に数える
         // （触っていない行も混ざるが、同じ内容を送り直すだけで害はない）。
-        let start = overlapping
-            .first()
-            .map_or(from, |span| span.from.min(from));
-        let end = overlapping
-            .last()
-            .map_or(from + removed, |span| (span.from + span.inserted).max(from + removed));
+        let start = overlapping.first().map_or(from, |span| span.from.min(from));
+        let end = overlapping.last().map_or(from + removed, |span| {
+            (span.from + span.inserted).max(from + removed)
+        });
         let window = end - start;
         let span_inserted: usize = overlapping.iter().map(|span| span.inserted).sum();
         let span_removed: usize = overlapping.iter().map(|span| span.removed).sum();

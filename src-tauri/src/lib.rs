@@ -88,10 +88,7 @@ struct OpenedDocument {
 /// ストアに置き、frontend は `read_lines` で窓を取り寄せます。開く時点でやるのは
 /// 読み込みと改行の走査だけです。async なのは UI を待たせないため。
 #[tauri::command]
-async fn open_document(
-    state: State<'_, AppState>,
-    path: String,
-) -> Result<OpenedDocument, String> {
+async fn open_document(state: State<'_, AppState>, path: String) -> Result<OpenedDocument, String> {
     let source = std::fs::read_to_string(&path)
         .map_err(|e| format!("{path} を読み込めませんでした: {e}"))?;
     Ok(state.adopt(store::Document::open(source)))
@@ -160,7 +157,11 @@ fn undo_lines(state: State<'_, AppState>, handle: u64, redo: bool) -> Option<Res
 
 /// 文書をストアからディスクへ直接書きます。全文は webview を通りません。
 #[tauri::command]
-async fn save_document(state: State<'_, AppState>, handle: u64, path: String) -> Result<(), String> {
+async fn save_document(
+    state: State<'_, AppState>,
+    handle: u64,
+    path: String,
+) -> Result<(), String> {
     let docs = state.docs.lock().unwrap();
     let Some(doc) = docs.get(&handle) else {
         return Err("文書はもう閉じられています".to_string());
@@ -173,8 +174,6 @@ async fn save_document(state: State<'_, AppState>, handle: u64, path: String) ->
 fn close_document(state: State<'_, AppState>, handle: u64) {
     state.docs.lock().unwrap().remove(&handle);
 }
-
-
 
 /// 設定ファイルが存在する場所: アプリ独自の構成ディレクトリ内の `settings.toml`。
 fn settings_path(app: &tauri::AppHandle) -> Option<PathBuf> {

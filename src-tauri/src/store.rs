@@ -91,7 +91,9 @@ impl Document {
 
     pub fn read(&self, from: usize, count: usize) -> Vec<String> {
         let to = from.saturating_add(count).min(self.lines.len());
-        (from.min(to)..to).map(|i| self.line(i).to_string()).collect()
+        (from.min(to)..to)
+            .map(|i| self.line(i).to_string())
+            .collect()
     }
 
     /// `from..to` の行を `lines` に置き換え、逆操作を履歴に書く。
@@ -251,8 +253,10 @@ mod tests {
     fn steps_in_the_same_group_undo_together() {
         let mut doc = doc(&["a", "b", "c"]);
         // 「すべて置換」のように、複数の置き換えが 1 つのグループで届く。
-        doc.replace(2, 3, vec!["C".into()], 7, "start", "mid").unwrap();
-        doc.replace(0, 1, vec!["A".into()], 7, "ignored", "end").unwrap();
+        doc.replace(2, 3, vec!["C".into()], 7, "start", "mid")
+            .unwrap();
+        doc.replace(0, 1, vec!["A".into()], 7, "ignored", "end")
+            .unwrap();
         assert_eq!(doc.read(0, 10), vec!["A", "b", "C"]);
         let undone = doc.undo().unwrap();
         assert_eq!(doc.read(0, 10), vec!["a", "b", "c"]);
@@ -290,6 +294,29 @@ mod tests {
         let mut doc = doc(&["a"]);
         assert!(doc.replace(0, 2, vec![], 1, "", "").is_err());
         assert!(doc.replace(1, 0, vec![], 1, "", "").is_err());
+    }
+
+    /// 規模の実測: `cargo test -p planetext --release -- --ignored --nocapture`。
+    /// C:\workspace\test-800mb.txt がある環境でだけ動く。
+    #[test]
+    #[ignore]
+    fn scale_check_opening_a_huge_file() {
+        let path = r"C:\workspace\test-800mb.txt";
+        let Ok(source) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let bytes = source.len();
+        let start = std::time::Instant::now();
+        let doc = Document::open(source);
+        println!(
+            "open (scan {} MB, {} lines): {:?}",
+            bytes / 1_000_000,
+            doc.line_count(),
+            start.elapsed()
+        );
+        let start = std::time::Instant::now();
+        let _ = doc.read(doc.line_count() / 2, 100);
+        println!("read 100 lines: {:?}", start.elapsed());
     }
 
     #[test]
