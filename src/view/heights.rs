@@ -110,6 +110,11 @@ struct Tree {
     slots: Vec<f64>,
 }
 
+/// フェンウィック ツリーが担当する範囲の幅。桁を上り下りする歩幅になります。
+fn lowest_one(at: usize) -> usize {
+    1 << at.trailing_zeros()
+}
+
 impl Tree {
     fn new(len: usize) -> Self {
         Self {
@@ -121,7 +126,7 @@ impl Tree {
         let mut at = index + 1;
         while at < self.slots.len() {
             self.slots[at] += delta;
-            at += at & at.wrapping_neg();
+            at += lowest_one(at);
         }
     }
 
@@ -131,7 +136,7 @@ impl Tree {
         let mut total = 0.0;
         while at > 0 {
             total += self.slots[at];
-            at -= at & at.wrapping_neg();
+            at -= lowest_one(at);
         }
         total
     }
