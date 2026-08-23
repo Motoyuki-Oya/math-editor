@@ -105,6 +105,12 @@ impl Viewport {
             true => self.scroll_for(caret_line, text.line_count()),
             false => self.root.scroll_top() as f64,
         };
+        let drawn = self.drawn.borrow().clone();
+        // Ctrl+End など遠い場所へ跳ぶときは、スクロール座標から窓を逆算しない。
+        // 目的の行を含む窓を直接描けば、ブラウザーが巨大な scrollTop を切り詰めても
+        // 目的の行の DOM を実測して正しい位置へ一度で合わせられる。
+        let forced = (follow && !drawn.contains(&caret_line))
+            .then(|| self.window_around(caret_line, text.line_count()));
         // キャレットの行がいま見えているかどうか。追う描画は見えて終わらなければ
         // ならず、追わない描画も少なくとも見失ってはなりません。文書の末尾では
         // 高さを測り直すとスクロールが行の分だけ動けないことがあるからです。
@@ -115,13 +121,21 @@ impl Viewport {
             // 描くものがありません。縮尺つきの読み替えは 1 行ぶんずれることが
             // あるので、等しいかではなく「はみ出したか」で判断する。等しさを
             // 求めると、描き直しとスクロール補正が互いを呼び続けて止まらない。
-            let drawn = self.drawn.borrow().clone();
             if drawn.start <= window.start && window.end <= drawn.end {
                 return;
             }
             keep = (self.scroll_onto(caret_line, scroll) - scroll).abs() <= 0.5;
         }
-        scroll = self.place(text, scroll, draw_line, finish);
+        scroll = self.place(text, scroll, forced.clone(), draw_line, finish);
+        if let Some(_) = forced {
+            // 目的の行はもう DOM にある。その実測位置を見せるだけでよく、
+            // スクロール座標から別の窓を推定し直して目的の行を捨ててはいけない。
+            let settled = self.scroll_onto(caret_line, scroll);
+            if (settled - scroll).abs() > 0.5 {
+                self.root.set_scroll_top(settled as i32);
+            }
+            return;
+        }
         if !keep {
             return;
         }
@@ -134,7 +148,7 @@ impl Viewport {
             if (settled - scroll).abs() <= 0.5 {
                 return;
             }
-            scroll = self.place(text, settled, draw_line, finish);
+            scroll = self.place(text, settled, None, draw_line, finish);
         }
     }
 
@@ -144,6 +158,7 @@ impl Viewport {
         &self,
         text: &Text,
         scroll: f64,
+        forced: Option<Range<usize>>,
         draw_line: &dyn Fn(&Document, usize) -> Option<Element>,
         finish: &dyn Fn(&Range<usize>),
     ) -> f64 {
@@ -151,7 +166,10 @@ impl Viewport {
             return self.root.scroll_top() as f64;
         };
         let scale = self.scale.get();
-        let window = self.widen_for_blocks(text, self.window(scroll, text.line_count()));
+        let window = self.widen_for_blocks(
+            text,
+            forced.unwrap_or_else(|| self.window(scroll, text.line_count())),
+        );
         self.document.set_inner_html("");
         let above = element(&doc, "div", GAP_CLASS);
         // 描く行の上に何があるかの見立て。測ると変わり、描いた行もその差の分だけ
@@ -231,6 +249,13 @@ impl Viewport {
     /// 行の描かれていないときの行き先。置き場所の縮尺で読む。
     fn guessed_scroll(&self, line: usize, view: f64) -> f64 {
         (self.heights.borrow().top_of(line) * self.scale.get() - view / 3.0).max(0.0)
+    }
+
+    /// 遠くへ跳ぶときに目的の行を必ず含める窓。実際に必要なのは数画面ぶんだが、
+    /// 行高の見積もり違いと列揃えの余地を含めて前後1000行を取る。
+    fn window_around(&self, line: usize, count: usize) -> Range<usize> {
+        let radius = 1000;
+        line.saturating_sub(radius)..(line + radius + 1).min(count)
     }
 
     /// 画面が届く行に加えて上下に一画面分。少しのスクロールでは何も描き直さずに
