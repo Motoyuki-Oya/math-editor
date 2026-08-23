@@ -352,7 +352,13 @@ fn setup_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> 
         .item(&quit_item)
         .build()?;
 
-    let mut builder = TrayIconBuilder::with_id("tray")
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .unwrap_or_else(|| tauri::include_image!("icons/32x32.png"));
+
+    let _tray = TrayIconBuilder::with_id("tray")
+        .icon(icon)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .tooltip("Planetext")
@@ -361,6 +367,13 @@ fn setup_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> 
                 show_main_window(app);
             }
             "quit" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    if is_dirty(&window) {
+                        show_main_window(app);
+                        confirm_discard_on_close(&window);
+                        return;
+                    }
+                }
                 app.exit(0);
             }
             _ => {}
@@ -374,13 +387,9 @@ fn setup_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> 
             {
                 show_main_window(tray.app_handle());
             }
-        });
+        })
+        .build(app)?;
 
-    if let Some(icon) = app.default_window_icon() {
-        builder = builder.icon(icon.clone());
-    }
-
-    builder.build(app)?;
     Ok(())
 }
 
