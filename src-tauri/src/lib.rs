@@ -232,11 +232,14 @@ async fn lines_containing(
     to: usize,
     needle: char,
 ) -> Result<Vec<usize>, String> {
+    let started = Instant::now();
     let docs = state.docs.lock().unwrap();
     let Some(doc) = docs.get(&handle) else {
         return Err("文書はもう閉じられています".to_string());
     };
-    Ok(doc.lines_containing(from, to, needle))
+    let found = doc.lines_containing(from, to, needle);
+    store_log("lines_containing", started);
+    Ok(found)
 }
 
 /// 選択された範囲を組み立てて、システムのクリップボードへ置きます。
@@ -252,6 +255,7 @@ async fn copy_range(
     last: Option<String>,
     overrides: Vec<(usize, String)>,
 ) -> Result<(), String> {
+    let started = Instant::now();
     let text = {
         let docs = state.docs.lock().unwrap();
         let Some(doc) = docs.get(&handle) else {
@@ -259,9 +263,21 @@ async fn copy_range(
         };
         doc.assemble(from, first, to, last, &overrides.into_iter().collect())?
     };
-    arboard::Clipboard::new()
+    store_log("copy assemble", started);
+    let started = Instant::now();
+    let result = arboard::Clipboard::new()
         .and_then(|mut clipboard| clipboard.set_text(text))
-        .map_err(|e| format!("コピーできませんでした: {e}"))
+        .map_err(|e| format!("コピーできませんでした: {e}"));
+    store_log("copy clipboard", started);
+    result
+}
+
+/// `PLANETEXT_STORE_LOG` が設定されていれば、文書ストアの重い操作の時間を出す。
+/// どこで時間が消えているかを、実際の操作で測るための窓。
+fn store_log(what: &str, started: Instant) {
+    if std::env::var_os("PLANETEXT_STORE_LOG").is_some() {
+        eprintln!("store: {what}: {} ms", started.elapsed().as_millis());
+    }
 }
 
 /// 設定ファイルが存在する場所: アプリ独自の構成ディレクトリ内の `settings.toml`。
