@@ -183,7 +183,9 @@ struct ScanPage {
     scanned_to: usize,
 }
 
-#[tauri::command]
+// 複数語の引数（case_sensitive）を snake_case のまま受け取る。既定の camelCase
+// 期待のままだと、frontend の引数が見つからず呼び出しが失敗する。
+#[tauri::command(rename_all = "snake_case")]
 #[allow(clippy::too_many_arguments)]
 fn search_lines(
     state: State<'_, AppState>,

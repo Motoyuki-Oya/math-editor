@@ -152,6 +152,8 @@ pub struct Text {
     lines: Vec<Rc<Line>>,
     /// まだ回収されていない行の入れ替え。互いに重ならず、今の行番号の昇順。
     changes: Vec<LineChange>,
+    /// まだ届いていない行の数。残っているかを行を数えずに答えるための控え。
+    absent: usize,
 }
 
 /// 行の中身が同じなら同じ文書。入れ替えの控えは持ち方の話で、意味ではない。
@@ -166,6 +168,7 @@ impl Default for Text {
         Self {
             lines: vec![Rc::new(Line::Rows(Row::new()))],
             changes: Vec::new(),
+            absent: 0,
         }
     }
 }
@@ -194,7 +197,13 @@ impl Text {
                 })
                 .collect(),
             changes: Vec::new(),
+            absent: 0,
         }
+    }
+
+    /// まだ届いていない行の数。残っているかを行を数えずに答える。
+    pub fn absent_lines(&self) -> usize {
+        self.absent
     }
 
     /// まだ回収されていない行の入れ替えを渡し、控えを空にする。
@@ -263,9 +272,11 @@ impl Text {
 
     /// 行数だけが分かっている文書。行の中身は [`Text::fill_line`] で後から届く。
     pub fn pending(line_count: usize) -> Self {
+        let line_count = line_count.max(1);
         Self {
-            lines: vec![Rc::new(Line::Absent); line_count.max(1)],
+            lines: vec![Rc::new(Line::Absent); line_count],
             changes: Vec::new(),
+            absent: line_count,
         }
     }
 
@@ -276,6 +287,11 @@ impl Text {
         self.lines.truncate(from.min(line_count));
         self.lines.resize(line_count, Rc::new(Line::Absent));
         self.changes.clear();
+        self.absent = self
+            .lines
+            .iter()
+            .filter(|line| matches!(line.as_ref(), Line::Absent))
+            .count();
     }
 
     /// まだ届いていない行へ中身を入れる。既に届いた行はそのまま。
@@ -290,6 +306,7 @@ impl Text {
             SourceLine::Plain(source) => Line::raw(source),
             SourceLine::Parsed(row) => Line::Rows(row),
         });
+        self.absent -= 1;
     }
 
     /// `from` 以降で最初のまだ届いていない行。読み込みの続きがどこかを答える。
@@ -310,7 +327,15 @@ impl Text {
             return None;
         }
         self.record(line, 1, 1);
+        self.count_filled(line);
         Some(Rc::make_mut(&mut self.lines[line]).row_mut())
+    }
+
+    /// 行が編集で [`Row`] に変わるとき、まだ届いていなかった行なら数え直す。
+    fn count_filled(&mut self, line: usize) {
+        if matches!(self.lines[line].as_ref(), Line::Absent) {
+            self.absent -= 1;
+        }
     }
 
     pub fn line_len(&self, line: usize) -> usize {
@@ -353,16 +378,27 @@ impl Text {
         // 出し入れが、素の行を展開せずに済むように。
         if from.col == 0 && to.col == 0 {
             self.record(from.line, to.line - from.line, 0);
-            self.lines.drain(from.line..to.line);
+            self.drain_counting(from.line, to.line);
             return from;
         }
         self.record(from.line, to.line - from.line + 1, 1);
         let tail = self.line(to.line)[to.col..].to_vec();
+        self.count_filled(from.line);
         let first = Rc::make_mut(&mut self.lines[from.line]).row_mut();
         first.truncate(from.col);
         first.extend(tail);
-        self.lines.drain(from.line + 1..=to.line);
+        self.drain_counting(from.line + 1, to.line + 1);
         from
+    }
+
+    /// 行を取り除きつつ、届いていなかった行の数を合わせる。
+    fn drain_counting(&mut self, from: usize, to: usize) {
+        let absent = self
+            .lines
+            .drain(from..to)
+            .filter(|line| matches!(line.as_ref(), Line::Absent))
+            .count();
+        self.absent -= absent;
     }
 
     pub fn insert(&mut self, at: Pos, mut what: Vec<Row>) -> Pos {
@@ -371,6 +407,7 @@ impl Text {
             return at;
         }
         self.record(at.line, 1, what.len());
+        self.count_filled(at.line);
         let first_line = Rc::make_mut(&mut self.lines[at.line]).row_mut();
         let tail: Row = first_line.split_off(at.col);
         if what.len() == 1 {
@@ -568,6 +605,20 @@ mod tests {
                 inserted: 0
             }]
         );
+    }
+
+    #[test]
+    fn the_absent_count_follows_fills_edits_and_removals() {
+        let mut text = Text::pending(4);
+        assert_eq!(text.absent_lines(), 4);
+        text.fill_line(0, SourceLine::Plain("a".into()));
+        text.fill_line(0, SourceLine::Plain("again".into()));
+        assert_eq!(text.absent_lines(), 3);
+        // 行を丸ごと消すと、届いていなかった行も数から消える。
+        text.remove(Pos::new(1, 0), Pos::new(3, 0));
+        assert_eq!(text.absent_lines(), 1);
+        text.reset_from(0, 5);
+        assert_eq!(text.absent_lines(), 5);
     }
 
     #[test]

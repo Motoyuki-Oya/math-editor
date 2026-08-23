@@ -115,6 +115,11 @@ impl Editor {
     /// 選択のいずれかが、まだ届いていない行に触れているか。届く前の行は
     /// 空に見えているだけなので、そこへの編集は中身を黙って壊してしまう。
     fn touches_absent(&self) -> bool {
+        // 全部届いた文書では行を見に行かない。キー入力のたびに全行を
+        // 走査すると、大きい文書の入力が重くなる。
+        if self.text.absent_lines() == 0 {
+            return false;
+        }
         self.sels.iter().any(|sel| {
             self.text
                 .first_absent(sel.start().line)

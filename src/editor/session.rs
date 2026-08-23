@@ -396,7 +396,5 @@ pub fn stats() -> (usize, usize) {
 /// 入力を受けるペインの文書が手元に全部あるか。検索や置換が文書の本体の
 /// 走査を要るかの見分け。
 pub fn fully_resident() -> bool {
-    session().is_some_and(|session| {
-        session.borrow().editor.text().first_absent(0).is_none()
-    })
+    session().is_some_and(|session| session.borrow().editor.text().absent_lines() == 0)
 }

@@ -293,8 +293,13 @@ impl View {
 
     fn selection_rects(&self, sel: Sel) -> Vec<Box2> {
         let (start, end) = (sel.start(), sel.end());
+        // ページに出ている行しか描けないので、描いた窓と重なる行だけを見る。
+        // 全選択で文書全体を回ると、それだけで画面が止まる。
+        let drawn = self.viewport.drawn();
+        let first = start.line.max(drawn.start);
+        let last = end.line.min(drawn.end.saturating_sub(1));
         let mut rects = Vec::new();
-        for line in start.line..=end.line {
+        for line in first..=last {
             let from = if line == start.line { start.col } else { 0 };
             let to = (line == end.line).then_some(end.col);
             rects.extend(self.span_in_row(line, &[], from, to));
