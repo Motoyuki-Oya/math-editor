@@ -19,10 +19,6 @@
         "height": 720
       }
     ],
-    "trayIcon": {
-      "iconPath": "icons/icon.ico",
-      "tooltip": "Planetext"
-    },
     "security": {
       "csp": null
     }
