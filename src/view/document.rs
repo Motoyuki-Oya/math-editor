@@ -82,6 +82,11 @@ impl View {
         self.viewport.drawn()
     }
 
+    /// 窓の中の行の中身が変わった（届いた）ので、次の描き直しに必ず描かせます。
+    pub fn invalidate(&self) {
+        self.viewport.invalidate();
+    }
+
     /// 変更後に描画し、キャレットの行をページ内に移動します。
     pub fn draw(&self, text: &Text, sels: &[Sel], caret: &Caret<'_>, focused: bool) {
         self.paint(text, sels, caret, focused, true);

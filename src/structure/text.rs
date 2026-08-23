@@ -317,6 +317,14 @@ impl Text {
         (from..self.lines.len()).find(|&i| matches!(self.lines[i].as_ref(), Line::Absent))
     }
 
+    /// この行がまだ届いていないか。行ごとに尋ねる側はこちらを使う。
+    /// `first_absent` を行ごとに呼ぶと、取得済みの連なりの長さの二乗で歩く。
+    pub fn is_absent(&self, line: usize) -> bool {
+        self.lines
+            .get(line)
+            .is_some_and(|l| matches!(l.as_ref(), Line::Absent))
+    }
+
     pub fn line_count(&self) -> usize {
         self.lines.len()
     }

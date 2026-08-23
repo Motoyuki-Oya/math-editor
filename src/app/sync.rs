@@ -51,6 +51,9 @@ pub(super) fn install(shell: Shell) {
     editor::set_on_missing(Rc::new(move |pane, range| fetch(shell, pane, range)));
     editor::set_on_far_copy(Rc::new(move |pane, copy| {
         if let Some(tab) = shell.tab_of(pane) {
+            // 大きな選択の組み立てとクリップボードへの書き込みは時間がかかる。
+            // 固まったと思われないように、始めたことを見せる。
+            shell.status.set("コピーしています…".into());
             enqueue(tab, Task::Copy(copy));
         }
     }));

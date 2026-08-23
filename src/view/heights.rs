@@ -7,12 +7,21 @@
 /// 何も測定される前に価値があるために行が取られます。
 const GUESS: f64 = 20.0;
 
+/// 未測定の行の見積もりを凍結するまでに測る行数。凍結が遅いと、跳び先の計算に
+/// 使った見積もりと、跳んだ後の読み替えに使う見積もりが食い違い、狙った行から
+/// 離れた場所に着く。最初の窓を測ったらすぐ固定する。
+const SETTLE: f64 = 32.0;
+
 pub(super) struct Heights {
     /// 各行の測定された高さ。 '0.0' は一度も描かれていない線を表します。
     each: Vec<f64>,
     /// 「each」のプレフィックスの合計と、測定される行数。
     sum: Tree,
     seen: Tree,
+    /// 凍結された見積もり。測るたびに平均が動くと、その微差 × 未測定の行数の
+    /// ぶんだけ場所取りが伸び縮みし、スクロールが測定のたびに流れてしまう。
+    /// 十分に測ったら見積もりを固定して、置き場所を安定させる。
+    settled: std::cell::Cell<Option<f64>>,
 }
 
 impl Heights {
@@ -21,6 +30,7 @@ impl Heights {
             each: Vec::new(),
             sum: Tree::new(0),
             seen: Tree::new(0),
+            settled: std::cell::Cell::new(None),
         }
     }
 
@@ -50,11 +60,18 @@ impl Heights {
 
     /// 測定されていない線の価値は、測定された線の平均値とみなされるため、長い線の文書は短い線として推測されません。
     fn unit(&self) -> f64 {
+        if let Some(settled) = self.settled.get() {
+            return settled;
+        }
         let seen = self.seen.total();
         if seen <= 0.0 {
             return GUESS;
         }
-        self.sum.total() / seen
+        let unit = self.sum.total() / seen;
+        if seen >= SETTLE {
+            self.settled.set(Some(unit));
+        }
+        unit
     }
 
     /// 最初の「行」の行を合わせた高さ。
@@ -96,6 +113,8 @@ impl Heights {
     fn rebuild(&mut self) {
         self.sum = Tree::new(self.each.len());
         self.seen = Tree::new(self.each.len());
+        // 行数が変わった（別の文書か大きな編集）ので、見積もりも取り直す。
+        self.settled.set(None);
         for (line, height) in self.each.iter().enumerate() {
             if *height > 0.0 {
                 self.sum.add(line, *height);

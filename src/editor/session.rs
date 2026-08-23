@@ -308,13 +308,25 @@ pub fn feed_pane(pane: usize, from: usize, lines: &[String]) {
         lines.iter().map(|line| document::read_line(line)).collect(),
     );
     // 描き直すのは届いた行が画面に見えるときだけ。見えない行のために毎回
-    // 描き直すと、取り寄せより描画が高くつく。
-    let visible = {
-        let drawn = session.borrow().view.drawn();
-        from < drawn.end && from + lines.len() > drawn.start
+    // 描き直すと、取り寄せより描画が高くつく。描き直しはユーザーの置いた
+    // スクロールを尊重する。届いた行のためにキャレットへ跳んではいけない。
+    let (visible, follows_caret) = {
+        let borrowed = session.borrow();
+        let drawn = borrowed.view.drawn();
+        (
+            from < drawn.end && from + lines.len() > drawn.start,
+            drawn.contains(&borrowed.editor.primary().head.line),
+        )
     };
     if visible {
-        redraw(&session);
+        session.borrow().view.invalidate();
+        if follows_caret {
+            // Ctrl+End など、目的の行の中身が届いた。目的行を含む窓を直接
+            // 描き直してそこへ着地する。スクロール座標から窓を推定し直さない。
+            redraw(&session);
+        } else {
+            scrolled(&session);
+        }
     }
 }
 

@@ -204,7 +204,7 @@ pub async fn undo_lines(handle: u64, redo: bool) -> Option<RestoredLines> {
         redo: bool,
     }
     let value = call("undo_lines", Args { handle, redo }).await.ok()?;
-    serde_wasm_bindgen::from_value(value).ok()
+    serde_wasm_bindgen::from_value::<Option<RestoredLines>>(value).ok()?
 }
 
 /// 文書の本体からディスクへ直接保存します。全文は webview を通りません。
