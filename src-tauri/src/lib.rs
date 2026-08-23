@@ -175,6 +175,48 @@ fn close_document(state: State<'_, AppState>, handle: u64) {
     state.docs.lock().unwrap().remove(&handle);
 }
 
+/// 範囲内で `needle` を含む行。frontend が読み替えの必要な行を探すのに使います。
+/// 何の文字に意味があるか（保存形式）はこちらでは知りません。
+#[tauri::command]
+fn lines_containing(
+    state: State<'_, AppState>,
+    handle: u64,
+    from: usize,
+    to: usize,
+    needle: char,
+) -> Result<Vec<usize>, String> {
+    let docs = state.docs.lock().unwrap();
+    let Some(doc) = docs.get(&handle) else {
+        return Err("文書はもう閉じられています".to_string());
+    };
+    Ok(doc.lines_containing(from, to, needle))
+}
+
+/// 選択された範囲を組み立てて、システムのクリップボードへ置きます。
+/// 全文が webview を通らないので、大きな選択のコピーも一息で済みます。
+/// 端の行の切り出しと、読み替えの必要な行は frontend が渡してきます。
+#[tauri::command]
+fn copy_range(
+    state: State<'_, AppState>,
+    handle: u64,
+    from: usize,
+    first: Option<String>,
+    to: usize,
+    last: Option<String>,
+    overrides: Vec<(usize, String)>,
+) -> Result<(), String> {
+    let text = {
+        let docs = state.docs.lock().unwrap();
+        let Some(doc) = docs.get(&handle) else {
+            return Err("文書はもう閉じられています".to_string());
+        };
+        doc.assemble(from, first, to, last, &overrides.into_iter().collect())?
+    };
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.set_text(text))
+        .map_err(|e| format!("コピーできませんでした: {e}"))
+}
+
 /// 設定ファイルが存在する場所: アプリ独自の構成ディレクトリ内の `settings.toml`。
 fn settings_path(app: &tauri::AppHandle) -> Option<PathBuf> {
     let dir = app.path().app_config_dir().ok()?;
@@ -446,6 +488,8 @@ pub fn run() {
             undo_lines,
             save_document,
             close_document,
+            lines_containing,
+            copy_range,
             set_dirty,
             frontend_ready,
             confirm_discard,

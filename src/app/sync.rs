@@ -26,6 +26,7 @@ enum Task {
     Undo { redo: bool },
     Save { path: String },
     Draft,
+    Copy(editor::FarCopy),
 }
 
 thread_local! {
@@ -39,6 +40,11 @@ thread_local! {
 pub(super) fn install(shell: Shell) {
     SHELL.set(Some(shell));
     editor::set_on_missing(Rc::new(move |pane, range| fetch(shell, pane, range)));
+    editor::set_on_far_copy(Rc::new(move |pane, copy| {
+        if let Some(tab) = shell.tab_of(pane) {
+            enqueue(tab, Task::Copy(copy));
+        }
+    }));
 }
 
 /// 画面に入ったのにまだ無い行を取り寄せる。並んでいる取り寄せがあれば合流する。
@@ -191,8 +197,48 @@ async fn execute(tab: Tab, task: Task) -> bool {
             let path = tab.path.get_untracked();
             ipc::save_draft(handle, id, path.as_deref()).await;
         }
+        Task::Copy(copy) => match assemble_copy(handle, copy).await {
+            Ok(()) => shell.status.set("コピーしました".into()),
+            Err(error) => shell.status.set(error),
+        },
     }
     true
+}
+
+/// まだ届いていない行を含む選択のコピー。記法の解釈を要する行だけを取り寄せて
+/// 読み下し、組み立てとクリップボードへの書き込みは本体が行う。
+async fn assemble_copy(handle: u64, copy: editor::FarCopy) -> Result<(), String> {
+    use crate::format::document;
+    use crate::structure::plain;
+    use crate::structure::text::SourceLine;
+    let mut overrides = copy.overrides;
+    let notation =
+        ipc::lines_containing(handle, copy.from_line, copy.to_line, document::NOTATION_MARK)
+            .await?;
+    for line in notation {
+        if (line == copy.from_line && copy.first.is_some())
+            || (line == copy.to_line && copy.last.is_some())
+            || overrides.iter().any(|(l, _)| *l == line)
+        {
+            continue;
+        }
+        let text = ipc::read_lines(handle, line, 1).await?;
+        let Some(text) = text.first() else { continue };
+        let plain = match document::read_line(text) {
+            SourceLine::Parsed(row) => plain::row(&row),
+            SourceLine::Plain(text) => text,
+        };
+        overrides.push((line, plain));
+    }
+    ipc::copy_range(
+        handle,
+        copy.from_line,
+        copy.first.as_deref(),
+        copy.to_line,
+        copy.last.as_deref(),
+        &overrides,
+    )
+    .await
 }
 
 /// タブの文書の取っ手。新しいタブでは作成が届くまで少し待つ。

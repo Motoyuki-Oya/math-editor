@@ -156,6 +156,12 @@ pub fn install(session: &Rc<RefCell<Session>>) {
 }
 
 fn copy_selection(session: &Rc<RefCell<Session>>, event: &web_sys::ClipboardEvent, remove: bool) {
+    // まだ届いていない行を含む選択は、文書の本体が組み立ててクリップボードへ
+    // 置く。届いていない行は編集できないので、切り取りでも削除は起きない。
+    if commands::request_far_copy(session) {
+        event.prevent_default();
+        return;
+    }
     // コピーするものがあるかどうかは、読み取られるテキストについてではなく、選択内容についての質問です。空の構造は何も読み取られません。
     let Some(text) = commands::selected_text(session) else {
         return;

@@ -219,6 +219,66 @@ pub async fn save_document(handle: u64, path: &str) -> Result<(), String> {
         .map(|_| ())
 }
 
+/// 範囲内で `needle` を含む行の番号。読み替えの必要な行を探すのに使います。
+pub async fn lines_containing(
+    handle: u64,
+    from: usize,
+    to: usize,
+    needle: char,
+) -> Result<Vec<usize>, String> {
+    #[derive(Serialize)]
+    struct Args {
+        handle: u64,
+        from: usize,
+        to: usize,
+        needle: char,
+    }
+    let value = call(
+        "lines_containing",
+        Args {
+            handle,
+            from,
+            to,
+            needle,
+        },
+    )
+    .await?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
+}
+
+/// 選択された範囲を本体で組み立てて、システムのクリップボードへ置きます。
+pub async fn copy_range(
+    handle: u64,
+    from: usize,
+    first: Option<&str>,
+    to: usize,
+    last: Option<&str>,
+    overrides: &[(usize, String)],
+) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        handle: u64,
+        from: usize,
+        first: Option<&'a str>,
+        to: usize,
+        last: Option<&'a str>,
+        overrides: &'a [(usize, String)],
+    }
+    call(
+        "copy_range",
+        Args {
+            handle,
+            from,
+            first,
+            to,
+            last,
+            overrides,
+        },
+    )
+    .await
+    .map(|_| ())
+}
+
 /// 文書の本体から下書きを書きます。
 pub async fn save_draft(handle: u64, id: usize, path: Option<&str>) {
     #[derive(Serialize)]

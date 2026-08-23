@@ -198,6 +198,52 @@ impl Document {
         )
     }
 
+    /// `from..=to` の行のうち `needle` を含むもの。
+    pub fn lines_containing(&self, from: usize, to: usize, needle: char) -> Vec<usize> {
+        let to = to.min(self.lines.len().saturating_sub(1));
+        (from.min(to)..=to)
+            .filter(|&i| self.line(i).contains(needle))
+            .collect()
+    }
+
+    /// 選択された範囲をひとつなぎのテキストにする。`first` / `last` は端の行の
+    /// 切り出し（`None` なら行を丸ごと）。`overrides` の行は差し替えて使う。
+    pub fn assemble(
+        &self,
+        from: usize,
+        first: Option<String>,
+        to: usize,
+        last: Option<String>,
+        overrides: &std::collections::HashMap<usize, String>,
+    ) -> Result<String, String> {
+        if from > to || to >= self.lines.len() {
+            return Err("コピーの範囲が文書の外です".to_string());
+        }
+        let piece = |i: usize| -> &str {
+            match overrides.get(&i) {
+                Some(text) => text,
+                None => self.line(i),
+            }
+        };
+        let mut out = String::new();
+        match &first {
+            Some(text) => out.push_str(text),
+            None => out.push_str(piece(from)),
+        }
+        for i in from + 1..to {
+            out.push('\n');
+            out.push_str(piece(i));
+        }
+        if to > from {
+            out.push('\n');
+            match &last {
+                Some(text) => out.push_str(text),
+                None => out.push_str(piece(to)),
+            }
+        }
+        Ok(out)
+    }
+
     /// 文書の行を書き手へ流す。全文を 1 つの文字列に集めない。
     pub fn write_to<W: Write>(&self, out: &mut W) -> std::io::Result<()> {
         for (index, _) in self.lines.iter().enumerate() {
@@ -294,6 +340,29 @@ mod tests {
         let mut doc = doc(&["a"]);
         assert!(doc.replace(0, 2, vec![], 1, "", "").is_err());
         assert!(doc.replace(1, 0, vec![], 1, "", "").is_err());
+    }
+
+    #[test]
+    fn assembling_a_range_uses_edges_and_overrides() {
+        let doc = doc(&["aa", "bb", "cc", "dd"]);
+        let overrides = std::collections::HashMap::from([(2usize, "CC".to_string())]);
+        assert_eq!(
+            doc.assemble(0, Some("a".into()), 3, Some("d".into()), &overrides)
+                .unwrap(),
+            "a\nbb\nCC\nd"
+        );
+        assert_eq!(
+            doc.assemble(1, None, 1, None, &Default::default()).unwrap(),
+            "bb"
+        );
+        assert!(doc.assemble(0, None, 4, None, &Default::default()).is_err());
+    }
+
+    #[test]
+    fn finding_lines_that_contain_a_character() {
+        let doc = doc(&["aa", "a$b", "cc", "$"]);
+        assert_eq!(doc.lines_containing(0, 3, '$'), vec![1, 3]);
+        assert_eq!(doc.lines_containing(0, 99, '$'), vec![1, 3]);
     }
 
     /// 規模の実測: `cargo test -p planetext --release -- --ignored --nocapture`。

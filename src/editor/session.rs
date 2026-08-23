@@ -132,6 +132,24 @@ pub fn set_on_missing(callback: OnMissing) {
     ON_MISSING.with(|slot| *slot.borrow_mut() = Some(callback));
 }
 
+/// まだ届いていない行を含む選択のコピーを、文書の本体を知るアプリへ頼みます。
+type OnFarCopy = Rc<dyn Fn(usize, super::commands::FarCopy)>;
+
+thread_local! {
+    static ON_FAR_COPY: RefCell<Option<OnFarCopy>> = const { RefCell::new(None) };
+}
+
+pub fn set_on_far_copy(callback: OnFarCopy) {
+    ON_FAR_COPY.with(|slot| *slot.borrow_mut() = Some(callback));
+}
+
+pub(super) fn request_far_copy(pane: usize, copy: super::commands::FarCopy) {
+    let callback = ON_FAR_COPY.with(|slot| slot.borrow().clone());
+    if let Some(callback) = callback {
+        callback(pane, copy);
+    }
+}
+
 /// 描いた窓の中にまだ届いていない行があれば、その範囲を要求します。
 fn request_missing(session: &Rc<RefCell<Session>>) {
     let (pane, range) = {
