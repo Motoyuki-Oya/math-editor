@@ -24,6 +24,17 @@ const HISTORY_LIMIT: usize = 1000;
 /// ファイルを読むときのひとかたまり。
 const CHUNK: usize = 1 << 20;
 
+/// チャンク内の改行を数え、STRIDE 行ごとの行頭バイト位置を `marks` へ足す。
+/// `line` は通し行数、`offset` はチャンク先頭のファイル内バイト位置。
+fn index_chunk(chunk: &[u8], offset: u64, line: &mut usize, marks: &mut Vec<u64>) {
+    for at in memchr::memchr_iter(b'\n', chunk) {
+        *line += 1;
+        if *line % STRIDE == 0 {
+            marks.push(offset + at as u64 + 1);
+        }
+    }
+}
+
 /// 走査スレッドが更新する間引き索引と行数。
 pub struct ScanIndex {
     state: Mutex<ScanState>,
@@ -95,12 +106,7 @@ impl BackgroundScan {
                 return Ok(Some(index.lines));
             }
             let mut marks = Vec::new();
-            for at in memchr::memchr_iter(b'\n', chunk) {
-                self.line += 1;
-                if self.line % STRIDE == 0 {
-                    marks.push(self.offset + at as u64 + 1);
-                }
-            }
+            index_chunk(chunk, self.offset, &mut self.line, &mut marks);
             if !valid_utf8(&mut self.carry, chunk) {
                 let error = format!("{} は UTF-8 ではありません", self.path.display());
                 self.index.state.lock().unwrap().broken = Some(error.clone());
@@ -145,12 +151,7 @@ impl Source {
             let chunk = reader
                 .fill_buf()
                 .map_err(|e| format!("{} を読めませんでした: {e}", path.display()))?;
-            for at in memchr::memchr_iter(b'\n', chunk) {
-                line += 1;
-                if line % STRIDE == 0 {
-                    marks.push(offset + at as u64 + 1);
-                }
-            }
+            index_chunk(chunk, offset, &mut line, &mut marks);
             if !valid_utf8(&mut carry, chunk) {
                 return Err(format!("{} は UTF-8 ではありません", path.display()));
             }

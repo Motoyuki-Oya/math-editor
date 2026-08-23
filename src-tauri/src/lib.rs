@@ -19,6 +19,19 @@ struct AppState {
 }
 
 impl AppState {
+    /// 取っ手の文書へロックの中で触る。閉じられた文書は一律に断る。
+    fn with_doc<T>(
+        &self,
+        handle: u64,
+        f: impl FnOnce(&mut store::Document) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut docs = self.docs.lock().unwrap();
+        let doc = docs
+            .get_mut(&handle)
+            .ok_or_else(|| "文書はもう閉じられています".to_string())?;
+        f(doc)
+    }
+
     fn adopt(&self, doc: store::Document) -> OpenedDocument {
         let opened = OpenedDocument {
             handle: {
@@ -102,23 +115,16 @@ async fn open_document(state: State<'_, AppState>, path: String) -> Result<Opene
 
 /// 走査の完了を待ち、文書の行数を確定させる。
 async fn wait_scanned(state: &State<'_, AppState>, handle: u64) -> Result<(), String> {
-    let index = {
-        let docs = state.docs.lock().unwrap();
-        let Some(doc) = docs.get(&handle) else {
-            return Err("文書はもう閉じられています".to_string());
-        };
-        doc.scan_index()
-    };
+    let index = state.with_doc(handle, |doc| Ok(doc.scan_index()))?;
     if let Some(index) = index {
         while index.status()?.is_none() {
             tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         }
     }
-    let mut docs = state.docs.lock().unwrap();
-    if let Some(doc) = docs.get_mut(&handle) {
+    state.with_doc(handle, |doc| {
         doc.confirm_scan();
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// 走査の完了を待ってから確定した行数を返す。frontend は開いた直後に
@@ -126,11 +132,7 @@ async fn wait_scanned(state: &State<'_, AppState>, handle: u64) -> Result<(), St
 #[tauri::command]
 async fn finish_document(state: State<'_, AppState>, handle: u64) -> Result<usize, String> {
     wait_scanned(&state, handle).await?;
-    let docs = state.docs.lock().unwrap();
-    let Some(doc) = docs.get(&handle) else {
-        return Err("文書はもう閉じられています".to_string());
-    };
-    Ok(doc.line_count())
+    state.with_doc(handle, |doc| Ok(doc.line_count()))
 }
 
 /// 新しい空の文書をストアに作ります。すべての文書の本体がネイティブ側にあります。
@@ -148,11 +150,7 @@ async fn read_lines(
     from: usize,
     count: usize,
 ) -> Result<Vec<String>, String> {
-    let mut docs = state.docs.lock().unwrap();
-    let Some(doc) = docs.get_mut(&handle) else {
-        return Err("文書はもう閉じられています".to_string());
-    };
-    doc.read(from, count)
+    state.with_doc(handle, |doc| doc.read(from, count))
 }
 
 /// 編集の到着: `from..to` の行を `lines` へ置き換えます。同じ `group` が続く間は
@@ -168,11 +166,7 @@ async fn replace_lines(
     before: String,
     after: String,
 ) -> Result<usize, String> {
-    let mut docs = state.docs.lock().unwrap();
-    let Some(doc) = docs.get_mut(&handle) else {
-        return Err("文書はもう閉じられています".to_string());
-    };
-    doc.replace(from, to, lines, group, &before, &after)
+    state.with_doc(handle, |doc| doc.replace(from, to, lines, group, &before, &after))
 }
 
 /// 元に戻す・やり直すの結果。`state` は frontend が預けた控えそのもの。
@@ -189,17 +183,19 @@ async fn undo_lines(
     handle: u64,
     redo: bool,
 ) -> Result<Option<RestoredLines>, String> {
-    let mut docs = state.docs.lock().unwrap();
-    let Some(doc) = docs.get_mut(&handle) else {
+    // 閉じられた文書の元に戻すは「何もない」であってエラーではない。
+    if !state.docs.lock().unwrap().contains_key(&handle) {
         return Ok(None);
-    };
-    Ok(
-        (if redo { doc.redo() } else { doc.undo() })?.map(|restored| RestoredLines {
-            state: restored.state,
-            touched_from: restored.touched_from,
-            line_count: restored.line_count,
-        }),
-    )
+    }
+    state.with_doc(handle, |doc| {
+        Ok(
+            (if redo { doc.redo() } else { doc.undo() })?.map(|restored| RestoredLines {
+                state: restored.state,
+                touched_from: restored.touched_from,
+                line_count: restored.line_count,
+            }),
+        )
+    })
 }
 
 /// 文書をストアからディスクへ直接書きます。全文は webview を通りません。
@@ -209,11 +205,7 @@ async fn save_document(
     handle: u64,
     path: String,
 ) -> Result<(), String> {
-    let mut docs = state.docs.lock().unwrap();
-    let Some(doc) = docs.get_mut(&handle) else {
-        return Err("文書はもう閉じられています".to_string());
-    };
-    doc.save(&path)
+    state.with_doc(handle, |doc| doc.save(&path))
 }
 
 /// 閉じられたタブの文書を手放します。
@@ -253,11 +245,8 @@ async fn search_lines(
         .case_insensitive(!case_sensitive)
         .build()
         .map_err(|e| format!("正規表現を読めませんでした: {e}"))?;
-    let mut docs = state.docs.lock().unwrap();
-    let Some(doc) = docs.get_mut(&handle) else {
-        return Err("文書はもう閉じられています".to_string());
-    };
-    let (hits, scanned_to) = doc.scan(&pattern, needle, from, count, 64)?;
+    let (hits, scanned_to) =
+        state.with_doc(handle, |doc| doc.scan(&pattern, needle, from, count, 64))?;
     Ok(ScanPage { hits, scanned_to })
 }
 
@@ -272,11 +261,7 @@ async fn lines_containing(
     needle: char,
 ) -> Result<Vec<usize>, String> {
     let started = Instant::now();
-    let mut docs = state.docs.lock().unwrap();
-    let Some(doc) = docs.get_mut(&handle) else {
-        return Err("文書はもう閉じられています".to_string());
-    };
-    let found = doc.lines_containing(from, to, needle)?;
+    let found = state.with_doc(handle, |doc| doc.lines_containing(from, to, needle))?;
     store_log("lines_containing", started);
     Ok(found)
 }
@@ -295,13 +280,9 @@ async fn copy_range(
     overrides: Vec<(usize, String)>,
 ) -> Result<(), String> {
     let started = Instant::now();
-    let text = {
-        let mut docs = state.docs.lock().unwrap();
-        let Some(doc) = docs.get_mut(&handle) else {
-            return Err("文書はもう閉じられています".to_string());
-        };
-        doc.assemble(from, first, to, last, &overrides.into_iter().collect())?
-    };
+    let text = state.with_doc(handle, |doc| {
+        doc.assemble(from, first, to, last, &overrides.into_iter().collect())
+    })?;
     store_log("copy assemble", started);
     let started = Instant::now();
     let result = arboard::Clipboard::new()
@@ -370,18 +351,16 @@ async fn save_draft(
     let Some(dir) = drafts_dir(&app) else {
         return Err("下書きの保存先がありません".to_string());
     };
-    let mut docs = state.docs.lock().unwrap();
-    let Some(doc) = docs.get_mut(&handle) else {
-        return Err("文書はもう閉じられています".to_string());
-    };
-    let file = std::fs::File::create(dir.join(draft_name(&id)))
-        .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
-    let mut out = std::io::BufWriter::new(file);
-    use std::io::Write;
-    writeln!(out, "{}", path.unwrap_or_default())
-        .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
-    doc.write_to(&mut out)
-        .map_err(|e| format!("下書きを保存できませんでした: {e}"))
+    state.with_doc(handle, |doc| {
+        let file = std::fs::File::create(dir.join(draft_name(&id)))
+            .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+        let mut out = std::io::BufWriter::new(file);
+        use std::io::Write;
+        writeln!(out, "{}", path.unwrap_or_default())
+            .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+        doc.write_to(&mut out)
+            .map_err(|e| format!("下書きを保存できませんでした: {e}"))
+    })
 }
 
 /// 保存済みファイル、未保存なら下書きファイルのサイズを返します。

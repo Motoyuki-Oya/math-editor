@@ -273,8 +273,10 @@ impl Text {
     /// 行数だけが分かっている文書。行の中身は [`Text::fill_line`] で後から届く。
     pub fn pending(line_count: usize) -> Self {
         let line_count = line_count.max(1);
+        // 未着行は中身を持たないので、同じ 1 つの Rc を全行で共有する。
+        let absent = Rc::new(Line::Absent);
         Self {
-            lines: vec![Rc::new(Line::Absent); line_count],
+            lines: vec![absent; line_count],
             changes: Vec::new(),
             absent: line_count,
         }
