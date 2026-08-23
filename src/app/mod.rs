@@ -15,7 +15,6 @@ use leptos::reactive::owner::Owner;
 use leptos::task::spawn_local;
 
 use find::FindBar;
-use palette::Palette;
 use panes::PaneView;
 use preferences::Preferences;
 use shell::{Pane, Shell};
@@ -67,10 +66,6 @@ pub fn App() -> impl IntoView {
 
     view! {
         <div class="app">
-            <Show when=move || shell.palette.get()>
-                <Palette/>
-            </Show>
-
             <Show when=move || shell.searching.get()>
                 <FindBar shell=shell/>
             </Show>

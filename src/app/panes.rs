@@ -5,6 +5,7 @@ use wasm_bindgen::JsCast;
 use web_sys::HtmlElement;
 
 use super::hold_focus;
+use super::palette::Palette;
 use super::shell::{Pane, Shell};
 use crate::editor;
 
@@ -46,6 +47,9 @@ pub(super) fn PaneView(shell: Shell, pane: Pane) -> impl IntoView {
             on:focusin=move |_| shell.note_focus(pane)
         >
             <Tabs shell=shell pane=pane/>
+            <Show when=move || shell.palette.get()>
+                <Palette/>
+            </Show>
             <div class="editor" node_ref=editor_ref></div>
         </div>
     }
