@@ -355,7 +355,7 @@ fn setup_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> 
     let icon = app
         .default_window_icon()
         .cloned()
-        .unwrap_or_else(|| tauri::include_image!("icons/32x32.png"));
+        .unwrap_or_else(|| tauri::include_image!("icons/icon.png"));
 
     let _tray = TrayIconBuilder::with_id("tray")
         .icon(icon)
@@ -378,15 +378,19 @@ fn setup_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> 
             }
             _ => {}
         })
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
+        .on_tray_icon_event(|tray, event| match event {
+            TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
                 ..
-            } = event
-            {
+            }
+            | TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            } => {
                 show_main_window(tray.app_handle());
             }
+            _ => {}
         })
         .build(app)?;
 
