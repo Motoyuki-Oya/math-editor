@@ -86,36 +86,60 @@ pub fn find_all(
     };
     let mut found = Vec::new();
     for line in 0..text.line_count() {
-        let items = text.line(line);
-        for (start, run) in runs(items) {
-            for (from, to, groups) in matcher.matches(&run) {
-                found.push(Found {
-                    place: Place::Text(Sel::range(
-                        Pos::new(line, start + from),
-                        Pos::new(line, start + to),
-                    )),
-                    groups,
-                });
-            }
-        }
-        for (col, node) in items.iter().enumerate() {
-            for slot in 0..node.slot_count() {
-                let Some(nested) = node.slot(slot) else {
-                    continue;
-                };
-                let at = Pos::new(line, col);
-                let mut path = vec![(col, slot)];
-                search_row(&matcher, nested, &mut path, &mut |cursor, groups| {
-                    found.push(Found {
-                        place: Place::Inside { at, cursor },
-                        groups,
-                    })
-                });
-            }
-        }
+        line_matches(&matcher, text, line, &mut found);
     }
     found.sort_by_key(|found| found.place.start());
     found
+}
+
+/// 1 行だけを検索し、`after` より後の最初の一致を返す。文書の本体の走査が
+/// 「読み替えの要る行」を見つけたときに、その行をここで調べる。
+pub fn find_in_line(
+    text: &Text,
+    line: usize,
+    query: &str,
+    options: SearchOptions,
+    file_size: Option<usize>,
+    after: Option<&Key>,
+) -> Option<Found> {
+    let matcher = compile(query, options, file_size)?;
+    let mut found = Vec::new();
+    line_matches(&matcher, text, line, &mut found);
+    found.sort_by_key(|found| found.place.start());
+    found
+        .into_iter()
+        .find(|found| after.is_none_or(|after| found.place.start() >= *after))
+}
+
+/// 1 つの文書行の一致すべて: 素の文字の並びと、行に立つ構造の中身。
+fn line_matches(matcher: &Matcher, text: &Text, line: usize, found: &mut Vec<Found>) {
+    let items = text.line(line);
+    for (start, run) in runs(items) {
+        for (from, to, groups) in matcher.matches(&run) {
+            found.push(Found {
+                place: Place::Text(Sel::range(
+                    Pos::new(line, start + from),
+                    Pos::new(line, start + to),
+                )),
+                groups,
+            });
+        }
+    }
+    for (col, node) in items.iter().enumerate() {
+        for slot in 0..node.slot_count() {
+            let Some(nested) = node.slot(slot) else {
+                continue;
+            };
+            let at = Pos::new(line, col);
+            let mut path = vec![(col, slot)];
+            search_row(matcher, nested, &mut path, &mut |cursor, groups| {
+                found.push(Found {
+                    place: Place::Inside { at, cursor },
+                    groups,
+                })
+            });
+        }
+    }
 }
 
 /// 1 つの行とその中にネストされているすべての行を検索し、各一致をその行の選択として報告します。

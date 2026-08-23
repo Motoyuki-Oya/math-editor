@@ -229,6 +229,12 @@ pub fn find_next(query: &str, options: SearchOptions, file_size: Option<usize>) 
     let Some(found) = found else {
         return false;
     };
+    apply_found(&session, found);
+    true
+}
+
+/// 一致を選択して見せ、「次を検索」がそこから続くようにします。
+fn apply_found(session: &Rc<RefCell<Session>>, found: search::Found) {
     {
         let mut borrowed = session.borrow_mut();
         borrowed.search_from = Some(found.place.end());
@@ -241,7 +247,61 @@ pub fn find_next(query: &str, options: SearchOptions, file_size: Option<usize>) 
         }
     }
     focus();
-    redraw(&session);
+    redraw(session);
+}
+
+/// 文書の本体の走査で検索を続けるための出発点: 検索キーと行数。
+pub fn far_search_start() -> Option<(search::Key, usize)> {
+    let session = session()?;
+    let borrowed = session.borrow();
+    let from = borrowed.search_from.clone().unwrap_or_else(|| {
+        search::key_at(
+            borrowed.editor.primary().end(),
+            borrowed.editor.nested_cursor(),
+        )
+    });
+    Some((from, borrowed.editor.text().line_count()))
+}
+
+/// 本体の走査が見つけた素の行の一致へ跳びます。
+pub fn apply_far_match(pane: usize, line: usize, start: usize, end: usize) -> bool {
+    use crate::structure::text::Pos;
+    let Some(session) = super::session::pane_session(pane) else {
+        return false;
+    };
+    apply_found(
+        &session,
+        search::Found {
+            place: Place::Text(crate::structure::text::Sel::range(
+                Pos::new(line, start),
+                Pos::new(line, end),
+            )),
+            groups: Vec::new(),
+        },
+    );
+    true
+}
+
+/// 読み替えの要る行を手元で調べ、`after` より後の一致があれば選択します。
+pub fn find_far_in_line(
+    pane: usize,
+    line: usize,
+    query: &str,
+    options: SearchOptions,
+    file_size: Option<usize>,
+    after: Option<&search::Key>,
+) -> bool {
+    let Some(session) = super::session::pane_session(pane) else {
+        return false;
+    };
+    let found = {
+        let borrowed = session.borrow();
+        search::find_in_line(borrowed.editor.text(), line, query, options, file_size, after)
+    };
+    let Some(found) = found else {
+        return false;
+    };
+    apply_found(&session, found);
     true
 }
 

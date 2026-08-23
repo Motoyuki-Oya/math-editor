@@ -279,6 +279,58 @@ pub async fn copy_range(
     .map(|_| ())
 }
 
+/// 検索走査の 1 件。`notation` の行は一致ではなく「手元で見るべき行」。
+#[derive(Deserialize)]
+pub struct ScanHit {
+    pub line: usize,
+    pub notation: bool,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// 検索の 1 ページ分の走査結果。`scanned_to` から続きを頼める。
+#[derive(Deserialize)]
+pub struct ScanPage {
+    pub hits: Vec<ScanHit>,
+    pub scanned_to: usize,
+}
+
+/// 文書の本体を `from` から `count` 行ぶん走査します。
+pub async fn search_lines(
+    handle: u64,
+    query: &str,
+    regex: bool,
+    case_sensitive: bool,
+    needle: char,
+    from: usize,
+    count: usize,
+) -> Result<ScanPage, String> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        handle: u64,
+        query: &'a str,
+        regex: bool,
+        case_sensitive: bool,
+        needle: char,
+        from: usize,
+        count: usize,
+    }
+    let value = call(
+        "search_lines",
+        Args {
+            handle,
+            query,
+            regex,
+            case_sensitive,
+            needle,
+            from,
+            count,
+        },
+    )
+    .await?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
+}
+
 /// 文書の本体から下書きを書きます。
 pub async fn save_draft(handle: u64, id: usize, path: Option<&str>) {
     #[derive(Serialize)]

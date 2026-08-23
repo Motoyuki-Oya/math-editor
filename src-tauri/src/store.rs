@@ -53,6 +53,16 @@ pub struct Restored {
     pub line_count: usize,
 }
 
+/// 検索走査の 1 件。`notation` の行は一致ではなく「frontend が見るべき行」。
+#[derive(serde::Serialize)]
+pub struct ScanHit {
+    pub line: usize,
+    pub notation: bool,
+    /// 行内の一致の文字位置。`notation` の行では意味を持たない。
+    pub start: usize,
+    pub end: usize,
+}
+
 impl Document {
     pub fn open(source: String) -> Document {
         let mut lines = Vec::with_capacity(source.len() / 32 + 1);
@@ -196,6 +206,48 @@ impl Document {
                 touched_from
             },
         )
+    }
+
+    /// 検索の走査で見つかったもの: 素の行の一致か、読み替え（記法の解釈）を
+    /// 要する行。行の順に並ぶ。
+    pub fn scan(
+        &self,
+        pattern: &regex::Regex,
+        needle: char,
+        from: usize,
+        count: usize,
+        limit: usize,
+    ) -> (Vec<ScanHit>, usize) {
+        let to = from.saturating_add(count).min(self.lines.len());
+        let mut hits = Vec::new();
+        for i in from.min(to)..to {
+            let line = self.line(i);
+            if line.contains(needle) {
+                // 記法を含む行の一致はこちらでは判定できない。frontend が
+                // 行を取り寄せて構造ごと検索する。
+                hits.push(ScanHit {
+                    line: i,
+                    notation: true,
+                    start: 0,
+                    end: 0,
+                });
+            } else {
+                for found in pattern.find_iter(line) {
+                    let start = line[..found.start()].chars().count();
+                    let end = start + line[found.start()..found.end()].chars().count();
+                    hits.push(ScanHit {
+                        line: i,
+                        notation: false,
+                        start,
+                        end,
+                    });
+                }
+            }
+            if hits.len() >= limit {
+                return (hits, i + 1);
+            }
+        }
+        (hits, to)
     }
 
     /// `from..=to` の行のうち `needle` を含むもの。
@@ -356,6 +408,30 @@ mod tests {
             "bb"
         );
         assert!(doc.assemble(0, None, 4, None, &Default::default()).is_err());
+    }
+
+    #[test]
+    fn scanning_reports_matches_and_notation_lines_in_order() {
+        let doc = doc(&["fox", "a$b", "the fox and fox", "last"]);
+        let pattern = regex::Regex::new("fox").unwrap();
+        let (hits, scanned_to) = doc.scan(&pattern, '$', 0, 10, 64);
+        assert_eq!(scanned_to, 4);
+        let kinds: Vec<(usize, bool, usize, usize)> = hits
+            .iter()
+            .map(|hit| (hit.line, hit.notation, hit.start, hit.end))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (0, false, 0, 3),
+                (1, true, 0, 0),
+                (2, false, 4, 7),
+                (2, false, 12, 15),
+            ]
+        );
+        // 途中から頼めば続きが返る。
+        let (hits, _) = doc.scan(&pattern, '$', 2, 10, 64);
+        assert_eq!(hits.len(), 2);
     }
 
     #[test]

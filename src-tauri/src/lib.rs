@@ -175,6 +175,43 @@ fn close_document(state: State<'_, AppState>, handle: u64) {
     state.docs.lock().unwrap().remove(&handle);
 }
 
+/// 検索の 1 ページ分の走査。素の行の一致と、読み替えの要る行が行の順で返り、
+/// `scanned_to` から続きを頼めます。パターンの意味は regex クレートのもの。
+#[derive(serde::Serialize)]
+struct ScanPage {
+    hits: Vec<store::ScanHit>,
+    scanned_to: usize,
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn search_lines(
+    state: State<'_, AppState>,
+    handle: u64,
+    query: String,
+    regex: bool,
+    case_sensitive: bool,
+    needle: char,
+    from: usize,
+    count: usize,
+) -> Result<ScanPage, String> {
+    let pattern = if regex {
+        query
+    } else {
+        regex::escape(&query)
+    };
+    let pattern = regex::RegexBuilder::new(&pattern)
+        .case_insensitive(!case_sensitive)
+        .build()
+        .map_err(|e| format!("正規表現を読めませんでした: {e}"))?;
+    let docs = state.docs.lock().unwrap();
+    let Some(doc) = docs.get(&handle) else {
+        return Err("文書はもう閉じられています".to_string());
+    };
+    let (hits, scanned_to) = doc.scan(&pattern, needle, from, count, 64);
+    Ok(ScanPage { hits, scanned_to })
+}
+
 /// 範囲内で `needle` を含む行。frontend が読み替えの必要な行を探すのに使います。
 /// 何の文字に意味があるか（保存形式）はこちらでは知りません。
 #[tauri::command]
@@ -490,6 +527,7 @@ pub fn run() {
             close_document,
             lines_containing,
             copy_range,
+            search_lines,
             set_dirty,
             frontend_ready,
             confirm_discard,

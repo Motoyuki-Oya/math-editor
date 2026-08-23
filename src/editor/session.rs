@@ -51,7 +51,7 @@ pub fn session() -> Option<Rc<RefCell<Session>>> {
     })
 }
 
-fn pane_session(pane: usize) -> Option<Rc<RefCell<Session>>> {
+pub(super) fn pane_session(pane: usize) -> Option<Rc<RefCell<Session>>> {
     PANES.with(|panes| {
         panes
             .borrow()
@@ -391,4 +391,12 @@ pub fn stats() -> (usize, usize) {
     session()
         .map(|session| session.borrow().editor.text().stats())
         .unwrap_or((0, 1))
+}
+
+/// 入力を受けるペインの文書が手元に全部あるか。検索や置換が文書の本体の
+/// 走査を要るかの見分け。
+pub fn fully_resident() -> bool {
+    session().is_some_and(|session| {
+        session.borrow().editor.text().first_absent(0).is_none()
+    })
 }
