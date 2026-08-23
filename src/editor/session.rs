@@ -65,7 +65,8 @@ pub(super) fn pane_session(pane: usize) -> Option<Rc<RefCell<Session>>> {
 pub fn init(root: &HtmlElement) -> Option<usize> {
     let doc = root.owner_document()?;
     let view = View::new(root.clone())?;
-    let textarea = input::build(&doc, root)?;
+    // 入力欄は横スクロールする要素の中で、行と一緒に動く。
+    let textarea = input::build(&doc, &view.scroller())?;
     let pane = NEXT_PANE.get();
     NEXT_PANE.set(pane + 1);
     let session = Rc::new(RefCell::new(Session {
@@ -195,6 +196,19 @@ pub fn redraw(session: &Rc<RefCell<Session>>) {
         }
     }
     request_missing(session);
+}
+
+/// ホイール。窓を行の分だけ動かして描き直します。
+pub(super) fn wheel(session: &Rc<RefCell<Session>>, pixels: f64) {
+    session.borrow().view.wheel(pixels);
+    scrolled(session);
+}
+
+/// つまみが動いた。文書全体の割合で窓を動かして描き直します。
+pub(super) fn thumb_moved(session: &Rc<RefCell<Session>>) {
+    if session.borrow().view.follow_thumb() {
+        scrolled(session);
+    }
 }
 
 /// ビューがスクロールされた後に再度描画するため、表示された行がページに配置されます。 [`redraw`] とは異なり、これはユーザーがスクロールしたビューを残し、キャレットに移動しません。

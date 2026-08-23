@@ -81,7 +81,9 @@ impl Heights {
         self.sum.upto(lines) + (lines as f64 - measured) * self.unit()
     }
 
-    /// 文書の上部から測った線の開始位置。
+    /// 文書の上部から測った線の開始位置。窓が実寸で置かれるようになってから、
+    /// 製品コードは使わない。合計の検査のためにテストが使う。
+    #[cfg(test)]
     pub(super) fn top_of(&self, line: usize) -> f64 {
         self.upto(line)
     }
@@ -91,7 +93,9 @@ impl Heights {
         (self.upto(lines.end) - self.upto(lines.start)).max(0.0)
     }
 
-    /// 最初の行は「y」まで続き、そこから描画が始まります。
+    /// 最初の行は「y」まで続き、そこから描画が始まります。窓が実寸で置かれる
+    /// ようになってから、製品コードは使わない。二分探索の検査のためにテストが使う。
+    #[cfg(test)]
     pub(super) fn line_at(&self, y: f64) -> usize {
         let count = self.each.len();
         if y <= 0.0 || count == 0 {

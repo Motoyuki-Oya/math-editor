@@ -24,13 +24,18 @@ pub(super) const LINE_ATTR: &str = "data-line";
 const NUMBER_CLASS: &str = "mn-number";
 
 pub struct View {
-    /// スクロールし、マウスを受け取ります。
+    /// エディター全体の箱。マウスとホイールを受け取ります。縦にはスクロール
+    /// しません。文書はファイルを覗く窓で、ページに置くのは見えている行だけです。
     pub root: HtmlElement,
+    /// 中身を横にだけスクロールする要素。入力欄もこの中で行と一緒に動きます。
+    scroller: HtmlElement,
+    /// 縦のつまみ。数千 px の空間で文書全体のおおよその割合を示します。
+    scrollbar: HtmlElement,
     content: Element,
     document: Element,
     gutter: Element,
     overlay: Element,
-    /// どの行をページに出すかと、ビューをどこへ持っていくか。
+    /// どの行をページに出すかと、窓をどこへ持っていくか。
     viewport: Viewport,
 }
 
@@ -57,8 +62,12 @@ impl Caret<'_> {
 impl View {
     /// 呼び出し元が所有する `root` 内にレイヤーを構築します。
     pub fn new(root: HtmlElement) -> Option<Self> {
+        use wasm_bindgen::JsCast;
         let doc = root.owner_document()?;
         root.set_inner_html("");
+        let scroller = element(&doc, "div", "mn-hscroll")?
+            .dyn_into::<HtmlElement>()
+            .ok()?;
         let content = element(&doc, "div", "mn-content")?;
         let gutter = element(&doc, "div", "mn-gutter")?;
         let document = element(&doc, "div", "mn-document")?;
@@ -66,15 +75,55 @@ impl View {
         append(&content, &gutter);
         append(&content, &document);
         append(&content, &overlay);
-        append(&root, &content);
+        append(&scroller, &content);
+        append(&root, &scroller);
+        let scrollbar = element(&doc, "div", "mn-vscroll")?
+            .dyn_into::<HtmlElement>()
+            .ok()?;
+        let thumb_space = element(&doc, "div", "mn-thumb-space")?;
+        append(&scrollbar, &thumb_space);
+        append(&root, &scrollbar);
         Some(Self {
-            viewport: Viewport::new(root.clone(), document.clone()),
+            viewport: Viewport::new(
+                root.clone(),
+                document.clone(),
+                scrollbar.clone(),
+                thumb_space,
+            ),
             root,
+            scroller,
+            scrollbar,
             content,
             document,
             gutter,
             overlay,
         })
+    }
+
+    /// 入力欄を置く先。中身と一緒に横へ動く要素。
+    pub fn scroller(&self) -> HtmlElement {
+        self.scroller.clone()
+    }
+
+    /// 縦のつまみの要素。スクロールを聞く先。
+    pub fn scrollbar(&self) -> HtmlElement {
+        self.scrollbar.clone()
+    }
+
+    /// ホイールの分だけ窓を動かします。描き直しは呼び出し側が行います。
+    pub fn wheel(&self, pixels: f64) {
+        self.viewport.nudge(pixels);
+    }
+
+    /// つまみの位置へ窓を合わせます。こちらから合わせた反響なら `false`。
+    pub fn follow_thumb(&self) -> bool {
+        match self.viewport.thumb_ratio() {
+            Some(ratio) => {
+                self.viewport.jump_to_ratio(ratio);
+                true
+            }
+            None => false,
+        }
     }
 
     /// いまページに出ている行の範囲。届いた行を描き直すかの判断に使われます。
@@ -400,7 +449,7 @@ impl View {
     /// スクロールしてキャレットが見えるようにし、入力要素がキャレットに従うことができるように**文書内の**場所を報告します (ここに IME 候補が表示されます)。画面ではなくドキュメント: input 要素は行の間に配置され、行と一緒にスクロールします。ドキュメントの上部に残された input 要素は、入力されるとすぐにブラウザがスクロールして戻ってくるものです。
     pub fn reveal(&self, caret: &Caret<'_>) -> Option<Box2> {
         let rect = self.caret_box(caret)?;
-        Some(self.viewport.reveal(rect))
+        Some(self.viewport.reveal(&self.scroller, rect))
     }
 }
 

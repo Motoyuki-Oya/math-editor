@@ -1,16 +1,12 @@
-//! ページに出す行の窓と、ビューをどこへ持っていくか。
+//! ファイルを覗く窓。文書全体をブラウザーに置かず、見えている行だけを描く。
 //!
-//! 見えている行だけを描くための帳簿がすべてここにある。どの行を描くか（窓）、
-//! 描かれていない行の場所取り（上下の空の要素）、測った高さの記録
-//! （[`super::heights`]）、そしてスクロールの行き先。行そのものをどう描くかは
-//! [`super::document`] の仕事で、ここは描き手に「この範囲を描いて」と頼むだけ。
-//!
-//! ビューの行き先の規則は 1 つ: **キャレットを追う描画はキャレットの行が見えて
-//! 終わり、追わない描画は見えていた行を見失わない。** 高さは描くまで推測なので、
-//! 一度で正しい位置には着けないことがある。そのときは描いて測った高さで行き先を
-//! 決め直し、動かなくなるまで繰り返す。
+//! 縦のスクロールはブラウザーに任せない。窓の先頭の行 `top` がすべてを決め、
+//! ホイールは行数で、つまみは文書全体の割合で `top` を動かす。つまみのための
+//! 細い要素だけが数千 px の空間を持ち、行数 × 行高の巨大な要素はどこにも
+//! 作らない。キャレットを追う描画はキャレットの行が見えて終わり、追わない
+//! 描画は `top` の窓を描き直すだけで、スクロール座標から窓を逆算しない。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 
 use web_sys::{Document, Element, HtmlElement};
@@ -19,44 +15,56 @@ use crate::structure::text::Text;
 use crate::view::heights::Heights;
 use crate::view::measure::{self, Box2};
 
-use super::document::{append, element, has_tab, LINE_ATTR};
+use super::document::{append, has_tab, LINE_ATTR};
 
-/// ページ内にない行を表し、ドキュメントの全長が維持されます。
-const GAP_CLASS: &str = "mn-gap";
-
-/// 画面の端を越えてどのくらい先まで描くか（画面数）。これより少ないスクロールは、
-/// すでにそこにある行が受け止めます。
-const MARGIN_SCREENS: f64 = 1.0;
-/// ページの高さの上限。ブラウザーは要素の高さに上限（数千万 px）があり、
-/// 何百万行の文書を 1 行 1 行の高さで積むと超えてしまう。超えるときは
-/// 置き場所を同じ比率で縮め、スクロール位置と行の対応も同じ比率で読む。
-const MAX_PIXELS: f64 = 16_000_000.0;
+/// 画面を満たす行数に足す余分。端で半分だけ見える行と、少しの先読み。
+const OVERSCAN: usize = 4;
 /// 列区切りのブロックが描画範囲を画面の外へ引き込める行数。列を揃えるには
 /// ブロック全体が要りますが、いくらでもというわけにはいきません。
 const BLOCK_LIMIT: usize = 200;
+/// つまみのための空間。ウィンドウの 6 倍か、最低でもこの高さ。
+const THUMB_SCREENS: f64 = 6.0;
+const THUMB_MIN: f64 = 4_000.0;
 
 pub(super) struct Viewport {
-    /// スクロールする要素。
+    /// エディター全体の箱。大きさを測るためだけに見る。
     root: HtmlElement,
-    /// 描いた行が入る要素。上下の場所取りもここに入ります。
+    /// 描いた行が入る要素。窓の行だけが入り、場所取りは無い。
     document: Element,
-    /// 各行の高さ。それによって描画する行が決まります。
+    /// つまみだけのための細いスクロール領域。
+    scrollbar: HtmlElement,
+    /// つまみの領域の中身。高さだけを持つ。
+    thumb_space: Element,
+    /// 各行の高さ。窓に何行入るかの見積もりに使います。
     heights: RefCell<Heights>,
     /// 現在ページ内にある行。ページを測定するものはすべて、これらについてのみ
     /// 語ることができます。
     drawn: RefCell<Range<usize>>,
-    /// 置き場所の縮尺。文書の画素の高さがブラウザーの上限に収まるときは 1。
-    scale: std::cell::Cell<f64>,
+    /// 窓の先頭の行。
+    top: Cell<usize>,
+    /// 文書の行数。`top` を丸めるために、描くたびに控える。
+    count: Cell<usize>,
+    /// こちらから合わせたつまみの位置。つまみ自身のイベントの反響を無視する。
+    thumb_echo: Cell<f64>,
 }
 
 impl Viewport {
-    pub(super) fn new(root: HtmlElement, document: Element) -> Self {
+    pub(super) fn new(
+        root: HtmlElement,
+        document: Element,
+        scrollbar: HtmlElement,
+        thumb_space: Element,
+    ) -> Self {
         Self {
             root,
             document,
+            scrollbar,
+            thumb_space,
             heights: RefCell::new(Heights::new()),
             drawn: RefCell::new(0..0),
-            scale: std::cell::Cell::new(1.0),
+            top: Cell::new(0),
+            count: Cell::new(1),
+            thumb_echo: Cell::new(0.0),
         }
     }
 
@@ -79,10 +87,39 @@ impl Viewport {
             .flatten()
     }
 
+    /// ホイールの分だけ窓を動かす。描き直しは呼び出し側が行う。
+    pub(super) fn nudge(&self, pixels: f64) {
+        let unit = self.unit();
+        let lines = (pixels.abs() / unit).round().max(1.0) as usize;
+        let top = self.top.get();
+        self.top.set(if pixels < 0.0 {
+            top.saturating_sub(lines)
+        } else {
+            (top + lines).min(self.count.get().saturating_sub(1))
+        });
+    }
+
+    /// つまみの位置。こちらから合わせた反響なら `None`。
+    pub(super) fn thumb_ratio(&self) -> Option<f64> {
+        let at = self.scrollbar.scroll_top() as f64;
+        if (at - self.thumb_echo.get()).abs() <= 2.0 {
+            return None;
+        }
+        let max = (self.scrollbar.scroll_height() - self.scrollbar.client_height()) as f64;
+        Some((at / max.max(1.0)).clamp(0.0, 1.0))
+    }
+
+    /// つまみの割合の場所へ窓を持っていく。描き直しは呼び出し側が行う。
+    pub(super) fn jump_to_ratio(&self, ratio: f64) {
+        let count = self.count.get();
+        self.top
+            .set((ratio * count.saturating_sub(1) as f64).round() as usize);
+    }
+
     /// ページを `text` に合わせて描き直します。`follow` の描画はキャレットの行
-    /// （`caret_line`）が見えて終わり、そうでない描画はユーザーの置いたスクロールを
-    /// 尊重します。行を描くのは `draw_line`、描き終えた窓に対する仕上げ（列揃えと
-    /// キャレット）は `finish` が行います。
+    /// （`caret_line`）が見えて終わり、そうでない描画は窓をその場で描き直します。
+    /// 行を描くのは `draw_line`、描き終えた窓に対する仕上げ（列揃えとキャレット）
+    /// は `finish` が行います。
     pub(super) fn show(
         &self,
         text: &Text,
@@ -91,185 +128,131 @@ impl Viewport {
         draw_line: &dyn Fn(&Document, usize) -> Option<Element>,
         finish: &dyn Fn(&Range<usize>),
     ) {
-        {
-            let mut heights = self.heights.borrow_mut();
-            heights.fit(text.line_count());
-            // 文書の画素の高さがブラウザーの上限を超えるなら、置き場所を縮める。
-            let total = heights.span(0..text.line_count());
-            self.scale.set((MAX_PIXELS / total.max(1.0)).min(1.0));
+        let count = text.line_count();
+        self.count.set(count);
+        self.heights.borrow_mut().fit(count);
+        self.top.set(self.top.get().min(count.saturating_sub(1)));
+        if follow && !self.drawn.borrow().contains(&caret_line) {
+            // 遠くへの跳び。キャレットの行を上から 1/3 に置く。
+            let fit = self.lines_that_fit();
+            self.top.set(caret_line.saturating_sub(fit / 3));
         }
-        // ビューの行き先: 何かが変わったときはキャレット、スクロールされたときは
-        // ユーザーが置いた場所。
-        let mut scroll = match follow {
-            true => self.scroll_for(caret_line, text.line_count()),
-            false => self.root.scroll_top() as f64,
-        };
+        let window = self.widen_for_blocks(text, self.window(count));
         let drawn = self.drawn.borrow().clone();
-        // Ctrl+End など遠い場所へ跳ぶときは、スクロール座標から窓を逆算しない。
-        // 目的の行を含む窓を直接描けば、ブラウザーが巨大な scrollTop を切り詰めても
-        // 目的の行の DOM を実測して正しい位置へ一度で合わせられる。
-        let forced = (follow && !drawn.contains(&caret_line))
-            .then(|| self.window_around(caret_line, text.line_count()));
-        // キャレットの行がいま見えているかどうか。追う描画は見えて終わらなければ
-        // ならず、追わない描画も少なくとも見失ってはなりません。文書の末尾では
-        // 高さを測り直すとスクロールが行の分だけ動けないことがあるからです。
-        let mut keep = follow;
-        if !follow {
-            let window = self.widen_for_blocks(text, self.window(scroll, text.line_count()));
-            // 余白の中のスクロールは、すでにそこにある行が受け止めるので、
-            // 描くものがありません。縮尺つきの読み替えは 1 行ぶんずれることが
-            // あるので、等しいかではなく「はみ出したか」で判断する。等しさを
-            // 求めると、描き直しとスクロール補正が互いを呼び続けて止まらない。
-            if drawn.start <= window.start && window.end <= drawn.end {
-                return;
-            }
-            keep = (self.scroll_onto(caret_line, scroll) - scroll).abs() <= 0.5;
-        }
-        scroll = self.place(text, scroll, forced.clone(), draw_line, finish);
-        if forced.is_some() {
-            // 目的の行はもう DOM にある。その実測位置を見せるだけでよく、
-            // スクロール座標から別の窓を推定し直して目的の行を捨ててはいけない。
-            let settled = self.scroll_onto(caret_line, scroll);
-            if (settled - scroll).abs() > 0.5 {
-                self.root.set_scroll_top(settled as i32);
-            }
+        if !follow && drawn == window {
             return;
         }
-        if !keep {
-            return;
+        self.place(window, draw_line, finish);
+        if follow {
+            self.keep_caret_visible(text, caret_line, draw_line, finish);
         }
-        // 上のスクロールはまだ推測の高さから計算されているので、キャレットの行は
-        // 推測と違う場所に着くことがあります。描いて測った行から行き先を決め直し、
-        // 動かなくなるまで繰り返します。推測のままの位置をユーザーに見せたままには
-        // しません。
-        for _ in 0..3 {
-            let settled = self.scroll_onto(caret_line, scroll);
-            if (settled - scroll).abs() <= 0.5 {
-                return;
-            }
-            scroll = self.place(text, settled, None, draw_line, finish);
+        self.sync_thumb(count);
+    }
+
+    /// 窓: `top` から画面を満たすだけの行。
+    fn window(&self, count: usize) -> Range<usize> {
+        let top = self.top.get().min(count.saturating_sub(1));
+        let need = self.lines_that_fit() + OVERSCAN;
+        top..(top + need).min(count)
+    }
+
+    /// 画面に入る行数の見積もり。
+    fn lines_that_fit(&self) -> usize {
+        let view = self.root.client_height() as f64;
+        ((view / self.unit()).ceil() as usize).max(1)
+    }
+
+    fn unit(&self) -> f64 {
+        let heights = self.heights.borrow();
+        let drawn = self.drawn.borrow().clone();
+        let sample = heights.span(drawn.clone());
+        if drawn.is_empty() || sample <= 0.0 {
+            20.0
+        } else {
+            (sample / drawn.len() as f64).max(1.0)
         }
     }
 
-    /// `scroll` の窓の行をページに置き、ビューをそこへ残し、実際にどこへ着いたかを
-    /// 返します。
+    /// 窓の行を描いて測る。
     fn place(
         &self,
-        text: &Text,
-        scroll: f64,
-        forced: Option<Range<usize>>,
+        window: Range<usize>,
         draw_line: &dyn Fn(&Document, usize) -> Option<Element>,
         finish: &dyn Fn(&Range<usize>),
-    ) -> f64 {
+    ) {
         let Some(doc) = self.document.owner_document() else {
-            return self.root.scroll_top() as f64;
+            return;
         };
-        let scale = self.scale.get();
-        let window = self.widen_for_blocks(
-            text,
-            forced.unwrap_or_else(|| self.window(scroll, text.line_count())),
-        );
         self.document.set_inner_html("");
-        let above = element(&doc, "div", GAP_CLASS);
-        // 描く行の上に何があるかの見立て。測ると変わり、描いた行もその差の分だけ
-        // 動くので、スクロールも一緒に動かします。場所取りは縮尺つき。
-        let guessed = self.heights.borrow().span(0..window.start) * scale;
-        if let Some(gap) = &above {
-            // 場所取りはページに入る前に高さを持ちます。文書より短いページは
-            // ブラウザがスクロールを切り詰め、ビューがそれ以上下へ行けなく
-            // なるからです。
-            set_height(gap, guessed);
-            append(&self.document, gap);
-        }
         for line in window.clone() {
             if let Some(element) = draw_line(&doc, line) {
                 append(&self.document, &element);
             }
         }
-        let below = element(&doc, "div", GAP_CLASS);
-        if let Some(gap) = &below {
-            set_height(
-                gap,
-                self.heights.borrow().span(window.end..text.line_count()) * scale,
-            );
-            append(&self.document, gap);
-        }
         *self.drawn.borrow_mut() = window.clone();
         self.measure(&window);
-        // 間の行を測り直したので、場所取りも合わせ直します。
-        let heights = self.heights.borrow();
-        let measured = heights.span(0..window.start) * scale;
-        if let Some(gap) = &above {
-            set_height(gap, measured);
-        }
-        if let Some(gap) = &below {
-            set_height(gap, heights.span(window.end..text.line_count()) * scale);
-        }
-        drop(heights);
-        // ビューの行き先はここでだけ決まります。行を置き換えるとページが一時的に
-        // 短くなってスクロールが切り詰められることがあり、切り詰められたスクロールは
-        // たまたま描いた行の先へは行けません。場所取りが測定で伸び縮みすると行も
-        // 動くので、同じ量だけスクロールを動かして画面の内容をその場に留めます。
-        let scroll = (scroll + measured - guessed).max(0.0);
-        if (self.root.scroll_top() as f64 - scroll).abs() > 0.5 {
-            self.root.set_scroll_top(scroll as i32);
-        }
         finish(&window);
-        // 要求した値ではなく、ブラウザが受け入れた値。文書の末尾はそこまでです。
-        self.root.scroll_top() as f64
     }
 
-    /// 行を丸ごと見せるスクロール。行がすでに見えていれば `scroll` のまま。描いた
-    /// 行を測るので、その上の行の推測が答えを動かすことはありません。視界に入れる
-    /// 行は一行分だけ余計に入れます。ビューの端とぴったりの行は無いのと同じに
-    /// 読めるからで、文書の末尾では余りをブラウザが切り詰めます。
-    fn scroll_onto(&self, line: usize, scroll: f64) -> f64 {
-        let view = self.root.client_height() as f64;
-        let Some(holder) = self.line_element(line) else {
-            // ビューを動かす先の行がまだ描かれてもいないので、範囲を選んだ高さが
-            // その行について間違っていました。それまでに測ったものからもう一度
-            // 狙い直します。
-            return self.guessed_scroll(line, view);
-        };
-        let rect = measure::box_of(&holder.get_bounding_client_rect());
-        let root = measure::box_of(&self.root.get_bounding_client_rect());
-        // 画面上のものを、スクロール自身の尺度で。
-        let top = rect.top - root.top + scroll;
-        let bottom = top + rect.height;
-        if top < scroll {
-            (top - rect.height).max(0.0)
-        } else if bottom > scroll + view {
-            bottom + rect.height - view
-        } else {
-            scroll
+    /// キャレットの行が画面の中に入るまで、窓を少しずつずらして描き直す。
+    /// 行の高さは描くまで分からないので、一度では入らないことがある。
+    fn keep_caret_visible(
+        &self,
+        text: &Text,
+        caret_line: usize,
+        draw_line: &dyn Fn(&Document, usize) -> Option<Element>,
+        finish: &dyn Fn(&Range<usize>),
+    ) {
+        let count = text.line_count();
+        for _ in 0..4 {
+            let Some(holder) = self.line_element(caret_line) else {
+                // 窓の見積もりが小さすぎてキャレットの行が入らなかった。
+                // キャレットを窓の先頭へ置けば必ず入る。
+                if self.top.get() == caret_line {
+                    return;
+                }
+                self.top.set(caret_line);
+                let window = self.widen_for_blocks(text, self.window(count));
+                self.place(window, draw_line, finish);
+                continue;
+            };
+            let rect = measure::box_of(&holder.get_bounding_client_rect());
+            let view = measure::box_of(&self.root.get_bounding_client_rect());
+            let unit = self.unit();
+            if rect.top < view.top - 0.5 {
+                // 上へはみ出した。キャレットの行を先頭にする。
+                self.top.set(caret_line);
+            } else if rect.top + rect.height > view.top + self.root.client_height() as f64 {
+                // 下へはみ出した分だけ窓を下げる。
+                let overflow = rect.top + rect.height - view.top - self.root.client_height() as f64;
+                let lines = ((overflow / unit).ceil() as usize).max(1);
+                self.top
+                    .set((self.top.get() + lines).min(count.saturating_sub(1)));
+            } else {
+                return;
+            }
+            let window = self.widen_for_blocks(text, self.window(count));
+            self.place(window, draw_line, finish);
         }
     }
 
-    /// 行の描かれていないときの行き先。置き場所の縮尺で読む。
-    fn guessed_scroll(&self, line: usize, view: f64) -> f64 {
-        (self.heights.borrow().top_of(line) * self.scale.get() - view / 3.0).max(0.0)
-    }
-
-    /// 遠くへ跳ぶときに目的の行を必ず含める窓。実際に必要なのは数画面ぶんだが、
-    /// 行高の見積もり違いと列揃えの余地を含めて前後1000行を取る。
-    fn window_around(&self, line: usize, count: usize) -> Range<usize> {
-        let radius = 1000;
-        line.saturating_sub(radius)..(line + radius + 1).min(count)
-    }
-
-    /// 画面が届く行に加えて上下に一画面分。少しのスクロールでは何も描き直さずに
-    /// 済むようにです。
-    fn window(&self, scroll: f64, count: usize) -> Range<usize> {
-        let height = self.root.client_height() as f64;
-        let margin = (height * MARGIN_SCREENS).max(200.0);
-        let heights = self.heights.borrow();
-        // スクロール位置は縮尺つきの置き場所で行に読み替え、そこから
-        // 上下の余白と画面のぶんは実寸の高さで数える。
-        let anchor = heights.line_at(scroll / self.scale.get());
-        let top = heights.top_of(anchor);
-        let start = heights.line_at(top - margin);
-        let end = heights.line_at(top + height + margin) + 1;
-        start..end.max(start + 1).min(count)
+    /// つまみを窓の位置に合わせる。つまみの空間の高さもここで整える。
+    fn sync_thumb(&self, count: usize) {
+        let space = (self.root.client_height() as f64 * THUMB_SCREENS).max(THUMB_MIN);
+        self.thumb_space
+            .set_attribute("style", &format!("height:{space}px;width:1px"))
+            .ok();
+        let max = (self.scrollbar.scroll_height() - self.scrollbar.client_height()) as f64;
+        let ratio = if count <= 1 {
+            0.0
+        } else {
+            self.top.get() as f64 / (count - 1) as f64
+        };
+        let target = (ratio * max.max(0.0)).round();
+        if (self.scrollbar.scroll_top() as f64 - target).abs() > 0.5 {
+            self.thumb_echo.set(target);
+            self.scrollbar.set_scroll_top(target as i32);
+        }
     }
 
     /// 描画範囲を列区切りのブロック全体に広げます。列を揃えるにはブロックの
@@ -303,50 +286,20 @@ impl Viewport {
         }
     }
 
-    /// 行を描くにはビューがどこに無ければならないか。次の窓がすでに届く行なら
-    /// ビューはそのまま。一行ずつキャレットへ寄るのは [`Self::reveal`] の仕事で、
-    /// これはそれより遠い行（Ctrl+End、検索の一致、長い貼り付け）のためのものです。
-    /// 描かれていない行は測れないので、先にビューを動かす必要があります。
-    fn scroll_for(&self, line: usize, count: usize) -> f64 {
-        let scroll = self.root.scroll_top() as f64;
-        if self.window(scroll, count).contains(&line) {
-            return scroll;
-        }
-        // 三分の一ほど下に置いて、キャレットに続くものが見えるようにします。
-        self.guessed_scroll(line, self.root.client_height() as f64)
-    }
-
-    /// キャレットの箱（画面座標）が見える範囲に入るまでスクロールし、その箱の
-    /// **文書内の**場所を返します。
-    pub(super) fn reveal(&self, rect: Box2) -> Box2 {
-        let view = measure::box_of(&self.root.get_bounding_client_rect());
-        let scroll = (
-            self.root.scroll_top() as f64,
-            self.root.scroll_left() as f64,
-        );
-        let top = rect.top - view.top + scroll.0;
-        let left = rect.left - view.left + scroll.1;
-        // 見えるのはクライアントの箱。スクロールバーが占める分はキャレットを
-        // 見せられる場所ではありません。
-        let height = self.root.client_height() as f64;
-        let width = self.root.client_width() as f64;
-        if top < scroll.0 {
-            self.root.set_scroll_top(top as i32);
-        } else if top + rect.height > scroll.0 + height {
-            self.root
-                .set_scroll_top((top + rect.height - height) as i32);
-        }
-        if left < scroll.1 {
-            self.root.set_scroll_left((left - 24.0).max(0.0) as i32);
-        } else if left > scroll.1 + width - 24.0 {
-            self.root.set_scroll_left((left - width + 24.0) as i32);
+    /// キャレットの箱（画面座標）を横に見える範囲へ入れ、その箱の**文書内の**
+    /// 場所を返します。縦はキャレットを追う描き直しが窓ごと合わせるので、
+    /// ここでは動かしません。
+    pub(super) fn reveal(&self, scroller: &HtmlElement, rect: Box2) -> Box2 {
+        let view = measure::box_of(&scroller.get_bounding_client_rect());
+        let scroll_left = scroller.scroll_left() as f64;
+        let top = rect.top - view.top;
+        let left = rect.left - view.left + scroll_left;
+        let width = scroller.client_width() as f64;
+        if left < scroll_left {
+            scroller.set_scroll_left((left - 24.0).max(0.0) as i32);
+        } else if left > scroll_left + width - 24.0 {
+            scroller.set_scroll_left((left - width + 24.0) as i32);
         }
         Box2 { left, top, ..rect }
     }
-}
-
-fn set_height(element: &Element, height: f64) {
-    element
-        .set_attribute("style", &format!("height:{height}px"))
-        .ok();
 }
