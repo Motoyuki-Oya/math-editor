@@ -86,15 +86,11 @@ struct OpenedDocument {
 
 /// 文書を全部 1 つの文字列で webview へ渡さずに開きます。本体はネイティブ側の
 /// ストアに置き、frontend は `read_lines` で窓を取り寄せます。開く時点でやるのは
-/// 読み込みと改行の走査だけです。async なのは UI を待たせないため。
+/// 改行を数える 1 度の読み流しだけで、中身はメモリに置きません。
+/// async なのは UI を待たせないため。
 #[tauri::command]
-async fn open_document(
-    state: State<'_, AppState>,
-    path: String,
-) -> Result<OpenedDocument, String> {
-    let source = std::fs::read_to_string(&path)
-        .map_err(|e| format!("{path} を読み込めませんでした: {e}"))?;
-    Ok(state.adopt(store::Document::open(source)))
+async fn open_document(state: State<'_, AppState>, path: String) -> Result<OpenedDocument, String> {
+    Ok(state.adopt(store::Document::open(&path)?))
 }
 
 /// 新しい空の文書をストアに作ります。すべての文書の本体がネイティブ側にあります。
@@ -103,25 +99,26 @@ fn create_document(state: State<'_, AppState>) -> OpenedDocument {
     state.adopt(store::Document::empty())
 }
 
-/// 文書から行の範囲を返します。
+/// 文書から行の範囲を返します。async なのは、同期コマンドはメインスレッドで
+/// 走り、待たせた分だけ UI が止まるため（以下の文書コマンドも同じ）。
 #[tauri::command]
-fn read_lines(
+async fn read_lines(
     state: State<'_, AppState>,
     handle: u64,
     from: usize,
     count: usize,
 ) -> Result<Vec<String>, String> {
-    let docs = state.docs.lock().unwrap();
-    let Some(doc) = docs.get(&handle) else {
+    let mut docs = state.docs.lock().unwrap();
+    let Some(doc) = docs.get_mut(&handle) else {
         return Err("文書はもう閉じられています".to_string());
     };
-    Ok(doc.read(from, count))
+    doc.read(from, count)
 }
 
 /// 編集の到着: `from..to` の行を `lines` へ置き換えます。同じ `group` が続く間は
 /// 元に戻す履歴の 1 ステップにつながります。新しい行数を返します。
 #[tauri::command]
-fn replace_lines(
+async fn replace_lines(
     state: State<'_, AppState>,
     handle: u64,
     from: usize,
@@ -147,22 +144,33 @@ struct RestoredLines {
 }
 
 #[tauri::command]
-fn undo_lines(state: State<'_, AppState>, handle: u64, redo: bool) -> Option<RestoredLines> {
+async fn undo_lines(
+    state: State<'_, AppState>,
+    handle: u64,
+    redo: bool,
+) -> Result<Option<RestoredLines>, String> {
     let mut docs = state.docs.lock().unwrap();
-    let doc = docs.get_mut(&handle)?;
-    let restored = if redo { doc.redo() } else { doc.undo() }?;
-    Some(RestoredLines {
-        state: restored.state,
-        touched_from: restored.touched_from,
-        line_count: restored.line_count,
-    })
+    let Some(doc) = docs.get_mut(&handle) else {
+        return Ok(None);
+    };
+    Ok(
+        (if redo { doc.redo() } else { doc.undo() })?.map(|restored| RestoredLines {
+            state: restored.state,
+            touched_from: restored.touched_from,
+            line_count: restored.line_count,
+        }),
+    )
 }
 
 /// 文書をストアからディスクへ直接書きます。全文は webview を通りません。
 #[tauri::command]
-async fn save_document(state: State<'_, AppState>, handle: u64, path: String) -> Result<(), String> {
-    let docs = state.docs.lock().unwrap();
-    let Some(doc) = docs.get(&handle) else {
+async fn save_document(
+    state: State<'_, AppState>,
+    handle: u64,
+    path: String,
+) -> Result<(), String> {
+    let mut docs = state.docs.lock().unwrap();
+    let Some(doc) = docs.get_mut(&handle) else {
         return Err("文書はもう閉じられています".to_string());
     };
     doc.save(&path)
@@ -174,7 +182,102 @@ fn close_document(state: State<'_, AppState>, handle: u64) {
     state.docs.lock().unwrap().remove(&handle);
 }
 
+/// 検索の 1 ページ分の走査。素の行の一致と、読み替えの要る行が行の順で返り、
+/// `scanned_to` から続きを頼めます。パターンの意味は regex クレートのもの。
+#[derive(serde::Serialize)]
+struct ScanPage {
+    hits: Vec<store::ScanHit>,
+    scanned_to: usize,
+}
 
+// 複数語の引数（case_sensitive）を snake_case のまま受け取る。既定の camelCase
+// 期待のままだと、frontend の引数が見つからず呼び出しが失敗する。
+#[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
+async fn search_lines(
+    state: State<'_, AppState>,
+    handle: u64,
+    query: String,
+    regex: bool,
+    case_sensitive: bool,
+    needle: char,
+    from: usize,
+    count: usize,
+) -> Result<ScanPage, String> {
+    let pattern = if regex {
+        query
+    } else {
+        regex::escape(&query)
+    };
+    let pattern = regex::RegexBuilder::new(&pattern)
+        .case_insensitive(!case_sensitive)
+        .build()
+        .map_err(|e| format!("正規表現を読めませんでした: {e}"))?;
+    let mut docs = state.docs.lock().unwrap();
+    let Some(doc) = docs.get_mut(&handle) else {
+        return Err("文書はもう閉じられています".to_string());
+    };
+    let (hits, scanned_to) = doc.scan(&pattern, needle, from, count, 64)?;
+    Ok(ScanPage { hits, scanned_to })
+}
+
+/// 範囲内で `needle` を含む行。frontend が読み替えの必要な行を探すのに使います。
+/// 何の文字に意味があるか（保存形式）はこちらでは知りません。
+#[tauri::command]
+async fn lines_containing(
+    state: State<'_, AppState>,
+    handle: u64,
+    from: usize,
+    to: usize,
+    needle: char,
+) -> Result<Vec<usize>, String> {
+    let started = Instant::now();
+    let mut docs = state.docs.lock().unwrap();
+    let Some(doc) = docs.get_mut(&handle) else {
+        return Err("文書はもう閉じられています".to_string());
+    };
+    let found = doc.lines_containing(from, to, needle)?;
+    store_log("lines_containing", started);
+    Ok(found)
+}
+
+/// 選択された範囲を組み立てて、システムのクリップボードへ置きます。
+/// 全文が webview を通らないので、大きな選択のコピーも一息で済みます。
+/// 端の行の切り出しと、読み替えの必要な行は frontend が渡してきます。
+#[tauri::command]
+async fn copy_range(
+    state: State<'_, AppState>,
+    handle: u64,
+    from: usize,
+    first: Option<String>,
+    to: usize,
+    last: Option<String>,
+    overrides: Vec<(usize, String)>,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let text = {
+        let mut docs = state.docs.lock().unwrap();
+        let Some(doc) = docs.get_mut(&handle) else {
+            return Err("文書はもう閉じられています".to_string());
+        };
+        doc.assemble(from, first, to, last, &overrides.into_iter().collect())?
+    };
+    store_log("copy assemble", started);
+    let started = Instant::now();
+    let result = arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.set_text(text))
+        .map_err(|e| format!("コピーできませんでした: {e}"));
+    store_log("copy clipboard", started);
+    result
+}
+
+/// `PLANETEXT_STORE_LOG` が設定されていれば、文書ストアの重い操作の時間を出す。
+/// どこで時間が消えているかを、実際の操作で測るための窓。
+fn store_log(what: &str, started: Instant) {
+    if std::env::var_os("PLANETEXT_STORE_LOG").is_some() {
+        eprintln!("store: {what}: {} ms", started.elapsed().as_millis());
+    }
+}
 
 /// 設定ファイルが存在する場所: アプリ独自の構成ディレクトリ内の `settings.toml`。
 fn settings_path(app: &tauri::AppHandle) -> Option<PathBuf> {
@@ -217,7 +320,7 @@ struct Draft {
 
 /// 文書の本体から下書きを書きます。最初の行はドキュメントのパス、続きが本文。
 #[tauri::command]
-fn save_draft(
+async fn save_draft(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     handle: u64,
@@ -227,8 +330,8 @@ fn save_draft(
     let Some(dir) = drafts_dir(&app) else {
         return Err("下書きの保存先がありません".to_string());
     };
-    let docs = state.docs.lock().unwrap();
-    let Some(doc) = docs.get(&handle) else {
+    let mut docs = state.docs.lock().unwrap();
+    let Some(doc) = docs.get_mut(&handle) else {
         return Err("文書はもう閉じられています".to_string());
     };
     let file = std::fs::File::create(dir.join(draft_name(&id)))
@@ -236,7 +339,8 @@ fn save_draft(
     let mut out = std::io::BufWriter::new(file);
     use std::io::Write;
     writeln!(out, "{}", path.unwrap_or_default())
-        .and_then(|()| doc.write_to(&mut out))
+        .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+    doc.write_to(&mut out)
         .map_err(|e| format!("下書きを保存できませんでした: {e}"))
 }
 
@@ -447,6 +551,9 @@ pub fn run() {
             undo_lines,
             save_document,
             close_document,
+            lines_containing,
+            copy_range,
+            search_lines,
             set_dirty,
             frontend_ready,
             confirm_discard,

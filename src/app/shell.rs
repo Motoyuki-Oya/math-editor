@@ -261,7 +261,7 @@ impl Shell {
         }
     }
 
-    fn pane_showing(&self, tab: Tab) -> Option<Pane> {
+    pub(super) fn pane_showing(&self, tab: Tab) -> Option<Pane> {
         let id = tab.id.get_untracked();
         self.panes.with_untracked(|panes| {
             panes

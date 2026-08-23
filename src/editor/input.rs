@@ -116,8 +116,24 @@ pub fn install(session: &Rc<RefCell<Session>>) {
     on(&root, "dblclick", session, |session, event: MouseEvent| {
         mouse::on_dblclick(session, event);
     });
-    // ページ内には表示されている行のみが存在するため、スクロールでは表示された行を描画する必要があります。
-    on(&root, "scroll", session, |session, _: web_sys::Event| {
+    // 縦はブラウザーにスクロールさせない。ホイールは窓を行の分だけ動かす。
+    on(&root, "wheel", session, |session, event: web_sys::WheelEvent| {
+        let delta = event.delta_y();
+        if delta != 0.0 {
+            event.prevent_default();
+            // deltaMode 1 は行単位。窓の側は画素で受けるので読み替える。
+            let pixels = if event.delta_mode() == 1 { delta * 20.0 } else { delta };
+            session::wheel(session, pixels);
+        }
+    });
+    // つまみは文書全体のおおよその割合。動いたら窓をそこへ。
+    let scrollbar = session.borrow().view.scrollbar();
+    on(&scrollbar, "scroll", session, |session, _: web_sys::Event| {
+        session::thumb_moved(session);
+    });
+    // 中身の横スクロールでは、重ね描き（選択やキャレット）を測り直す。
+    let scroller = session.borrow().view.scroller();
+    on(&scroller, "scroll", session, |session, _: web_sys::Event| {
         session::scrolled(session);
     });
     if let Some(window) = web_sys::window() {
@@ -156,6 +172,12 @@ pub fn install(session: &Rc<RefCell<Session>>) {
 }
 
 fn copy_selection(session: &Rc<RefCell<Session>>, event: &web_sys::ClipboardEvent, remove: bool) {
+    // まだ届いていない行を含む選択は、文書の本体が組み立ててクリップボードへ
+    // 置く。届いていない行は編集できないので、切り取りでも削除は起きない。
+    if commands::request_far_copy(session) {
+        event.prevent_default();
+        return;
+    }
     // コピーするものがあるかどうかは、読み取られるテキストについてではなく、選択内容についての質問です。空の構造は何も読み取られません。
     let Some(text) = commands::selected_text(session) else {
         return;

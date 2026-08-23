@@ -129,6 +129,76 @@ pub fn delete_selection(session: &Rc<RefCell<Session>>) {
     changed(session);
 }
 
+/// まだ届いていない行を含む選択。手元では空に見えているだけなので、中身は
+/// 文書の本体に組み立ててもらう。端の行の切り出しと、構造を含む行の読み下し
+/// （手元にある分）はここで作る。
+pub struct FarCopy {
+    pub from_line: usize,
+    /// 端の行の切り出し。`None` は行を丸ごと。
+    pub first: Option<String>,
+    pub to_line: usize,
+    pub last: Option<String>,
+    /// 素の文字列のままではない行の、読み下したテキスト。
+    pub overrides: Vec<(usize, String)>,
+}
+
+/// 選択がまだ届いていない行に触れていれば、本体でのコピーを依頼して `true`。
+/// 手元に全部ある選択は `None` で、今までどおりその場でコピーされる。
+pub fn request_far_copy(session: &Rc<RefCell<Session>>) -> bool {
+    let (pane, copy) = {
+        let borrowed = session.borrow();
+        let Some(copy) = far_copy(&borrowed) else {
+            return false;
+        };
+        (borrowed.pane, copy)
+    };
+    super::session::request_far_copy(pane, copy);
+    true
+}
+
+fn far_copy(session: &Session) -> Option<FarCopy> {
+    use crate::structure::plain;
+    let editor = &session.editor;
+    if editor.nested_selection().is_some() {
+        return None;
+    }
+    let sel = editor.primary();
+    if sel.is_caret() {
+        return None;
+    }
+    let text = editor.text();
+    let (from, to) = (sel.start(), sel.end());
+    if text
+        .first_absent(from.line)
+        .is_none_or(|absent| absent > to.line)
+    {
+        return None;
+    }
+    // まだ届いていない行の長さは 0 なので、切り出しのある端の行は必ず手元にある。
+    let first =
+        (from.col > 0).then(|| plain::row(&text.line(from.line)[from.col..].to_vec()));
+    let last = (to.col > 0 || !text.is_absent(to.line))
+        .then(|| plain::row(&text.line(to.line)[..to.col].to_vec()));
+    let mut overrides = Vec::new();
+    for line in from.line..=to.line {
+        if (line == from.line && first.is_some()) || (line == to.line && last.is_some()) {
+            continue;
+        }
+        // 手元で編集や解析を経た行は、本体の記法の文字列と同じとは限らないので
+        // 読み下したものを添える。素のままの行と届いていない行はそのまま。
+        if !text.is_absent(line) && text.raw_line(line).is_none() {
+            overrides.push((line, plain::row(&text.line(line).to_vec())));
+        }
+    }
+    Some(FarCopy {
+        from_line: from.line,
+        first,
+        to_line: to.line,
+        last,
+        overrides,
+    })
+}
+
 /// 入れ子構造の編集を停止し、その直後にキャレットを残します。
 pub fn leave_structure(session: &Rc<RefCell<Session>>) {
     session.borrow_mut().editor.leave_structure();
@@ -151,6 +221,12 @@ pub fn find_next(query: &str, options: SearchOptions, file_size: Option<usize>) 
     let Some(found) = found else {
         return false;
     };
+    apply_found(&session, found);
+    true
+}
+
+/// 一致を選択して見せ、「次を検索」がそこから続くようにします。
+fn apply_found(session: &Rc<RefCell<Session>>, found: search::Found) {
     {
         let mut borrowed = session.borrow_mut();
         borrowed.search_from = Some(found.place.end());
@@ -163,7 +239,61 @@ pub fn find_next(query: &str, options: SearchOptions, file_size: Option<usize>) 
         }
     }
     focus();
-    redraw(&session);
+    redraw(session);
+}
+
+/// 文書の本体の走査で検索を続けるための出発点: 検索キーと行数。
+pub fn far_search_start() -> Option<(search::Key, usize)> {
+    let session = session()?;
+    let borrowed = session.borrow();
+    let from = borrowed.search_from.clone().unwrap_or_else(|| {
+        search::key_at(
+            borrowed.editor.primary().end(),
+            borrowed.editor.nested_cursor(),
+        )
+    });
+    Some((from, borrowed.editor.text().line_count()))
+}
+
+/// 本体の走査が見つけた素の行の一致へ跳びます。
+pub fn apply_far_match(pane: usize, line: usize, start: usize, end: usize) -> bool {
+    use crate::structure::text::Pos;
+    let Some(session) = super::session::pane_session(pane) else {
+        return false;
+    };
+    apply_found(
+        &session,
+        search::Found {
+            place: Place::Text(crate::structure::text::Sel::range(
+                Pos::new(line, start),
+                Pos::new(line, end),
+            )),
+            groups: Vec::new(),
+        },
+    );
+    true
+}
+
+/// 読み替えの要る行を手元で調べ、`after` より後の一致があれば選択します。
+pub fn find_far_in_line(
+    pane: usize,
+    line: usize,
+    query: &str,
+    options: SearchOptions,
+    file_size: Option<usize>,
+    after: Option<&search::Key>,
+) -> bool {
+    let Some(session) = super::session::pane_session(pane) else {
+        return false;
+    };
+    let found = {
+        let borrowed = session.borrow();
+        search::find_in_line(borrowed.editor.text(), line, query, options, file_size, after)
+    };
+    let Some(found) = found else {
+        return false;
+    };
+    apply_found(&session, found);
     true
 }
 

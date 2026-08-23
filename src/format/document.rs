@@ -7,6 +7,10 @@ use crate::structure::text::{SourceLine, Text};
 
 pub const TAB_SOURCE: &str = "t";
 
+/// この文字を含む行だけが読み替え（記法の解釈）を要する。行を文字列のまま
+/// 扱ってよいかの見分けに使う。
+pub const NOTATION_MARK: char = '$';
+
 pub fn read(source: &str) -> Text {
     Text::compose(source.split('\n').map(read_line).collect())
 }
@@ -16,7 +20,7 @@ pub fn read(source: &str) -> Text {
 pub fn read_line(line: &str) -> SourceLine {
     // `$` を含まない行には島もエスケープもないので、文字列のまま持ち、
     // そのまま書き戻せる。巨大なファイルの大部分がこの形で済む。
-    if !line.contains('$') {
+    if !line.contains(NOTATION_MARK) {
         return SourceLine::Plain(line.to_string());
     }
     let row = islands::parse_line(line)

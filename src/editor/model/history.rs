@@ -71,8 +71,8 @@ impl Editor {
 
     /// 前のステップと結合しない限り、新しいグループを開いてキャレットを控える。
     pub(super) fn record(&mut self, step: Step) {
-        let join = self.recorder.grouped
-            || (step == Step::Typing && self.recorder.last == Step::Typing);
+        let join =
+            self.recorder.grouped || (step == Step::Typing && self.recorder.last == Step::Typing);
         self.recorder.last = step;
         if join {
             return;

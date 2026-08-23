@@ -243,13 +243,34 @@ body {
   position: relative;
   container-type: inline-size;
   flex: 1;
-  overflow: auto;
-  padding: 0 22px 18px;
+  /* 縦はブラウザーにスクロールさせない。文書はファイルを覗く窓で、
+     ページには見えている行しか無い。 */
+  overflow: hidden;
   outline: none;
   line-height: 2;
   cursor: text;
   font-size: var(--setting-font-size, 15px);
   font-family: var(--setting-font-text, var(--font-text));
+}
+
+/* 中身を横にだけスクロールする層。入力欄もこの中で行と一緒に動く。 */
+.mn-hscroll {
+  position: absolute;
+  inset: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0 22px 18px;
+}
+
+/* 縦のつまみ。数千 px の空間で文書全体のおおよその割合を示す。 */
+.mn-vscroll {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 14px;
+  overflow-y: scroll;
+  overflow-x: hidden;
 }
 
 .mn-content {
@@ -292,11 +313,6 @@ body {
 .mn-nowrap .mn-line {
   white-space: pre;
   overflow-wrap: normal;
-}
-
-/* がある行の上下にある、ページ内にない行を表す。そのため、文書は全長でスクロールする。 */
-.mn-gap {
-  pointer-events: none;
 }
 
 /* ガター内の行番号。文書の行には属さず、描画後に本体フラグメントの中央へ配置されます。 */

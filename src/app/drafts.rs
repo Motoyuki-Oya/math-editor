@@ -58,13 +58,8 @@ fn arm() {
 
 /// 前回の書き込み以降に変更されたすべてのドキュメントを書き込みます。
 fn flush() {
-    let pending: Vec<Tab> = PENDING.with(|pending| {
-        pending
-            .borrow_mut()
-            .drain()
-            .map(|(_, tab)| tab)
-            .collect()
-    });
+    let pending: Vec<Tab> =
+        PENDING.with(|pending| pending.borrow_mut().drain().map(|(_, tab)| tab).collect());
     for tab in pending {
         sync::draft(tab);
     }

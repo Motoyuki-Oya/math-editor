@@ -50,7 +50,7 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                                 let options = options();
                                 spawn_local(async move {
                                     let size = file_size_for(shell).await;
-                                    editor::find_next(&query, options, size);
+                                    super::sync::find(shell, query, options, size);
                                 });
                             }
                         }
@@ -61,7 +61,7 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                         let options = options();
                         spawn_local(async move {
                             let size = file_size_for(shell).await;
-                            editor::find_next(&query, options, size);
+                            super::sync::find(shell, query, options, size);
                         });
                     }>"次を検索"</button>
                     <input
@@ -77,6 +77,14 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                         let replacement = replacement.get_untracked();
                         let options = options();
                         spawn_local(async move {
+                            // 手元に全部ない文書の置換は、まだ取得済みの行しか見ない。
+                            // 黙って一部だけ置換するより、正直に断る。
+                            if !editor::fully_resident() {
+                                shell.status.set(
+                                    "大きなファイルのすべて置換はまだ対応していません".into(),
+                                );
+                                return;
+                            }
                             let size = file_size_for(shell).await;
                             let replaced = editor::replace_all(&query, &replacement, options, size);
                             shell.status.set(format!("{replaced} 件置換しました"));

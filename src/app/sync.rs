@@ -23,9 +23,19 @@ const CHUNK_LINES: usize = 20_000;
 enum Task {
     Fetch(Range<usize>),
     Edits(editor::FlushBatch),
-    Undo { redo: bool },
-    Save { path: String },
+    Undo {
+        redo: bool,
+    },
+    Save {
+        path: String,
+    },
     Draft,
+    Copy(editor::FarCopy),
+    Find {
+        query: String,
+        options: editor::SearchOptions,
+        file_size: Option<usize>,
+    },
 }
 
 thread_local! {
@@ -39,6 +49,14 @@ thread_local! {
 pub(super) fn install(shell: Shell) {
     SHELL.set(Some(shell));
     editor::set_on_missing(Rc::new(move |pane, range| fetch(shell, pane, range)));
+    editor::set_on_far_copy(Rc::new(move |pane, copy| {
+        if let Some(tab) = shell.tab_of(pane) {
+            // 大きな選択の組み立てとクリップボードへの書き込みは時間がかかる。
+            // 固まったと思われないように、始めたことを見せる。
+            shell.status.set("コピーしています…".into());
+            enqueue(tab, Task::Copy(copy));
+        }
+    }));
 }
 
 /// 画面に入ったのにまだ無い行を取り寄せる。並んでいる取り寄せがあれば合流する。
@@ -85,6 +103,22 @@ pub(super) fn save(tab: Tab, path: String) {
 
 pub(super) fn draft(tab: Tab) {
     enqueue(tab, Task::Draft);
+}
+
+/// 次を検索。手元に全部ある文書はその場で、そうでなければ本体の走査で。
+pub(super) fn find(shell: Shell, query: String, options: editor::SearchOptions, file_size: Option<usize>) {
+    if editor::fully_resident() {
+        editor::find_next(&query, options, file_size);
+        return;
+    }
+    enqueue(
+        shell.tab_untracked(),
+        Task::Find {
+            query,
+            options,
+            file_size,
+        },
+    );
 }
 
 fn enqueue(tab: Tab, task: Task) {
@@ -191,8 +225,121 @@ async fn execute(tab: Tab, task: Task) -> bool {
             let path = tab.path.get_untracked();
             ipc::save_draft(handle, id, path.as_deref()).await;
         }
+        Task::Copy(copy) => match assemble_copy(handle, copy).await {
+            Ok(()) => shell.status.set("コピーしました".into()),
+            Err(error) => shell.status.set(error),
+        },
+        Task::Find {
+            query,
+            options,
+            file_size,
+        } => match find_far(shell, tab, handle, &query, options, file_size).await {
+            Ok(_) => {}
+            Err(error) => shell.status.set(error),
+        },
     }
     true
+}
+
+/// 1 回の走査で本体から取り寄せる行数。一致が見つかればもっと早く返る。
+const SCAN_LINES: usize = 200_000;
+
+/// 文書の本体を走査して次の一致へ跳ぶ。素の行の一致は本体が見つけ、記法を
+/// 含む行だけ取り寄せて手元の構造検索で調べる。端まで行ったら先頭へ回る。
+async fn find_far(
+    shell: Shell,
+    tab: Tab,
+    handle: u64,
+    query: &str,
+    options: editor::SearchOptions,
+    file_size: Option<usize>,
+) -> Result<bool, String> {
+    use crate::format::document;
+    use crate::structure::text::Pos;
+    let Some(pane) = shell.pane_showing(tab).map(|pane| pane.editor_pane()) else {
+        return Ok(false);
+    };
+    let Some((after, line_count)) = editor::far_search_start() else {
+        return Ok(false);
+    };
+    let start_line = after.0.line;
+    // 一巡り: 出発点の行から末尾まで、その後は先頭から出発点の行まで。
+    let passes: [(usize, usize, Option<&editor::search::Key>); 2] = [
+        (start_line, line_count, Some(&after)),
+        (0, (start_line + 1).min(line_count), None),
+    ];
+    for (mut from, end, filter) in passes {
+        while from < end {
+            let page = ipc::search_lines(
+                handle,
+                query,
+                options.regex,
+                options.case_sensitive,
+                document::NOTATION_MARK,
+                from,
+                (end - from).min(SCAN_LINES),
+            )
+            .await?;
+            for hit in &page.hits {
+                if hit.notation {
+                    let lines = ipc::read_lines(handle, hit.line, 1).await?;
+                    shell.feed(tab, hit.line, &lines);
+                    if editor::find_far_in_line(pane, hit.line, query, options, file_size, filter)
+                    {
+                        return Ok(true);
+                    }
+                } else {
+                    let key = (Pos::new(hit.line, hit.start), None);
+                    if filter.is_none_or(|after| &key >= after)
+                        && editor::apply_far_match(pane, hit.line, hit.start, hit.end)
+                    {
+                        return Ok(true);
+                    }
+                }
+            }
+            if page.scanned_to <= from {
+                break;
+            }
+            from = page.scanned_to;
+        }
+    }
+    Ok(false)
+}
+
+/// まだ届いていない行を含む選択のコピー。記法の解釈を要する行だけを取り寄せて
+/// 読み下し、組み立てとクリップボードへの書き込みは本体が行う。
+async fn assemble_copy(handle: u64, copy: editor::FarCopy) -> Result<(), String> {
+    use crate::format::document;
+    use crate::structure::plain;
+    use crate::structure::text::SourceLine;
+    let mut overrides = copy.overrides;
+    let notation =
+        ipc::lines_containing(handle, copy.from_line, copy.to_line, document::NOTATION_MARK)
+            .await?;
+    for line in notation {
+        if (line == copy.from_line && copy.first.is_some())
+            || (line == copy.to_line && copy.last.is_some())
+            || overrides.iter().any(|(l, _)| *l == line)
+        {
+            continue;
+        }
+        let text = ipc::read_lines(handle, line, 1).await?;
+        let Some(text) = text.first() else { continue };
+        let plain = match document::read_line(text) {
+            SourceLine::Parsed(row) => plain::row(&row),
+            SourceLine::Plain(text) => text,
+        };
+        overrides.push((line, plain));
+    }
+    ipc::copy_range(
+        handle,
+        copy.from_line,
+        copy.first.as_deref(),
+        copy.to_line,
+        copy.last.as_deref(),
+        &overrides,
+    )
+    .await
 }
 
 /// タブの文書の取っ手。新しいタブでは作成が届くまで少し待つ。
@@ -211,13 +358,9 @@ async fn tick(ms: i32) {
     let promise = js_sys::Promise::new(&mut |resolve, _| {
         if let Some(window) = web_sys::window() {
             window
-                .set_timeout_with_callback_and_timeout_and_arguments_0(
-                    resolve.unchecked_ref(),
-                    ms,
-                )
+                .set_timeout_with_callback_and_timeout_and_arguments_0(resolve.unchecked_ref(), ms)
                 .ok();
         }
     });
     let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
-

@@ -133,7 +133,15 @@ pub async fn read_lines(handle: u64, from: usize, count: usize) -> Result<Vec<St
         from: usize,
         count: usize,
     }
-    let value = call("read_lines", Args { handle, from, count }).await?;
+    let value = call(
+        "read_lines",
+        Args {
+            handle,
+            from,
+            count,
+        },
+    )
+    .await?;
     serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
 }
 
@@ -196,7 +204,7 @@ pub async fn undo_lines(handle: u64, redo: bool) -> Option<RestoredLines> {
         redo: bool,
     }
     let value = call("undo_lines", Args { handle, redo }).await.ok()?;
-    serde_wasm_bindgen::from_value(value).ok()
+    serde_wasm_bindgen::from_value::<Option<RestoredLines>>(value).ok()?
 }
 
 /// 文書の本体からディスクへ直接保存します。全文は webview を通りません。
@@ -206,7 +214,121 @@ pub async fn save_document(handle: u64, path: &str) -> Result<(), String> {
         handle: u64,
         path: &'a str,
     }
-    call("save_document", Args { handle, path }).await.map(|_| ())
+    call("save_document", Args { handle, path })
+        .await
+        .map(|_| ())
+}
+
+/// 範囲内で `needle` を含む行の番号。読み替えの必要な行を探すのに使います。
+pub async fn lines_containing(
+    handle: u64,
+    from: usize,
+    to: usize,
+    needle: char,
+) -> Result<Vec<usize>, String> {
+    #[derive(Serialize)]
+    struct Args {
+        handle: u64,
+        from: usize,
+        to: usize,
+        needle: char,
+    }
+    let value = call(
+        "lines_containing",
+        Args {
+            handle,
+            from,
+            to,
+            needle,
+        },
+    )
+    .await?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
+}
+
+/// 選択された範囲を本体で組み立てて、システムのクリップボードへ置きます。
+pub async fn copy_range(
+    handle: u64,
+    from: usize,
+    first: Option<&str>,
+    to: usize,
+    last: Option<&str>,
+    overrides: &[(usize, String)],
+) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        handle: u64,
+        from: usize,
+        first: Option<&'a str>,
+        to: usize,
+        last: Option<&'a str>,
+        overrides: &'a [(usize, String)],
+    }
+    call(
+        "copy_range",
+        Args {
+            handle,
+            from,
+            first,
+            to,
+            last,
+            overrides,
+        },
+    )
+    .await
+    .map(|_| ())
+}
+
+/// 検索走査の 1 件。`notation` の行は一致ではなく「手元で見るべき行」。
+#[derive(Deserialize)]
+pub struct ScanHit {
+    pub line: usize,
+    pub notation: bool,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// 検索の 1 ページ分の走査結果。`scanned_to` から続きを頼める。
+#[derive(Deserialize)]
+pub struct ScanPage {
+    pub hits: Vec<ScanHit>,
+    pub scanned_to: usize,
+}
+
+/// 文書の本体を `from` から `count` 行ぶん走査します。
+pub async fn search_lines(
+    handle: u64,
+    query: &str,
+    regex: bool,
+    case_sensitive: bool,
+    needle: char,
+    from: usize,
+    count: usize,
+) -> Result<ScanPage, String> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        handle: u64,
+        query: &'a str,
+        regex: bool,
+        case_sensitive: bool,
+        needle: char,
+        from: usize,
+        count: usize,
+    }
+    let value = call(
+        "search_lines",
+        Args {
+            handle,
+            query,
+            regex,
+            case_sensitive,
+            needle,
+            from,
+            count,
+        },
+    )
+    .await?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
 }
 
 /// 文書の本体から下書きを書きます。

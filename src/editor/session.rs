@@ -51,7 +51,7 @@ pub fn session() -> Option<Rc<RefCell<Session>>> {
     })
 }
 
-fn pane_session(pane: usize) -> Option<Rc<RefCell<Session>>> {
+pub(super) fn pane_session(pane: usize) -> Option<Rc<RefCell<Session>>> {
     PANES.with(|panes| {
         panes
             .borrow()
@@ -65,7 +65,8 @@ fn pane_session(pane: usize) -> Option<Rc<RefCell<Session>>> {
 pub fn init(root: &HtmlElement) -> Option<usize> {
     let doc = root.owner_document()?;
     let view = View::new(root.clone())?;
-    let textarea = input::build(&doc, root)?;
+    // 入力欄は横スクロールする要素の中で、行と一緒に動く。
+    let textarea = input::build(&doc, &view.scroller())?;
     let pane = NEXT_PANE.get();
     NEXT_PANE.set(pane + 1);
     let session = Rc::new(RefCell::new(Session {
@@ -132,6 +133,24 @@ pub fn set_on_missing(callback: OnMissing) {
     ON_MISSING.with(|slot| *slot.borrow_mut() = Some(callback));
 }
 
+/// まだ届いていない行を含む選択のコピーを、文書の本体を知るアプリへ頼みます。
+type OnFarCopy = Rc<dyn Fn(usize, super::commands::FarCopy)>;
+
+thread_local! {
+    static ON_FAR_COPY: RefCell<Option<OnFarCopy>> = const { RefCell::new(None) };
+}
+
+pub fn set_on_far_copy(callback: OnFarCopy) {
+    ON_FAR_COPY.with(|slot| *slot.borrow_mut() = Some(callback));
+}
+
+pub(super) fn request_far_copy(pane: usize, copy: super::commands::FarCopy) {
+    let callback = ON_FAR_COPY.with(|slot| slot.borrow().clone());
+    if let Some(callback) = callback {
+        callback(pane, copy);
+    }
+}
+
 /// 描いた窓の中にまだ届いていない行があれば、その範囲を要求します。
 fn request_missing(session: &Rc<RefCell<Session>>) {
     let (pane, range) = {
@@ -177,6 +196,19 @@ pub fn redraw(session: &Rc<RefCell<Session>>) {
         }
     }
     request_missing(session);
+}
+
+/// ホイール。窓を行の分だけ動かして描き直します。
+pub(super) fn wheel(session: &Rc<RefCell<Session>>, pixels: f64) {
+    session.borrow().view.wheel(pixels);
+    scrolled(session);
+}
+
+/// つまみが動いた。文書全体の割合で窓を動かして描き直します。
+pub(super) fn thumb_moved(session: &Rc<RefCell<Session>>) {
+    if session.borrow().view.follow_thumb() {
+        scrolled(session);
+    }
 }
 
 /// ビューがスクロールされた後に再度描画するため、表示された行がページに配置されます。 [`redraw`] とは異なり、これはユーザーがスクロールしたビューを残し、キャレットに移動しません。
@@ -290,13 +322,25 @@ pub fn feed_pane(pane: usize, from: usize, lines: &[String]) {
         lines.iter().map(|line| document::read_line(line)).collect(),
     );
     // 描き直すのは届いた行が画面に見えるときだけ。見えない行のために毎回
-    // 描き直すと、取り寄せより描画が高くつく。
-    let visible = {
-        let drawn = session.borrow().view.drawn();
-        from < drawn.end && from + lines.len() > drawn.start
+    // 描き直すと、取り寄せより描画が高くつく。描き直しはユーザーの置いた
+    // スクロールを尊重する。届いた行のためにキャレットへ跳んではいけない。
+    let (visible, follows_caret) = {
+        let borrowed = session.borrow();
+        let drawn = borrowed.view.drawn();
+        (
+            from < drawn.end && from + lines.len() > drawn.start,
+            drawn.contains(&borrowed.editor.primary().head.line),
+        )
     };
     if visible {
-        redraw(&session);
+        session.borrow().view.invalidate();
+        if follows_caret {
+            // Ctrl+End など、目的の行の中身が届いた。目的行を含む窓を直接
+            // 描き直してそこへ着地する。スクロール座標から窓を推定し直さない。
+            redraw(&session);
+        } else {
+            scrolled(&session);
+        }
     }
 }
 
@@ -373,4 +417,10 @@ pub fn stats() -> (usize, usize) {
     session()
         .map(|session| session.borrow().editor.text().stats())
         .unwrap_or((0, 1))
+}
+
+/// 入力を受けるペインの文書が手元に全部あるか。検索や置換が文書の本体の
+/// 走査を要るかの見分け。
+pub fn fully_resident() -> bool {
+    session().is_some_and(|session| session.borrow().editor.text().absent_lines() == 0)
 }
