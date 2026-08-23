@@ -185,7 +185,7 @@ fn far_copy(session: &Session) -> Option<FarCopy> {
     // まだ届いていない行の長さは 0 なので、切り出しのある端の行は必ず手元にある。
     let first =
         (from.col > 0).then(|| plain::row(&text.line(from.line)[from.col..].to_vec()));
-    let last = (to.col > 0 || text.first_absent(to.line) != Some(to.line))
+    let last = (to.col > 0 || !text.is_absent(to.line))
         .then(|| plain::row(&text.line(to.line)[..to.col].to_vec()));
     let mut overrides = Vec::new();
     for line in from.line..=to.line {
@@ -194,7 +194,7 @@ fn far_copy(session: &Session) -> Option<FarCopy> {
         }
         // 手元で編集や解析を経た行は、本体の記法の文字列と同じとは限らないので
         // 読み下したものを添える。素のままの行と届いていない行はそのまま。
-        if text.first_absent(line) != Some(line) && text.raw_line(line).is_none() {
+        if !text.is_absent(line) && text.raw_line(line).is_none() {
             overrides.push((line, plain::row(&text.line(line).to_vec())));
         }
     }
