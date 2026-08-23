@@ -27,6 +27,10 @@ const GAP_CLASS: &str = "mn-gap";
 /// 画面の端を越えてどのくらい先まで描くか（画面数）。これより少ないスクロールは、
 /// すでにそこにある行が受け止めます。
 const MARGIN_SCREENS: f64 = 1.0;
+/// ページの高さの上限。ブラウザーは要素の高さに上限（数千万 px）があり、
+/// 何百万行の文書を 1 行 1 行の高さで積むと超えてしまう。超えるときは
+/// 置き場所を同じ比率で縮め、スクロール位置と行の対応も同じ比率で読む。
+const MAX_PIXELS: f64 = 16_000_000.0;
 /// 列区切りのブロックが描画範囲を画面の外へ引き込める行数。列を揃えるには
 /// ブロック全体が要りますが、いくらでもというわけにはいきません。
 const BLOCK_LIMIT: usize = 200;
@@ -41,6 +45,8 @@ pub(super) struct Viewport {
     /// 現在ページ内にある行。ページを測定するものはすべて、これらについてのみ
     /// 語ることができます。
     drawn: RefCell<Range<usize>>,
+    /// 置き場所の縮尺。文書の画素の高さがブラウザーの上限に収まるときは 1。
+    scale: std::cell::Cell<f64>,
 }
 
 impl Viewport {
@@ -50,6 +56,7 @@ impl Viewport {
             document,
             heights: RefCell::new(Heights::new()),
             drawn: RefCell::new(0..0),
+            scale: std::cell::Cell::new(1.0),
         }
     }
 
@@ -78,7 +85,14 @@ impl Viewport {
         draw_line: &dyn Fn(&Document, usize) -> Option<Element>,
         finish: &dyn Fn(&Range<usize>),
     ) {
-        self.heights.borrow_mut().fit(text.line_count());
+        {
+            let mut heights = self.heights.borrow_mut();
+            heights.fit(text.line_count());
+            // 文書の画素の高さがブラウザーの上限を超えるなら、置き場所を縮める。
+            let total = heights.span(0..text.line_count());
+            self.scale
+                .set((MAX_PIXELS / total.max(1.0)).min(1.0));
+        }
         // ビューの行き先: 何かが変わったときはキャレット、スクロールされたときは
         // ユーザーが置いた場所。
         let mut scroll = match follow {
@@ -127,12 +141,13 @@ impl Viewport {
         let Some(doc) = self.document.owner_document() else {
             return self.root.scroll_top() as f64;
         };
+        let scale = self.scale.get();
         let window = self.widen_for_blocks(text, self.window(scroll, text.line_count()));
         self.document.set_inner_html("");
         let above = element(&doc, "div", GAP_CLASS);
         // 描く行の上に何があるかの見立て。測ると変わり、描いた行もその差の分だけ
-        // 動くので、スクロールも一緒に動かします。
-        let guessed = self.heights.borrow().span(0..window.start);
+        // 動くので、スクロールも一緒に動かします。場所取りは縮尺つき。
+        let guessed = self.heights.borrow().span(0..window.start) * scale;
         if let Some(gap) = &above {
             // 場所取りはページに入る前に高さを持ちます。文書より短いページは
             // ブラウザがスクロールを切り詰め、ビューがそれ以上下へ行けなく
@@ -149,7 +164,7 @@ impl Viewport {
         if let Some(gap) = &below {
             set_height(
                 gap,
-                self.heights.borrow().span(window.end..text.line_count()),
+                self.heights.borrow().span(window.end..text.line_count()) * scale,
             );
             append(&self.document, gap);
         }
@@ -157,12 +172,12 @@ impl Viewport {
         self.measure(&window);
         // 間の行を測り直したので、場所取りも合わせ直します。
         let heights = self.heights.borrow();
-        let measured = heights.span(0..window.start);
+        let measured = heights.span(0..window.start) * scale;
         if let Some(gap) = &above {
             set_height(gap, measured);
         }
         if let Some(gap) = &below {
-            set_height(gap, heights.span(window.end..text.line_count()));
+            set_height(gap, heights.span(window.end..text.line_count()) * scale);
         }
         drop(heights);
         // ビューの行き先はここでだけ決まります。行を置き換えるとページが一時的に
@@ -188,7 +203,7 @@ impl Viewport {
             // ビューを動かす先の行がまだ描かれてもいないので、範囲を選んだ高さが
             // その行について間違っていました。それまでに測ったものからもう一度
             // 狙い直します。
-            return (self.heights.borrow().top_of(line) - view / 3.0).max(0.0);
+            return self.guessed_scroll(line, view);
         };
         let rect = measure::box_of(&holder.get_bounding_client_rect());
         let root = measure::box_of(&self.root.get_bounding_client_rect());
@@ -204,14 +219,23 @@ impl Viewport {
         }
     }
 
+    /// 行の描かれていないときの行き先。置き場所の縮尺で読む。
+    fn guessed_scroll(&self, line: usize, view: f64) -> f64 {
+        (self.heights.borrow().top_of(line) * self.scale.get() - view / 3.0).max(0.0)
+    }
+
     /// 画面が届く行に加えて上下に一画面分。少しのスクロールでは何も描き直さずに
     /// 済むようにです。
     fn window(&self, scroll: f64, count: usize) -> Range<usize> {
         let height = self.root.client_height() as f64;
         let margin = (height * MARGIN_SCREENS).max(200.0);
         let heights = self.heights.borrow();
-        let start = heights.line_at(scroll - margin);
-        let end = heights.line_at(scroll + height + margin) + 1;
+        // スクロール位置は縮尺つきの置き場所で行に読み替え、そこから
+        // 上下の余白と画面のぶんは実寸の高さで数える。
+        let anchor = heights.line_at(scroll / self.scale.get());
+        let top = heights.top_of(anchor);
+        let start = heights.line_at(top - margin);
+        let end = heights.line_at(top + height + margin) + 1;
         start..end.max(start + 1).min(count)
     }
 
@@ -255,9 +279,8 @@ impl Viewport {
         if self.window(scroll, count).contains(&line) {
             return scroll;
         }
-        let height = self.root.client_height() as f64;
         // 三分の一ほど下に置いて、キャレットに続くものが見えるようにします。
-        (self.heights.borrow().top_of(line) - height / 3.0).max(0.0)
+        self.guessed_scroll(line, self.root.client_height() as f64)
     }
 
     /// キャレットの箱（画面座標）が見える範囲に入るまでスクロールし、その箱の
