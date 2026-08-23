@@ -308,13 +308,15 @@ pub fn feed_pane(pane: usize, from: usize, lines: &[String]) {
         lines.iter().map(|line| document::read_line(line)).collect(),
     );
     // 描き直すのは届いた行が画面に見えるときだけ。見えない行のために毎回
-    // 描き直すと、取り寄せより描画が高くつく。
+    // 描き直すと、取り寄せより描画が高くつく。描き直しはユーザーの置いた
+    // スクロールを尊重する。届いた行のためにキャレットへ跳んではいけない。
     let visible = {
         let drawn = session.borrow().view.drawn();
         from < drawn.end && from + lines.len() > drawn.start
     };
     if visible {
-        redraw(&session);
+        session.borrow().view.invalidate();
+        scrolled(&session);
     }
 }
 

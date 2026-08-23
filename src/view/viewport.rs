@@ -64,6 +64,12 @@ impl Viewport {
         self.drawn.borrow().clone()
     }
 
+    /// 描いてある窓を忘れさせ、次の描き直しに必ず描かせる。窓の中の行の
+    /// 中身が変わった（届いた）ときに使う。
+    pub(super) fn invalidate(&self) {
+        *self.drawn.borrow_mut() = 0..0;
+    }
+
     /// 行の要素は、子の中での位置ではなく、その行が表す行によって決まります。
     /// ページ内には行の一部のみが存在します。
     pub(super) fn line_element(&self, line: usize) -> Option<Element> {
@@ -106,8 +112,11 @@ impl Viewport {
         if !follow {
             let window = self.widen_for_blocks(text, self.window(scroll, text.line_count()));
             // 余白の中のスクロールは、すでにそこにある行が受け止めるので、
-            // 描くものがありません。
-            if window == *self.drawn.borrow() {
+            // 描くものがありません。縮尺つきの読み替えは 1 行ぶんずれることが
+            // あるので、等しいかではなく「はみ出したか」で判断する。等しさを
+            // 求めると、描き直しとスクロール補正が互いを呼び続けて止まらない。
+            let drawn = self.drawn.borrow().clone();
+            if drawn.start <= window.start && window.end <= drawn.end {
                 return;
             }
             keep = (self.scroll_onto(caret_line, scroll) - scroll).abs() <= 0.5;
