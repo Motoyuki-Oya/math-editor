@@ -339,6 +339,11 @@ pub fn set_line_count(pane: usize, count: usize) {
     redraw(&session);
 }
 
+/// 手元に置いておく行数の上限と、見えている窓の周りに残す幅。上限を超えたら
+/// 窓から遠い行を未着へ戻し、スクロールで訪れた行が溜まり続けないようにする。
+const RESIDENT_LIMIT: usize = 20_000;
+const RESIDENT_KEEP: usize = 5_000;
+
 /// 画面上のペインへ届いた行を入れます。
 pub fn feed_pane(pane: usize, from: usize, lines: &[String]) {
     let Some(session) = pane_session(pane) else {
@@ -348,6 +353,15 @@ pub fn feed_pane(pane: usize, from: usize, lines: &[String]) {
         from,
         lines.iter().map(|line| document::read_line(line)).collect(),
     );
+    {
+        let mut borrowed = session.borrow_mut();
+        if borrowed.editor.resident_lines() > RESIDENT_LIMIT {
+            let drawn = borrowed.view.drawn();
+            borrowed.editor.evict_far(
+                drawn.start.saturating_sub(RESIDENT_KEEP)..drawn.end + RESIDENT_KEEP,
+            );
+        }
+    }
     // 描き直すのは届いた行が画面に見えるときだけ。見えない行のために毎回
     // 描き直すと、取り寄せより描画が高くつく。描き直しはユーザーの置いた
     // スクロールを尊重する。届いた行のためにキャレットへ跳んではいけない。

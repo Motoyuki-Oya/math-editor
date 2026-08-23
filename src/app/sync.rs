@@ -70,7 +70,14 @@ fn fetch(shell: Shell, editor_pane: usize, range: Range<usize>) {
         let queue = queues.entry(id).or_default();
         for (_, task) in queue.iter_mut() {
             if let Task::Fetch(current) = task {
-                *current = current.start.min(range.start)..current.end.max(range.end);
+                // 重なるか隣り合う要求だけ 1 つにまとめる。離れた要求まで
+                // つなぐと間の何百万行も取り寄せてしまうので、古い方は
+                // 捨てて新しい窓を優先する。まだ要るなら描き直しが再要求する。
+                if range.start <= current.end && current.start <= range.end {
+                    *current = current.start.min(range.start)..current.end.max(range.end);
+                } else {
+                    *current = range.clone();
+                }
                 return true;
             }
         }

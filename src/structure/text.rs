@@ -282,6 +282,27 @@ impl Text {
         }
     }
 
+    /// `keep` の外の行を未着へ戻し、手元のメモリを返す。行はまた見えれば
+    /// 本体から届き直す。まだ送っていない編集を含む行と `pinned`（選択や
+    /// キャレットの行）は捨てない。これは編集ではないので控えには残らない。
+    pub fn evict_far(&mut self, keep: std::ops::Range<usize>, pinned: &[usize]) {
+        let absent = Rc::new(Line::Absent);
+        for (i, slot) in self.lines.iter_mut().enumerate() {
+            if keep.contains(&i)
+                || pinned.contains(&i)
+                || matches!(slot.as_ref(), Line::Absent)
+                || self
+                    .changes
+                    .iter()
+                    .any(|c| i >= c.from && i < c.from + c.inserted)
+            {
+                continue;
+            }
+            *slot = absent.clone();
+            self.absent += 1;
+        }
+    }
+
     /// 走査で確定した行数へ合わせる。伸びる分は未着行として足す。
     pub fn resize_pending(&mut self, line_count: usize) {
         let target = line_count.max(1);
@@ -625,6 +646,29 @@ mod tests {
                 inserted: 0
             }]
         );
+    }
+
+    #[test]
+    fn eviction_keeps_the_window_pins_and_pending_edits() {
+        let mut text = Text::pending(10);
+        for i in 0..10 {
+            text.fill_line(i, SourceLine::Plain(format!("line {i}")));
+        }
+        // 8 行目に未送信の編集を作る。
+        text.line_mut(8);
+        text.evict_far(2..5, &[6]);
+        // 窓の中・ピン・編集済みは残り、それ以外は未着へ戻る。
+        assert_eq!(text.raw_line(2), Some("line 2"));
+        assert_eq!(text.raw_line(4), Some("line 4"));
+        assert_eq!(text.raw_line(6), Some("line 6"));
+        assert!(!text.is_absent(8));
+        assert!(text.is_absent(0));
+        assert!(text.is_absent(5));
+        assert!(text.is_absent(9));
+        assert_eq!(text.absent_lines(), 5);
+        // 戻った行はまた届き直せる。
+        text.fill_line(0, SourceLine::Plain("again".into()));
+        assert_eq!(text.raw_line(0), Some("again"));
     }
 
     #[test]
