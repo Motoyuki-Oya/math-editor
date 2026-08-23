@@ -81,7 +81,12 @@ impl Heights {
         self.sum.upto(lines) + (lines as f64 - measured) * self.unit()
     }
 
+    pub(super) fn len(&self) -> usize {
+        self.each.len()
+    }
+
     /// 文書の上部から測った線の開始位置。
+    #[cfg(test)]
     pub(super) fn top_of(&self, line: usize) -> f64 {
         self.upto(line)
     }
@@ -92,6 +97,7 @@ impl Heights {
     }
 
     /// 最初の行は「y」まで続き、そこから描画が始まります。
+    #[cfg(test)]
     pub(super) fn line_at(&self, y: f64) -> usize {
         let count = self.each.len();
         if y <= 0.0 || count == 0 {
