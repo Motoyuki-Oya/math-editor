@@ -494,6 +494,18 @@ impl Shell {
                     tab.path.set(Some(path));
                     shell.status.set("開きました".into());
                     shell.mark_clean();
+                    // 行数はバックグラウンドで走査中。確定したら手元へ合わせる。
+                    let handle = doc.handle;
+                    let editor_pane = pane.editor_pane();
+                    spawn_local(async move {
+                        match ipc::finish_document(handle).await {
+                            Ok(count) => {
+                                editor::set_line_count(editor_pane, count);
+                                shell.refresh();
+                            }
+                            Err(error) => shell.status.set(error),
+                        }
+                    });
                 }
                 Err(error) => shell.status.set(error),
             }

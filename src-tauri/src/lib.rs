@@ -90,7 +90,47 @@ struct OpenedDocument {
 /// async なのは UI を待たせないため。
 #[tauri::command]
 async fn open_document(state: State<'_, AppState>, path: String) -> Result<OpenedDocument, String> {
-    Ok(state.adopt(store::Document::open(&path)?))
+    let (doc, scan) = store::Document::open(&path)?;
+    let opened = state.adopt(doc);
+    if let Some(scan) = scan {
+        std::thread::spawn(move || {
+            let _ = scan.run();
+        });
+    }
+    Ok(opened)
+}
+
+/// 走査の完了を待ち、文書の行数を確定させる。
+async fn wait_scanned(state: &State<'_, AppState>, handle: u64) -> Result<(), String> {
+    let index = {
+        let docs = state.docs.lock().unwrap();
+        let Some(doc) = docs.get(&handle) else {
+            return Err("文書はもう閉じられています".to_string());
+        };
+        doc.scan_index()
+    };
+    if let Some(index) = index {
+        while index.status()?.is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+    }
+    let mut docs = state.docs.lock().unwrap();
+    if let Some(doc) = docs.get_mut(&handle) {
+        doc.confirm_scan();
+    }
+    Ok(())
+}
+
+/// 走査の完了を待ってから確定した行数を返す。frontend は開いた直後に
+/// これを 1 度呼び、返った行数で文書の長さを確定させる。
+#[tauri::command]
+async fn finish_document(state: State<'_, AppState>, handle: u64) -> Result<usize, String> {
+    wait_scanned(&state, handle).await?;
+    let docs = state.docs.lock().unwrap();
+    let Some(doc) = docs.get(&handle) else {
+        return Err("文書はもう閉じられています".to_string());
+    };
+    Ok(doc.line_count())
 }
 
 /// 新しい空の文書をストアに作ります。すべての文書の本体がネイティブ側にあります。
@@ -545,6 +585,7 @@ pub fn run() {
             pick_open_path,
             pick_save_path,
             open_document,
+            finish_document,
             create_document,
             read_lines,
             replace_lines,

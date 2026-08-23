@@ -11,6 +11,7 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 /// 何行ごとに行頭のバイト位置を控えるか。1600 万行でも索引は数万個で済み、
@@ -23,41 +24,127 @@ const HISTORY_LIMIT: usize = 1000;
 /// ファイルを読むときのひとかたまり。
 const CHUNK: usize = 1 << 20;
 
+/// 走査スレッドが更新する間引き索引と行数。
+pub struct ScanIndex {
+    state: Mutex<ScanState>,
+}
+
+struct ScanState {
+    /// STRIDE 行ごとの行頭のバイト位置。先頭は必ず 0。
+    marks: Vec<u64>,
+    /// 走査済みの行数。完了後は総行数。
+    lines: usize,
+    /// 走査が終わったか。
+    done: bool,
+    /// 途中で UTF-8 違反が見つかった場合の遅延エラー。
+    broken: Option<String>,
+}
+
+impl ScanIndex {
+    /// `Ok(Some(lines))` は完了、`Ok(None)` は走査中、`Err` は遅延エラー。
+    pub fn status(&self) -> Result<Option<usize>, String> {
+        let index = self.state.lock().unwrap();
+        match &index.broken {
+            Some(error) => Err(error.clone()),
+            None if index.done => Ok(Some(index.lines)),
+            None => Ok(None),
+        }
+    }
+}
+
 /// 開いたファイル。行の中身はここから seek で読む。
 struct Source {
     path: PathBuf,
     file: File,
-    /// STRIDE 行ごとの行頭のバイト位置。先頭は必ず 0。
-    marks: Vec<u64>,
-    /// ディスク上の行数。
-    lines: usize,
+    /// 行数と間引き索引はバックグラウンド走査スレッドと共有する。
+    index: Arc<ScanIndex>,
     bytes: u64,
     /// 開いたときの姿。外から書き換えられると seek 読みが壊れるので、
     /// 変わっていたら読む前に断る。
     modified: Option<SystemTime>,
 }
 
+pub struct BackgroundScan {
+    reader: BufReader<File>,
+    index: Arc<ScanIndex>,
+    path: PathBuf,
+    offset: u64,
+    line: usize,
+    carry: Vec<u8>,
+}
+
+impl BackgroundScan {
+    pub fn run(mut self) -> Result<Option<usize>, String> {
+        loop {
+            if Arc::strong_count(&self.index) == 1 {
+                return Ok(None);
+            }
+            let chunk = self
+                .reader
+                .fill_buf()
+                .map_err(|e| format!("{} を読めませんでした: {e}", self.path.display()))?;
+            if chunk.is_empty() {
+                if !self.carry.is_empty() {
+                    let error = format!("{} は UTF-8 ではありません", self.path.display());
+                    self.index.state.lock().unwrap().broken = Some(error.clone());
+                    return Err(error);
+                }
+                let mut index = self.index.state.lock().unwrap();
+                index.lines = self.line + 1;
+                index.done = true;
+                return Ok(Some(index.lines));
+            }
+            let mut marks = Vec::new();
+            for at in memchr::memchr_iter(b'\n', chunk) {
+                self.line += 1;
+                if self.line % STRIDE == 0 {
+                    marks.push(self.offset + at as u64 + 1);
+                }
+            }
+            if !valid_utf8(&mut self.carry, chunk) {
+                let error = format!("{} は UTF-8 ではありません", self.path.display());
+                self.index.state.lock().unwrap().broken = Some(error.clone());
+                return Err(error);
+            }
+            let len = chunk.len();
+            self.offset += len as u64;
+            self.reader.consume(len);
+            let mut index = self.index.state.lock().unwrap();
+            index.marks.extend(marks);
+            index.lines = self.line;
+        }
+    }
+}
+
 impl Source {
-    /// ファイルを 1 度だけ読み流し、改行を数えて間引きの索引を作る。
-    fn open(path: &Path) -> Result<Source, String> {
+    /// 先頭 1MB だけ読み、索引を作り、残りを BackgroundScan に任せる。
+    fn open(path: &Path) -> Result<(Source, Option<BackgroundScan>), String> {
         let file =
             File::open(path).map_err(|e| format!("{} を開けませんでした: {e}", path.display()))?;
         let modified = file.metadata().ok().and_then(|meta| meta.modified().ok());
-        let mut reader = BufReader::with_capacity(CHUNK, &file);
+        let bytes = file.metadata().ok().map_or(0, |m| m.len());
+        // try_clone はカーソルを共有し、読みの seek が走査の位置を壊すので、
+        // 走査には独立したハンドルを開く。
+        let scan_file = File::open(path)
+            .map_err(|e| format!("{} を読めませんでした: {e}", path.display()))?;
+        let mut reader = BufReader::with_capacity(CHUNK, scan_file);
+        let index = Arc::new(ScanIndex {
+            state: Mutex::new(ScanState {
+                marks: vec![0],
+                lines: 0,
+                done: false,
+                broken: None,
+            }),
+        });
         let mut marks = vec![0u64];
         let mut line = 0usize;
         let mut offset = 0u64;
         let mut carry: Vec<u8> = Vec::new();
-        loop {
+
+        {
             let chunk = reader
                 .fill_buf()
                 .map_err(|e| format!("{} を読めませんでした: {e}", path.display()))?;
-            if chunk.is_empty() {
-                if !carry.is_empty() {
-                    return Err(format!("{} は UTF-8 ではありません", path.display()));
-                }
-                break;
-            }
             for at in memchr::memchr_iter(b'\n', chunk) {
                 line += 1;
                 if line % STRIDE == 0 {
@@ -71,15 +158,42 @@ impl Source {
             offset += len as u64;
             reader.consume(len);
         }
-        drop(reader);
-        Ok(Source {
+        // 最初のチャンクでファイル全体を読めたなら、行数はここで確定する。
+        let done = offset >= bytes;
+        if done && !carry.is_empty() {
+            return Err(format!("{} は UTF-8 ではありません", path.display()));
+        }
+
+        {
+            let mut state = index.state.lock().unwrap();
+            state.marks = marks;
+            state.lines = if done { line + 1 } else { line };
+            state.done = done;
+        }
+
+        let source = Source {
             path: path.to_path_buf(),
             file,
-            marks,
-            lines: line + 1,
-            bytes: offset,
+            index: index.clone(),
+            bytes,
             modified,
-        })
+        };
+
+        let scan = if done {
+            drop(reader);
+            None
+        } else {
+            Some(BackgroundScan {
+                reader,
+                index,
+                path: path.to_path_buf(),
+                offset,
+                line,
+                carry,
+            })
+        };
+
+        Ok((source, scan))
     }
 
     /// 開いてから外で書き換えられていないか。壊れた seek 読みを返すより断る。
@@ -97,6 +211,10 @@ impl Source {
         }
     }
 
+    fn lines(&self) -> usize {
+        self.index.state.lock().unwrap().lines
+    }
+
     /// ディスク上の行 `from` から `count` 行に `f` を呼ぶ。`f` が `false` を
     /// 返したら打ち切る。最寄りの索引へ seek し、そこから読み流す。
     fn each_line(
@@ -105,12 +223,21 @@ impl Source {
         count: usize,
         f: &mut dyn FnMut(usize, &str) -> bool,
     ) -> Result<(), String> {
-        if count == 0 || from >= self.lines {
+        if count == 0 {
+            return Ok(());
+        }
+        let (lines, mark) = {
+            let state = self.index.state.lock().unwrap();
+            (
+                state.lines,
+                *state.marks.get(from / STRIDE).unwrap_or(&0),
+            )
+        };
+        if from >= lines {
             return Ok(());
         }
         self.check()?;
         let broken = |e| format!("{} を読めませんでした: {e}", self.path.display());
-        let mark = self.marks[from / STRIDE];
         self.file.seek(SeekFrom::Start(mark)).map_err(broken)?;
         let mut reader = BufReader::with_capacity(CHUNK, &self.file);
         let mut buffer = Vec::new();
@@ -119,7 +246,7 @@ impl Source {
             buffer.clear();
             reader.read_until(b'\n', &mut buffer).map_err(broken)?;
         }
-        let to = (from + count).min(self.lines);
+        let to = (from + count).min(lines);
         for line in from..to {
             buffer.clear();
             reader.read_until(b'\n', &mut buffer).map_err(broken)?;
@@ -221,16 +348,19 @@ pub struct ScanHit {
 }
 
 impl Document {
-    pub fn open(path: &str) -> Result<Document, String> {
-        let source = Source::open(Path::new(path))?;
-        let count = source.lines;
-        Ok(Document {
-            pieces: vec![Piece::Disk { from: 0, lines: count }],
-            count,
-            source: Some(source),
-            undo: Vec::new(),
-            redo: Vec::new(),
-        })
+    pub fn open(path: &str) -> Result<(Document, Option<BackgroundScan>), String> {
+        let (source, scan) = Source::open(Path::new(path))?;
+        let count = source.lines();
+        Ok((
+            Document {
+                pieces: vec![Piece::Disk { from: 0, lines: count }],
+                count,
+                source: Some(source),
+                undo: Vec::new(),
+                redo: Vec::new(),
+            },
+            scan,
+        ))
     }
 
     pub fn empty() -> Document {
@@ -249,6 +379,22 @@ impl Document {
 
     pub fn bytes(&self) -> usize {
         self.source.as_ref().map_or(0, |source| source.bytes as usize)
+    }
+
+    pub fn scan_index(&self) -> Option<Arc<ScanIndex>> {
+        self.source.as_ref().map(|source| source.index.clone())
+    }
+
+    /// 走査完了後に呼ぶ。ディスクのピースと行数を確定値へ合わせる。
+    pub fn confirm_scan(&mut self) {
+        let Some(source) = self.source.as_ref() else {
+            return;
+        };
+        let exact = source.lines();
+        if let Some(Piece::Disk { from, lines }) = self.pieces.last_mut() {
+            *lines = exact.saturating_sub(*from);
+        }
+        self.count = self.pieces.iter().map(Piece::len).sum();
     }
 
     /// 文書の行 `from..from+count` に `f` を呼ぶ。ディスクの範囲は seek して
@@ -628,8 +774,14 @@ impl Document {
         self.source = Some(Source {
             path: Path::new(path).to_path_buf(),
             file,
-            marks,
-            lines: self.count,
+            index: Arc::new(ScanIndex {
+                state: Mutex::new(ScanState {
+                    marks,
+                    lines: self.count,
+                    done: true,
+                    broken: None,
+                }),
+            }),
             bytes: written,
             modified,
         });
@@ -654,7 +806,8 @@ mod tests {
         ));
         let path = path.to_string_lossy().into_owned();
         std::fs::write(&path, lines.join("\n")).unwrap();
-        (Document::open(&path).unwrap(), path)
+        let (doc, _) = Document::open(&path).unwrap();
+        (doc, path)
     }
 
     fn all(doc: &mut Document) -> Vec<String> {
@@ -835,12 +988,18 @@ mod tests {
             return;
         }
         let start = std::time::Instant::now();
-        let mut doc = Document::open(path).unwrap();
+        let (mut doc, scan) = Document::open(path).unwrap();
         println!(
-            "open (index {} lines): {:?}",
+            "open (scanned {} lines): {:?}",
             doc.line_count(),
             start.elapsed()
         );
+        let start = std::time::Instant::now();
+        if let Some(scan) = scan {
+            scan.run().unwrap();
+        }
+        doc.confirm_scan();
+        println!("scan (exact {} lines): {:?}", doc.line_count(), start.elapsed());
         let start = std::time::Instant::now();
         let middle = doc.read(doc.line_count() / 2, 100).unwrap();
         println!("read 100 lines: {:?} ({} lines)", start.elapsed(), middle.len());

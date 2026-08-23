@@ -105,6 +105,11 @@ impl Editor {
         self.load(Text::pending(line_count));
     }
 
+    /// 走査で確定した行数へ合わせる。
+    pub fn resize_pending(&mut self, line_count: usize) {
+        self.text.resize_pending(line_count);
+    }
+
     /// 届いた行を `from` から順に入れます。既にある行はそのまま。
     pub fn feed(&mut self, from: usize, lines: Vec<crate::structure::text::SourceLine>) {
         for (offset, line) in lines.into_iter().enumerate() {

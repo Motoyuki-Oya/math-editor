@@ -17,6 +17,6 @@ pub use commands::{
 pub use search::SearchOptions;
 pub use session::{
     apply_restored, close_pane, feed_pane, focus_pane, fully_resident, init, load, load_pending,
-    park, redraw_all, restore, set_on_change, set_on_far_copy, set_on_missing, stats, take_flush,
-    FlushBatch, Parked,
+    park, redraw_all, restore, set_line_count, set_on_change, set_on_far_copy, set_on_missing,
+    stats, take_flush, FlushBatch, Parked,
 };

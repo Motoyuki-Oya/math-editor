@@ -120,6 +120,16 @@ pub async fn open_document(path: &str) -> Result<OpenedDocument, String> {
     serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
 }
 
+/// 走査の完了を待ち、確定した行数を返します。
+pub async fn finish_document(handle: u64) -> Result<usize, String> {
+    #[derive(Serialize)]
+    struct Args {
+        handle: u64,
+    }
+    let value = call("finish_document", Args { handle }).await?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
+}
+
 /// 新しい空の文書をネイティブ側のストアに作ります。
 pub async fn create_document() -> Option<OpenedDocument> {
     let value = call("create_document", NoArgs {}).await.ok()?;

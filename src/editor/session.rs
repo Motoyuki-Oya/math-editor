@@ -24,6 +24,10 @@ pub struct Session {
     pub dragging: bool,
     /// 次の検索がどこから行われるか。構造の内部にある可能性があります。
     pub search_from: Option<search::Key>,
+    /// 行数の走査がまだ終わっていないか。終わるまで Ctrl+End は保留する。
+    pub counting: bool,
+    /// 走査完了を待っている Ctrl+End（値は shift）。確定したら跳ぶ。
+    pub jump_end: Option<bool>,
 }
 
 /// ドキュメントが変更されたペインで呼び出されます。呼び出し中に再び変更が起きてもよいよう、台帳の借用の外で呼べる共有の参照で持ちます。
@@ -79,6 +83,8 @@ pub fn init(root: &HtmlElement) -> Option<usize> {
         preedit: String::new(),
         dragging: false,
         search_from: None,
+        counting: false,
+        jump_end: None,
     }));
     input::install(&session);
     PANES.with(|panes| panes.borrow_mut().push(session.clone()));
@@ -306,10 +312,31 @@ pub fn load(text: &str) {
 }
 
 /// 行数だけ分かっている文書を出します。行は見えた場所から取り寄せられます。
+/// 行数は走査中の途中値なので、確定は [`set_line_count`] で届く。
 pub fn load_pending(line_count: usize) {
     let Some(session) = session() else { return };
-    session.borrow_mut().editor.load_pending(line_count);
+    {
+        let mut borrowed = session.borrow_mut();
+        borrowed.editor.load_pending(line_count);
+        borrowed.counting = true;
+        borrowed.jump_end = None;
+    }
     changed(&session);
+}
+
+/// 走査で確定した行数をペインの文書へ合わせます。保留していた Ctrl+End が
+/// あればここで跳びます。
+pub fn set_line_count(pane: usize, count: usize) {
+    let Some(session) = pane_session(pane) else { return };
+    {
+        let mut borrowed = session.borrow_mut();
+        borrowed.editor.resize_pending(count);
+        borrowed.counting = false;
+        if let Some(shift) = borrowed.jump_end.take() {
+            borrowed.editor.move_document_edge(true, shift);
+        }
+    }
+    redraw(&session);
 }
 
 /// 画面上のペインへ届いた行を入れます。

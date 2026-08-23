@@ -280,6 +280,16 @@ impl Text {
         }
     }
 
+    /// 走査で確定した行数へ合わせる。伸びる分は未着行として足す。
+    pub fn resize_pending(&mut self, line_count: usize) {
+        let target = line_count.max(1);
+        if target > self.lines.len() {
+            let added = target - self.lines.len();
+            self.lines.resize(target, Rc::new(Line::Absent));
+            self.absent += added;
+        }
+    }
+
     /// 文書の本体が巻き戻ったのに合わせる: `from` から先の手元の行を捨てて
     /// 届き直しを待ち、行数を合わせる。これは編集ではないので控えには残らない。
     pub fn reset_from(&mut self, from: usize, line_count: usize) {

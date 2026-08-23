@@ -21,3 +21,4 @@ serde_json = "1"
 memchr = "2.8.3"
 arboard = { version = "3.6.1", default-features = false, features = ["windows-sys"] }
 regex = "1.13.1"
+tokio = { version = "1.53.1", features = ["time"] }
