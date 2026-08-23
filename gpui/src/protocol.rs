@@ -2,10 +2,29 @@
 
 use std::borrow::Cow;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use wry::http::{header, Request, Response, StatusCode};
 
-const ASSETS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../dist");
+/// 配布時は実行ファイルの隣に `dist/` を置き、開発時はリポジトリの `dist/` を使います。
+/// どちらも見つからないときは実行ファイルの隣を指したままにし、要求は 404 になります。
+fn assets_dir() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let beside_exe = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|d| d.join("dist")));
+        if let Some(dir) = beside_exe.filter(|d| d.is_dir()) {
+            return dir;
+        }
+        let in_repo = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../dist"));
+        if in_repo.is_dir() {
+            return in_repo;
+        }
+        PathBuf::from("dist")
+    })
+    .as_path()
+}
 
 pub fn url() -> &'static str {
     #[cfg(target_os = "windows")]
@@ -34,13 +53,15 @@ pub fn asset_response(
         .filter(|c| !c.is_empty() && *c != "..")
         .collect::<PathBuf>();
 
-    let file = PathBuf::from(ASSETS_DIR).join(&safe);
-    let real = match fs::canonicalize(&file) {
+    let base = match fs::canonicalize(assets_dir()) {
         Ok(p) => p,
         Err(_) => return not_found(),
     };
-    let base = PathBuf::from(ASSETS_DIR);
-    if !real.starts_with(base) {
+    let real = match fs::canonicalize(base.join(&safe)) {
+        Ok(p) => p,
+        Err(_) => return not_found(),
+    };
+    if !real.starts_with(&base) {
         return not_found();
     }
 

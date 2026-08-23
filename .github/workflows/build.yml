@@ -63,3 +63,35 @@ jobs:
           files: |
             target/release/bundle/msi/*.msi
             target/release/bundle/nsis/*.exe
+
+  windows-gpui:
+    name: Windows GPUI build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Install build tools
+        run: cargo binstall -y --locked --force trunk
+      # GPUI 版は dist/ を実行時に実行ファイルの隣から読むため、
+      # フロントエンドを先に作ってから exe と同じ場所へ並べます。
+      - name: Build the frontend
+        run: trunk build --release
+      - name: Build the GPUI shell
+        run: cargo build -p planetext-gpui --release
+      - name: Lay out the distribution
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path planetext-gpui-windows | Out-Null
+          Copy-Item target/release/planetext-gpui.exe planetext-gpui-windows/
+          Copy-Item -Recurse dist planetext-gpui-windows/dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: planetext-gpui-windows
+          path: planetext-gpui-windows/**
+          if-no-files-found: error

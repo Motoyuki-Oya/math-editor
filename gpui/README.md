@@ -23,15 +23,22 @@ cargo build --release
 cargo build -p planetext-gpui --release
 ```
 
-リリース時は `trunk build` または Tauri のフロントエンドビルドで `dist/` を最新にしてから `cargo build` してください。
-
 ## 実行
 
 ```bash
+trunk build          # dist/ を作る
 cargo run -p planetext-gpui
 ```
 
-`dist/` が `../dist` に存在し、少なくとも `index.html`、CSS、WASM、JS が含まれている必要があります。
+## dist/ の置き場
+
+フロントエンド資産は実行時に読み込みます。探す順番は次のとおりです。
+
+1. 実行ファイルの隣の `dist/`（配布時）
+2. リポジトリの `dist/`（開発時）
+
+そのため配布物は `planetext-gpui.exe` と `dist/` を同じフォルダに並べた形になります。
+CI の `Windows GPUI build` ジョブがこの形の zip を成果物として作ります。
 
 ## 制限・既知の問題
 
