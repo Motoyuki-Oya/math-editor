@@ -103,7 +103,12 @@ pub(super) fn draft(tab: Tab) {
 }
 
 /// 次を検索。手元に全部ある文書はその場で、そうでなければ本体の走査で。
-pub(super) fn find(shell: Shell, query: String, options: editor::SearchOptions, file_size: Option<usize>) {
+pub(super) fn find(
+    shell: Shell,
+    query: String,
+    options: editor::SearchOptions,
+    file_size: Option<usize>,
+) {
     if editor::fully_resident() {
         editor::find_next(&query, options, file_size);
         return;
@@ -281,8 +286,7 @@ async fn find_far(
                 if hit.notation {
                     let lines = ipc::read_lines(handle, hit.line, 1).await?;
                     shell.feed(tab, hit.line, &lines);
-                    if editor::find_far_in_line(pane, hit.line, query, options, file_size, filter)
-                    {
+                    if editor::find_far_in_line(pane, hit.line, query, options, file_size, filter) {
                         return Ok(true);
                     }
                 } else {
@@ -310,9 +314,13 @@ async fn assemble_copy(handle: u64, copy: editor::FarCopy) -> Result<(), String>
     use crate::structure::plain;
     use crate::structure::text::SourceLine;
     let mut overrides = copy.overrides;
-    let notation =
-        ipc::lines_containing(handle, copy.from_line, copy.to_line, document::NOTATION_MARK)
-            .await?;
+    let notation = ipc::lines_containing(
+        handle,
+        copy.from_line,
+        copy.to_line,
+        document::NOTATION_MARK,
+    )
+    .await?;
     for line in notation {
         if (line == copy.from_line && copy.first.is_some())
             || (line == copy.to_line && copy.last.is_some())

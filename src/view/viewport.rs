@@ -90,8 +90,7 @@ impl Viewport {
             heights.fit(text.line_count());
             // 文書の画素の高さがブラウザーの上限を超えるなら、置き場所を縮める。
             let total = heights.span(0..text.line_count());
-            self.scale
-                .set((MAX_PIXELS / total.max(1.0)).min(1.0));
+            self.scale.set((MAX_PIXELS / total.max(1.0)).min(1.0));
         }
         // ビューの行き先: 何かが変わったときはキャレット、スクロールされたときは
         // ユーザーが置いた場所。
