@@ -100,9 +100,10 @@ fn create_document(state: State<'_, AppState>) -> OpenedDocument {
     state.adopt(store::Document::empty())
 }
 
-/// 文書から行の範囲を返します。
+/// 文書から行の範囲を返します。async なのは、同期コマンドはメインスレッドで
+/// 走り、待たせた分だけ UI が止まるため（以下の文書コマンドも同じ）。
 #[tauri::command]
-fn read_lines(
+async fn read_lines(
     state: State<'_, AppState>,
     handle: u64,
     from: usize,
@@ -118,7 +119,7 @@ fn read_lines(
 /// 編集の到着: `from..to` の行を `lines` へ置き換えます。同じ `group` が続く間は
 /// 元に戻す履歴の 1 ステップにつながります。新しい行数を返します。
 #[tauri::command]
-fn replace_lines(
+async fn replace_lines(
     state: State<'_, AppState>,
     handle: u64,
     from: usize,
@@ -144,15 +145,22 @@ struct RestoredLines {
 }
 
 #[tauri::command]
-fn undo_lines(state: State<'_, AppState>, handle: u64, redo: bool) -> Option<RestoredLines> {
+async fn undo_lines(
+    state: State<'_, AppState>,
+    handle: u64,
+    redo: bool,
+) -> Result<Option<RestoredLines>, String> {
     let mut docs = state.docs.lock().unwrap();
-    let doc = docs.get_mut(&handle)?;
-    let restored = if redo { doc.redo() } else { doc.undo() }?;
-    Some(RestoredLines {
-        state: restored.state,
-        touched_from: restored.touched_from,
-        line_count: restored.line_count,
-    })
+    let Some(doc) = docs.get_mut(&handle) else {
+        return Ok(None);
+    };
+    Ok(
+        (if redo { doc.redo() } else { doc.undo() }).map(|restored| RestoredLines {
+            state: restored.state,
+            touched_from: restored.touched_from,
+            line_count: restored.line_count,
+        }),
+    )
 }
 
 /// 文書をストアからディスクへ直接書きます。全文は webview を通りません。
@@ -187,7 +195,7 @@ struct ScanPage {
 // 期待のままだと、frontend の引数が見つからず呼び出しが失敗する。
 #[tauri::command(rename_all = "snake_case")]
 #[allow(clippy::too_many_arguments)]
-fn search_lines(
+async fn search_lines(
     state: State<'_, AppState>,
     handle: u64,
     query: String,
@@ -217,7 +225,7 @@ fn search_lines(
 /// 範囲内で `needle` を含む行。frontend が読み替えの必要な行を探すのに使います。
 /// 何の文字に意味があるか（保存形式）はこちらでは知りません。
 #[tauri::command]
-fn lines_containing(
+async fn lines_containing(
     state: State<'_, AppState>,
     handle: u64,
     from: usize,
@@ -235,7 +243,7 @@ fn lines_containing(
 /// 全文が webview を通らないので、大きな選択のコピーも一息で済みます。
 /// 端の行の切り出しと、読み替えの必要な行は frontend が渡してきます。
 #[tauri::command]
-fn copy_range(
+async fn copy_range(
     state: State<'_, AppState>,
     handle: u64,
     from: usize,
@@ -297,7 +305,7 @@ struct Draft {
 
 /// 文書の本体から下書きを書きます。最初の行はドキュメントのパス、続きが本文。
 #[tauri::command]
-fn save_draft(
+async fn save_draft(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     handle: u64,
