@@ -92,6 +92,8 @@ pub(super) struct Pane {
     pub(super) editor: StoredValue<Option<usize>>,
     pub(super) tabs: RwSignal<Vec<Tab>>,
     pub(super) current: RwSignal<usize>,
+    /// このペインで構造パレットが表示されているかどうか。
+    pub(super) palette: RwSignal<bool>,
     /// レンダリング間でペインの要素を保持します。
     pub(super) key: usize,
 }
@@ -104,6 +106,7 @@ impl Pane {
             editor: StoredValue::new(None),
             tabs: RwSignal::new(vec![tab]),
             current: RwSignal::new(0),
+            palette: RwSignal::new(false),
             key,
         }
     }
@@ -145,8 +148,6 @@ pub(super) struct Shell {
     pub(super) searching: RwSignal<bool>,
     /// 設定が画面上に表示されるかどうか。
     pub(super) preferences: RwSignal<bool>,
-    /// 構造パレットが画面上に表示されるかどうか。
-    pub(super) palette: RwSignal<bool>,
     /// カーソルが画面上に表示されると、それを待機する検索バーのフィールド。
     pub(super) find_focus: RwSignal<Option<Field>>,
 }

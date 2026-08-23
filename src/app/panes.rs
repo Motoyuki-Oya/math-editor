@@ -47,7 +47,7 @@ pub(super) fn PaneView(shell: Shell, pane: Pane) -> impl IntoView {
             on:focusin=move |_| shell.note_focus(pane)
         >
             <Tabs shell=shell pane=pane/>
-            <Show when=move || shell.palette.get()>
+            <Show when=move || pane.palette.get()>
                 <Palette/>
             </Show>
             <div class="editor" node_ref=editor_ref></div>
@@ -118,7 +118,7 @@ fn Tabs(shell: Shell, pane: Pane) -> impl IntoView {
                 class="tab-palette"
                 title="構造パレット (Ctrl+M)"
                 on:mousedown=hold_focus
-                on:click=move |_| shell.palette.update(|open| *open = !*open)
+                on:click=move |_| pane.palette.update(|open| *open = !*open)
             >
                 "∑"
             </button>

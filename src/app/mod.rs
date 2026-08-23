@@ -34,7 +34,6 @@ pub fn App() -> impl IntoView {
         stats: RwSignal::new((0, 1)),
         searching: RwSignal::new(false),
         preferences: RwSignal::new(false),
-        palette: RwSignal::new(false),
         find_focus: RwSignal::new(None),
     };
 
