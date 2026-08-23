@@ -274,6 +274,9 @@ impl Text {
     pub fn pending(line_count: usize) -> Self {
         let line_count = line_count.max(1);
         Self {
+            // 届く前の行はどれも同じ「まだ無い」なので、実体は 1 つを共有してよい。
+            // 中身が届いた行は要素ごと差し替わる。
+            #[allow(clippy::rc_clone_in_vec_init)]
             lines: vec![Rc::new(Line::Absent); line_count],
             changes: Vec::new(),
             absent: line_count,

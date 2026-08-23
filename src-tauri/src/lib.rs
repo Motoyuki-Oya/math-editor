@@ -118,6 +118,8 @@ async fn read_lines(
 /// 編集の到着: `from..to` の行を `lines` へ置き換えます。同じ `group` が続く間は
 /// 元に戻す履歴の 1 ステップにつながります。新しい行数を返します。
 #[tauri::command]
+// 引数は frontend との受け渡しの形そのものなので、まとめると IPC の名前が変わる。
+#[allow(clippy::too_many_arguments)]
 async fn replace_lines(
     state: State<'_, AppState>,
     handle: u64,
@@ -204,11 +206,7 @@ async fn search_lines(
     from: usize,
     count: usize,
 ) -> Result<ScanPage, String> {
-    let pattern = if regex {
-        query
-    } else {
-        regex::escape(&query)
-    };
+    let pattern = if regex { query } else { regex::escape(&query) };
     let pattern = regex::RegexBuilder::new(&pattern)
         .case_insensitive(!case_sensitive)
         .build()

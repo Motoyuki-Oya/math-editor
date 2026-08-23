@@ -117,25 +117,44 @@ pub fn install(session: &Rc<RefCell<Session>>) {
         mouse::on_dblclick(session, event);
     });
     // 縦はブラウザーにスクロールさせない。ホイールは窓を行の分だけ動かす。
-    on(&root, "wheel", session, |session, event: web_sys::WheelEvent| {
-        let delta = event.delta_y();
-        if delta != 0.0 {
-            event.prevent_default();
-            // deltaMode 1 は行単位。窓の側は画素で受けるので読み替える。
-            let pixels = if event.delta_mode() == 1 { delta * 20.0 } else { delta };
-            session::wheel(session, pixels);
-        }
-    });
+    on(
+        &root,
+        "wheel",
+        session,
+        |session, event: web_sys::WheelEvent| {
+            let delta = event.delta_y();
+            if delta != 0.0 {
+                event.prevent_default();
+                // deltaMode 1 は行単位。窓の側は画素で受けるので読み替える。
+                let pixels = if event.delta_mode() == 1 {
+                    delta * 20.0
+                } else {
+                    delta
+                };
+                session::wheel(session, pixels);
+            }
+        },
+    );
     // つまみは文書全体のおおよその割合。動いたら窓をそこへ。
     let scrollbar = session.borrow().view.scrollbar();
-    on(&scrollbar, "scroll", session, |session, _: web_sys::Event| {
-        session::thumb_moved(session);
-    });
+    on(
+        &scrollbar,
+        "scroll",
+        session,
+        |session, _: web_sys::Event| {
+            session::thumb_moved(session);
+        },
+    );
     // 中身の横スクロールでは、重ね描き（選択やキャレット）を測り直す。
     let scroller = session.borrow().view.scroller();
-    on(&scroller, "scroll", session, |session, _: web_sys::Event| {
-        session::scrolled(session);
-    });
+    on(
+        &scroller,
+        "scroll",
+        session,
+        |session, _: web_sys::Event| {
+            session::scrolled(session);
+        },
+    );
     if let Some(window) = web_sys::window() {
         let target: web_sys::EventTarget = window.into();
         on(&target, "mouseup", session, |session, _: MouseEvent| {

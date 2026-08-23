@@ -60,7 +60,7 @@ impl Source {
             }
             for at in memchr::memchr_iter(b'\n', chunk) {
                 line += 1;
-                if line % STRIDE == 0 {
+                if line.is_multiple_of(STRIDE) {
                     marks.push(offset + at as u64 + 1);
                 }
             }
@@ -225,7 +225,10 @@ impl Document {
         let source = Source::open(Path::new(path))?;
         let count = source.lines;
         Ok(Document {
-            pieces: vec![Piece::Disk { from: 0, lines: count }],
+            pieces: vec![Piece::Disk {
+                from: 0,
+                lines: count,
+            }],
             count,
             source: Some(source),
             undo: Vec::new(),
@@ -248,7 +251,9 @@ impl Document {
     }
 
     pub fn bytes(&self) -> usize {
-        self.source.as_ref().map_or(0, |source| source.bytes as usize)
+        self.source
+            .as_ref()
+            .map_or(0, |source| source.bytes as usize)
     }
 
     /// 文書の行 `from..from+count` に `f` を呼ぶ。ディスクの範囲は seek して
@@ -570,7 +575,9 @@ impl Document {
         })?;
         match broken {
             Some(error) => Err(error),
-            None => out.flush().map_err(|e| format!("書き込めませんでした: {e}")),
+            None => out
+                .flush()
+                .map_err(|e| format!("書き込めませんでした: {e}")),
         }
     }
 
@@ -679,7 +686,10 @@ mod tests {
         assert_eq!(doc.line_count(), STRIDE * 2 + 5);
         assert_eq!(
             doc.read(STRIDE + 3, 2).unwrap(),
-            vec![format!("line {}", STRIDE + 3), format!("line {}", STRIDE + 4)]
+            vec![
+                format!("line {}", STRIDE + 3),
+                format!("line {}", STRIDE + 4)
+            ]
         );
         assert_eq!(
             doc.read(STRIDE * 2 + 4, 5).unwrap(),
@@ -806,7 +816,8 @@ mod tests {
     #[test]
     fn saving_adopts_the_written_file_as_the_source() {
         let (mut doc, path) = disk_doc("save", &["a", "b"]);
-        doc.replace(1, 2, vec!["B".into()], 1, "before", "").unwrap();
+        doc.replace(1, 2, vec!["B".into()], 1, "before", "")
+            .unwrap();
         doc.save(&path).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nB");
         assert_eq!(all(&mut doc), vec!["a", "B"]);
@@ -843,6 +854,10 @@ mod tests {
         );
         let start = std::time::Instant::now();
         let middle = doc.read(doc.line_count() / 2, 100).unwrap();
-        println!("read 100 lines: {:?} ({} lines)", start.elapsed(), middle.len());
+        println!(
+            "read 100 lines: {:?} ({} lines)",
+            start.elapsed(),
+            middle.len()
+        );
     }
 }

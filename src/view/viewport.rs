@@ -1,4 +1,4 @@
-﻿//! ファイルを覗く窓。文書全体をブラウザーに置かず、見えている行だけを描く。
+//! ファイルを覗く窓。文書全体をブラウザーに置かず、見えている行だけを描く。
 //!
 //! 縦のスクロールはブラウザーに任せない。窓の先頭の行 `top` がすべてを決め、
 //! ホイールは行数で、つまみは文書全体の割合で `top` を動かす。つまみのための
@@ -224,8 +224,7 @@ impl Viewport {
                 self.top.set(caret_line);
             } else if rect.top + rect.height > view.top + self.root.client_height() as f64 {
                 // 下へはみ出した分だけ窓を下げる。
-                let overflow =
-                    rect.top + rect.height - view.top - self.root.client_height() as f64;
+                let overflow = rect.top + rect.height - view.top - self.root.client_height() as f64;
                 let lines = ((overflow / unit).ceil() as usize).max(1);
                 self.top
                     .set((self.top.get() + lines).min(count.saturating_sub(1)));
