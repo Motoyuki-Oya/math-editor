@@ -29,10 +29,60 @@ const CHUNK: usize = 1 << 20;
 fn index_chunk(chunk: &[u8], offset: u64, line: &mut usize, marks: &mut Vec<u64>) {
     for at in memchr::memchr_iter(b'\n', chunk) {
         *line += 1;
-        if *line % STRIDE == 0 {
+        if (*line).is_multiple_of(STRIDE) {
             marks.push(offset + at as u64 + 1);
         }
     }
+}
+
+/// 通常文字列の一致バイト位置。ASCIIの大小無視は先頭バイト候補だけを調べ、
+/// 候補ごとにASCII case-foldで比較する。結果はregexと同じ非重複一致。
+fn literal_positions(haystack: &[u8], needle: &[u8], case_sensitive: bool) -> Vec<usize> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    if case_sensitive {
+        return memchr::memmem::find_iter(haystack, needle).collect();
+    }
+    // 先頭文字が頻出すると候補比較だけで遅くなる。記号を最優先し、文字なら
+    // 英文で比較的まれな文字を錨にして、その位置から一致の先頭を逆算する。
+    let rarity = |byte: u8| match byte.to_ascii_lowercase() {
+        b'e' => 12,
+        b't' => 11,
+        b'a' | b'o' | b'i' => 10,
+        b'n' | b's' | b'h' | b'r' => 9,
+        b'd' | b'l' => 8,
+        b'c' | b'u' | b'm' | b'w' | b'f' | b'g' | b'y' | b'p' | b'b' => 6,
+        b'v' | b'k' | b'j' | b'x' | b'q' | b'z' => 3,
+        byte if byte.is_ascii_alphanumeric() => 5,
+        _ => 0,
+    };
+    let anchor = (0..needle.len())
+        .min_by_key(|index| rarity(needle[*index]))
+        .unwrap_or(0);
+    let byte = needle[anchor];
+    let lower = byte.to_ascii_lowercase();
+    let upper = byte.to_ascii_uppercase();
+    let candidates: Box<dyn Iterator<Item = usize> + '_> = if lower == upper {
+        Box::new(memchr::memchr_iter(byte, haystack))
+    } else {
+        Box::new(memchr::memchr2_iter(lower, upper, haystack))
+    };
+    let mut next = 0usize;
+    candidates
+        .filter_map(|at| {
+            let start = at.checked_sub(anchor)?;
+            if start < next || start + needle.len() > haystack.len() {
+                return None;
+            }
+            if haystack[start..start + needle.len()].eq_ignore_ascii_case(needle) {
+                next = start + needle.len();
+                Some(start)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// 走査スレッドが更新する間引き索引と行数。
@@ -216,6 +266,20 @@ impl Source {
         self.index.state.lock().unwrap().lines
     }
 
+    /// 検索スレッド専用の独立したファイルハンドルを持つ同じソース。
+    fn search_copy(&self) -> Result<Source, String> {
+        self.check()?;
+        let file = File::open(&self.path)
+            .map_err(|e| format!("{} を読めませんでした: {e}", self.path.display()))?;
+        Ok(Source {
+            path: self.path.clone(),
+            file,
+            index: self.index.clone(),
+            bytes: self.bytes,
+            modified: self.modified,
+        })
+    }
+
     /// ディスク上の行範囲をひとかたまりで読み、通常文字列を memmem で探す。
     /// 行ごとの read_until を避け、一致した場所だけ文字の列位置へ変換する。
     fn literal_matches(
@@ -223,6 +287,7 @@ impl Source {
         from: usize,
         count: usize,
         query: &str,
+        case_sensitive: bool,
         marker: u8,
     ) -> Result<Vec<ScanHit>, String> {
         if count == 0 || query.is_empty() {
@@ -248,8 +313,7 @@ impl Source {
         let broken = |e| format!("{} を読めませんでした: {e}", self.path.display());
         self.file.seek(SeekFrom::Start(start)).map_err(broken)?;
         self.file.read_exact(&mut bytes).map_err(broken)?;
-        let finder = memchr::memmem::Finder::new(query.as_bytes());
-        let match_bytes: Vec<usize> = finder.find_iter(&bytes).collect();
+        let match_bytes = literal_positions(&bytes, query.as_bytes(), case_sensitive);
         let marker_bytes: Vec<usize> = memchr::memchr_iter(marker, &bytes).collect();
         // 候補が無ければ行番号へ直す必要もない。巨大な改行配列を作らず返る。
         if match_bytes.is_empty() && marker_bytes.is_empty() {
@@ -368,7 +432,7 @@ fn valid_utf8(carry: &mut Vec<u8>, mut chunk: &[u8]) -> bool {
 }
 
 /// 文書のひと続き: ディスクにそのまま残っている行の範囲か、編集で入った行。
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Piece {
     Disk { from: usize, lines: usize },
     Fresh(Vec<String>),
@@ -431,6 +495,22 @@ pub struct ScanHit {
     pub end: usize,
 }
 
+pub struct SearchCandidates {
+    pub hits: Vec<ScanHit>,
+    pub scanned_to: usize,
+    pub cancelled: bool,
+}
+
+pub struct SearchSpec<'a> {
+    pub pattern: &'a regex::Regex,
+    pub literal: Option<&'a str>,
+    pub case_sensitive: bool,
+    pub marker: char,
+    pub from: usize,
+    pub end: usize,
+    pub after_col: Option<usize>,
+}
+
 impl Document {
     pub fn open(path: &str) -> Result<(Document, Option<BackgroundScan>), String> {
         let (source, scan) = Source::open(Path::new(path))?;
@@ -472,6 +552,18 @@ impl Document {
 
     pub fn scan_index(&self) -> Option<Arc<ScanIndex>> {
         self.source.as_ref().map(|source| source.index.clone())
+    }
+
+    /// 検索スレッドへ渡す読み取り専用の姿。ファイルカーソルは独立し、編集の
+    /// ピースは開始時点の内容を複製するので、文書ロックを持たずに走査できる。
+    pub fn search_snapshot(&self) -> Result<Document, String> {
+        Ok(Document {
+            source: self.source.as_ref().map(Source::search_copy).transpose()?,
+            pieces: self.pieces.clone(),
+            count: self.count,
+            undo: Vec::new(),
+            redo: Vec::new(),
+        })
     }
 
     /// 走査完了後に呼ぶ。ディスクのピースと行数を確定値へ合わせる。
@@ -694,11 +786,70 @@ impl Document {
         ))
     }
 
+    /// `from..end` を native 内で連続走査し、最初の候補群まで進む。空の
+    /// ページを frontend と往復せず、ページごとにキャンセルを確認する。
+    pub fn search_candidates(
+        &mut self,
+        spec: SearchSpec<'_>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<SearchCandidates, String> {
+        // 1回の読みを大きくしてseek・確保を減らしつつ、キャンセル確認は
+        // 100万行ごとに行う（800MBの実測では1ページ数百ms）。
+        const PAGE_LINES: usize = 1_000_000;
+        let SearchSpec {
+            pattern,
+            literal,
+            case_sensitive,
+            marker,
+            from,
+            end,
+            after_col,
+        } = spec;
+        let end = end.min(self.count);
+        let mut at = from.min(end);
+        while at < end {
+            if cancelled() {
+                return Ok(SearchCandidates {
+                    hits: Vec::new(),
+                    scanned_to: at,
+                    cancelled: true,
+                });
+            }
+            let page_end = (at + PAGE_LINES).min(end);
+            let (mut hits, _) = if let Some(query) = literal {
+                self.scan_literal(query, case_sensitive, marker, at, page_end - at, usize::MAX)?
+            } else {
+                self.scan(pattern, marker, at, page_end - at, usize::MAX)?
+            };
+            if at == from {
+                if let Some(col) = after_col {
+                    hits.retain(|hit| hit.notation || hit.line > from || hit.start >= col);
+                }
+            }
+            if !hits.is_empty() {
+                hits.truncate(64);
+                let scanned_to = hits.last().map_or(at, |hit| hit.line + 1);
+                return Ok(SearchCandidates {
+                    hits,
+                    scanned_to,
+                    cancelled: false,
+                });
+            }
+            at = page_end;
+        }
+        Ok(SearchCandidates {
+            hits: Vec::new(),
+            scanned_to: end,
+            cancelled: false,
+        })
+    }
+
     /// 通常の大小区別あり文字列検索。ディスクのピースはバイト範囲をまとめて
     /// memmem で探し、編集で入った行も同じ結果形式へ合わせる。
     pub fn scan_literal(
         &mut self,
         query: &str,
+        case_sensitive: bool,
         marker: char,
         from: usize,
         count: usize,
@@ -721,7 +872,6 @@ impl Document {
             let take = to.min(end) - (start + skip);
             match &self.pieces[index] {
                 Piece::Fresh(lines) => {
-                    let finder = memchr::memmem::Finder::new(query.as_bytes());
                     for (offset, text) in lines[skip..skip + take].iter().enumerate() {
                         let at = start + skip + offset;
                         if text.contains(marker) {
@@ -732,7 +882,9 @@ impl Document {
                                 end: 0,
                             });
                         } else {
-                            for byte in finder.find_iter(text.as_bytes()) {
+                            for byte in
+                                literal_positions(text.as_bytes(), query.as_bytes(), case_sensitive)
+                            {
                                 let start_col = text[..byte].chars().count();
                                 hits.push(ScanHit {
                                     line: at,
@@ -753,7 +905,7 @@ impl Document {
                         .expect("ディスクのピースがあるなら開いたファイルもある");
                     hits.extend(
                         source
-                            .literal_matches(disk, take, query, marker as u8)?
+                            .literal_matches(disk, take, query, case_sensitive, marker as u8)?
                             .into_iter()
                             .map(|hit| ScanHit {
                                 line: base + (hit.line - disk),
@@ -1163,9 +1315,79 @@ mod tests {
     }
 
     #[test]
+    fn ascii_case_fold_finds_non_overlapping_matches() {
+        assert_eq!(literal_positions(b"xxAbCaBC", b"abc", false), vec![2, 5]);
+        assert_eq!(literal_positions(b"aaaa", b"aa", false), vec![0, 2]);
+        assert!(literal_positions(b"ABC", b"abc", true).is_empty());
+    }
+
+    #[test]
+    fn ascii_case_insensitive_scan_keeps_utf8_columns() {
+        let (mut doc, path) = disk_doc("ascii-fold", &["前AbC後aBc"]);
+        let (hits, _) = doc.scan_literal("abc", false, '$', 0, 1, 64).unwrap();
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.start, hit.end))
+                .collect::<Vec<_>>(),
+            vec![(1, 4), (5, 8)]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn search_snapshot_keeps_the_contents_at_search_start() {
+        let (mut doc, path) = disk_doc("search-snapshot", &["before", "tail"]);
+        doc.replace(0, 1, vec!["first".into()], 1, "", "").unwrap();
+        let mut snapshot = doc.search_snapshot().unwrap();
+        doc.replace(0, 1, vec!["second".into()], 2, "", "").unwrap();
+        let pattern = regex::Regex::new("first").unwrap();
+        let found = snapshot
+            .search_candidates(
+                SearchSpec {
+                    pattern: &pattern,
+                    literal: Some("first"),
+                    case_sensitive: true,
+                    marker: '$',
+                    from: 0,
+                    end: 2,
+                    after_col: None,
+                },
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(found.hits.len(), 1);
+        assert!(!found.cancelled);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn native_search_stops_when_cancelled() {
+        let (doc, path) = disk_doc("search-cancel", &["a", "b"]);
+        let mut snapshot = doc.search_snapshot().unwrap();
+        let pattern = regex::Regex::new("missing").unwrap();
+        let found = snapshot
+            .search_candidates(
+                SearchSpec {
+                    pattern: &pattern,
+                    literal: Some("missing"),
+                    case_sensitive: true,
+                    marker: '$',
+                    from: 0,
+                    end: 2,
+                    after_col: None,
+                },
+                &|| true,
+            )
+            .unwrap();
+        assert!(found.cancelled);
+        assert!(found.hits.is_empty());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn literal_scan_reports_utf8_character_columns() {
         let (mut doc, path) = disk_doc("literal-scan", &["前abc後abc"]);
-        let (hits, _) = doc.scan_literal("abc", '$', 0, 1, 64).unwrap();
+        let (hits, _) = doc.scan_literal("abc", true, '$', 0, 1, 64).unwrap();
         assert_eq!(
             hits.iter()
                 .map(|hit| (hit.start, hit.end))
@@ -1243,9 +1465,36 @@ mod tests {
         let missing = "planetext-not-present";
         let start = std::time::Instant::now();
         let _ = doc
-            .scan_literal(missing, '$', 0, doc.line_count(), 64)
+            .scan_literal(missing, true, '$', 0, doc.line_count(), 64)
             .unwrap();
         println!("literal full scan: {:?}", start.elapsed());
+        let start = std::time::Instant::now();
+        let _ = doc
+            .scan_literal("PLANETEXT-NOT-PRESENT", false, '$', 0, doc.line_count(), 64)
+            .unwrap();
+        println!("ASCII fold full scan: {:?}", start.elapsed());
+        let mut snapshot = doc.search_snapshot().unwrap();
+        let pattern = regex::Regex::new(missing).unwrap();
+        let start = std::time::Instant::now();
+        let searched = snapshot
+            .search_candidates(
+                SearchSpec {
+                    pattern: &pattern,
+                    literal: Some(missing),
+                    case_sensitive: true,
+                    marker: '$',
+                    from: 0,
+                    end: doc.line_count(),
+                    after_col: None,
+                },
+                &|| false,
+            )
+            .unwrap();
+        println!(
+            "single native job ({} hits): {:?}",
+            searched.hits.len(),
+            start.elapsed()
+        );
         let start = std::time::Instant::now();
         let estimate = doc
             .estimate_matches(&regex::Regex::new("fox").unwrap())

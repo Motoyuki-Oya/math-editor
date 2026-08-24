@@ -3,7 +3,8 @@ mod store;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use tauri::{Manager, State, WindowEvent};
@@ -15,6 +16,8 @@ struct AppState {
     /// 開いている文書の本体。webview は行の窓だけを取り寄せ、編集は
     /// 行範囲の置き換えとして届く。タブが閉じられると手放す。
     docs: Mutex<HashMap<u64, store::Document>>,
+    /// 文書ごとの検索世代。値が変われば走査スレッドは古い検索を中止する。
+    searches: Mutex<HashMap<u64, Arc<AtomicU64>>>,
     next_document: Mutex<u64>,
 }
 
@@ -43,6 +46,10 @@ impl AppState {
             bytes: doc.bytes(),
         };
         self.docs.lock().unwrap().insert(opened.handle, doc);
+        self.searches
+            .lock()
+            .unwrap()
+            .insert(opened.handle, Arc::new(AtomicU64::new(0)));
         opened
     }
 }
@@ -215,22 +222,24 @@ async fn save_document(
 /// 閉じられたタブの文書を手放します。
 #[tauri::command]
 fn close_document(state: State<'_, AppState>, handle: u64) {
+    if let Some(generation) = state.searches.lock().unwrap().remove(&handle) {
+        generation.fetch_add(1, Ordering::Relaxed);
+    }
     state.docs.lock().unwrap().remove(&handle);
 }
 
-/// 検索の 1 ページ分の走査。素の行の一致と、読み替えの要る行が行の順で返り、
-/// `scanned_to` から続きを頼めます。パターンの意味は regex クレートのもの。
 #[derive(serde::Serialize)]
-struct ScanPage {
+struct SearchPage {
     hits: Vec<store::ScanHit>,
     scanned_to: usize,
+    cancelled: bool,
 }
 
-// 複数語の引数（case_sensitive）を snake_case のまま受け取る。既定の camelCase
-// 期待のままだと、frontend の引数が見つからず呼び出しが失敗する。
+/// 空のページをnative内で読み進め、最初の候補群までを1回のジョブで返す。
+/// 文書は開始時に複製したピースと独立ファイルハンドルで読み、docsをロックしない。
 #[tauri::command(rename_all = "snake_case")]
 #[allow(clippy::too_many_arguments)]
-async fn search_lines(
+async fn search_document(
     state: State<'_, AppState>,
     handle: u64,
     query: String,
@@ -238,8 +247,18 @@ async fn search_lines(
     case_sensitive: bool,
     needle: char,
     from: usize,
-    count: usize,
-) -> Result<ScanPage, String> {
+    end: usize,
+    after_col: Option<usize>,
+) -> Result<SearchPage, String> {
+    let generation = state
+        .searches
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .cloned()
+        .ok_or_else(|| "文書はもう閉じられています".to_string())?;
+    let ticket = generation.fetch_add(1, Ordering::Relaxed) + 1;
+    let mut snapshot = state.with_doc(handle, |doc| doc.search_snapshot())?;
     let pattern = if regex {
         query.clone()
     } else {
@@ -249,14 +268,35 @@ async fn search_lines(
         .case_insensitive(!case_sensitive)
         .build()
         .map_err(|e| format!("正規表現を読めませんでした: {e}"))?;
-    let (hits, scanned_to) = state.with_doc(handle, |doc| {
-        if !regex && case_sensitive {
-            doc.scan_literal(&query, needle, from, count, 64)
-        } else {
-            doc.scan(&pattern, needle, from, count, 64)
-        }
-    })?;
-    Ok(ScanPage { hits, scanned_to })
+    let literal = (!regex && (case_sensitive || query.is_ascii())).then_some(query);
+    let found = tauri::async_runtime::spawn_blocking(move || {
+        snapshot.search_candidates(
+            store::SearchSpec {
+                pattern: &pattern,
+                literal: literal.as_deref(),
+                case_sensitive,
+                marker: needle,
+                from,
+                end,
+                after_col,
+            },
+            &|| generation.load(Ordering::Relaxed) != ticket,
+        )
+    })
+    .await
+    .map_err(|e| format!("検索を続けられませんでした: {e}"))??;
+    Ok(SearchPage {
+        hits: found.hits,
+        scanned_to: found.scanned_to,
+        cancelled: found.cancelled,
+    })
+}
+
+#[tauri::command]
+fn cancel_search(state: State<'_, AppState>, handle: u64) {
+    if let Some(generation) = state.searches.lock().unwrap().get(&handle) {
+        generation.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// 等間隔の行窓を標本にして、全文のおよその一致数を返します。
@@ -570,6 +610,7 @@ pub fn run() {
             dirty: Mutex::new(false),
             started: Instant::now(),
             docs: Mutex::new(HashMap::new()),
+            searches: Mutex::new(HashMap::new()),
             next_document: Mutex::new(0),
         })
         .setup(|app| {
@@ -599,7 +640,8 @@ pub fn run() {
             close_document,
             lines_containing,
             copy_range,
-            search_lines,
+            search_document,
+            cancel_search,
             estimate_matches,
             set_dirty,
             frontend_ready,
