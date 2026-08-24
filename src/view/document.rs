@@ -226,7 +226,7 @@ impl View {
             return;
         }
         let digits = count.max(1).to_string().len();
-        let width = format!("calc({digits}ch + 1.6em)");
+        let width = format!("calc({digits}ch + 20px)");
         style.set_property("--setting-gutter", &width).ok();
     }
 
