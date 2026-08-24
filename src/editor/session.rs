@@ -9,7 +9,7 @@ use super::input;
 use super::model::{Editor, Flush};
 use super::search;
 use crate::format::document;
-use crate::view::document::{Caret, View};
+use crate::view::document::{Caret, Overlay, View};
 
 pub struct Session {
     /// このドキュメントが表示されているペインに名前を付けます。
@@ -22,6 +22,8 @@ pub struct Session {
     /// IME が現在作成している内容、挿入される場所に描画されます。
     pub preedit: String,
     pub dragging: bool,
+    /// Alt+クリックで別ペインのキャレットと同じ入力グループに入っているか。
+    pub linked: bool,
     /// 次の検索がどこから行われるか。構造の内部にある可能性があります。
     pub search_from: Option<search::Key>,
     /// 入力中の検索。可視範囲だけを調べ、移動せずにハイライトする。
@@ -87,6 +89,7 @@ pub fn init(root: &HtmlElement) -> Option<usize> {
         composing: false,
         preedit: String::new(),
         dragging: false,
+        linked: false,
         search_from: None,
         preview_query: String::new(),
         preview_options: search::SearchOptions::default(),
@@ -111,6 +114,16 @@ pub fn close_pane(pane: usize) {
             .borrow_mut()
             .retain(|session| session.borrow().pane != pane)
     });
+    let linked = PANES.with(|panes| {
+        panes
+            .borrow()
+            .iter()
+            .filter(|session| session.borrow().linked)
+            .count()
+    });
+    if linked < 2 {
+        clear_linked();
+    }
     if FOCUSED.get() == pane {
         if let Some(session) = PANES.with(|panes| panes.borrow().first().cloned()) {
             let pane = session.borrow().pane;
@@ -121,6 +134,7 @@ pub fn close_pane(pane: usize) {
 
 /// 入力を「ペイン」に送信します。
 pub fn focus_pane(pane: usize) {
+    clear_linked();
     if pane_session(pane).is_some() {
         FOCUSED.set(pane);
     }
@@ -130,6 +144,58 @@ pub fn focus_pane(pane: usize) {
 /// イベントが発生したペインが、入力を受け取るペインです。
 pub fn note_focus(session: &Rc<RefCell<Session>>) {
     FOCUSED.set(session.borrow().pane);
+}
+
+/// クリックしたペインを入力先にする。Alt+クリックで別ペインへ移った場合は、
+/// 元のペインとクリック先を同じ入力グループへ入れる。通常クリックは解除する。
+pub fn choose_pane(session: &Rc<RefCell<Session>>, add: bool) -> bool {
+    let pane = session.borrow().pane;
+    let was_linked = session.borrow().linked;
+    let previous = FOCUSED.replace(pane);
+    let crossed = add && previous != pane;
+    let newly_linked = crossed && !was_linked;
+    let sessions = PANES.with(|panes| panes.borrow().clone());
+    if crossed {
+        for target in &sessions {
+            let target_pane = target.borrow().pane;
+            if target_pane == previous || target_pane == pane {
+                target.borrow_mut().linked = true;
+            }
+        }
+    } else if !add {
+        for target in &sessions {
+            target.borrow_mut().linked = false;
+        }
+    }
+    for target in sessions {
+        redraw(&target);
+    }
+    newly_linked
+}
+
+/// 1回の編集を受けるペイン群。連動中でなければ発生元だけ。
+pub(super) fn edit_sessions(origin: &Rc<RefCell<Session>>) -> Vec<Rc<RefCell<Session>>> {
+    if !origin.borrow().linked {
+        return vec![origin.clone()];
+    }
+    PANES.with(|panes| {
+        panes
+            .borrow()
+            .iter()
+            .filter(|session| session.borrow().linked)
+            .cloned()
+            .collect()
+    })
+}
+
+pub(super) fn clear_linked() {
+    let sessions = PANES.with(|panes| panes.borrow().clone());
+    for session in sessions {
+        if session.borrow().linked {
+            session.borrow_mut().linked = false;
+            redraw(&session);
+        }
+    }
 }
 
 pub fn set_on_change(callback: OnChange) {
@@ -212,13 +278,17 @@ pub fn clear_search_preview() {
 fn redraw_preview_overlay(session: &Rc<RefCell<Session>>) {
     let borrowed = session.borrow();
     let caret = caret_of(&borrowed);
+    let carets = carets_of(&borrowed);
     let highlights = preview_highlights(&borrowed);
-    borrowed.view.redraw_overlay(
-        borrowed.editor.sels(),
-        &highlights,
-        &caret,
-        borrowed.focused,
-    );
+    let sels = borrowed.editor.sels();
+    borrowed.view.redraw_overlay(&Overlay {
+        sels: &sels,
+        highlights: &highlights,
+        primary: &caret,
+        carets: &carets,
+        focused: borrowed.focused,
+        linked: borrowed.linked,
+    });
 }
 
 fn refresh_preview(session: &mut Session) {
@@ -272,13 +342,19 @@ pub fn redraw(session: &Rc<RefCell<Session>>) {
     {
         let session = session.borrow();
         let caret = caret_of(&session);
+        let carets = carets_of(&session);
         let highlights = preview_highlights(&session);
+        let sels = session.editor.sels();
         session.view.draw(
             session.editor.text(),
-            session.editor.sels(),
-            &highlights,
-            &caret,
-            session.focused,
+            &Overlay {
+                sels: &sels,
+                highlights: &highlights,
+                primary: &caret,
+                carets: &carets,
+                focused: session.focused,
+                linked: session.linked,
+            },
         );
         if let Some(rect) = session.view.reveal(&caret) {
             input::follow_caret(&session.textarea, rect);
@@ -308,13 +384,19 @@ pub fn scrolled(session: &Rc<RefCell<Session>>) {
     {
         let session = session.borrow();
         let caret = caret_of(&session);
+        let carets = carets_of(&session);
         let highlights = preview_highlights(&session);
+        let sels = session.editor.sels();
         session.view.repaint(
             session.editor.text(),
-            session.editor.sels(),
-            &highlights,
-            &caret,
-            session.focused,
+            &Overlay {
+                sels: &sels,
+                highlights: &highlights,
+                primary: &caret,
+                carets: &carets,
+                focused: session.focused,
+                linked: session.linked,
+            },
         );
     }
     // repaint で新しい窓が確定してから、その窓を検索して重ねだけを更新する。
@@ -331,6 +413,22 @@ fn caret_of(session: &Session) -> Caret<'_> {
         inside: session.editor.nested_cursor(),
         composing: (!session.preedit.is_empty()).then_some(session.preedit.as_str()),
     }
+}
+
+fn carets_of(session: &Session) -> Vec<Caret<'_>> {
+    let last = session.editor.cursors().len().saturating_sub(1);
+    session
+        .editor
+        .cursors()
+        .iter()
+        .enumerate()
+        .map(|(index, cursor)| Caret {
+            at: cursor.sel.head,
+            inside: cursor.inside.as_ref(),
+            composing: (index == last && !session.preedit.is_empty())
+                .then_some(session.preedit.as_str()),
+        })
+        .collect()
 }
 
 /// すべてのペインを形成する何か (設定) が変更された場合に備えて、すべてのペインを再描画します。

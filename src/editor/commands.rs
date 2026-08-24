@@ -8,7 +8,7 @@ use web_sys::InputEvent;
 use super::clipboard::{self, Clip};
 use super::model::Did;
 use super::search::{self, Place, SearchOptions};
-use super::session::{changed, focus, redraw, session, Session};
+use super::session::{changed, edit_sessions, focus, redraw, session, Session};
 use super::trigger;
 use crate::structure::ast::Node;
 
@@ -56,6 +56,12 @@ fn composition_text(event_text: &str, textarea_text: String) -> String {
 }
 
 pub fn insert_text(session: &Rc<RefCell<Session>>, text: &str) {
+    for target in edit_sessions(session) {
+        insert_text_one(&target, text);
+    }
+}
+
+fn insert_text_one(session: &Rc<RefCell<Session>>, text: &str) {
     // 単一の文字で構造を開始することもできます。
     let mut chars = text.chars();
     if let (Some(c), None) = (chars.next(), chars.next()) {

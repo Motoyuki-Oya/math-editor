@@ -8,7 +8,7 @@ use std::rc::Rc;
 use web_sys::KeyboardEvent;
 
 use super::model::Did;
-use super::session::{changed, redraw, Session};
+use super::session::{self, changed, redraw, Session};
 
 pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
     if session.borrow().composing {
@@ -17,6 +17,23 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
     let key = event.key();
     let ctrl = event.ctrl_key() || event.meta_key();
     let shift = event.shift_key();
+    let linked_edit = if !ctrl {
+        match key.as_str() {
+            "Backspace" => apply_linked_edit(session, |editor| editor.backspace()),
+            "Delete" => apply_linked_edit(session, |editor| editor.delete_forward()),
+            "Enter" if !event.alt_key() => apply_linked_edit(session, |editor| editor.split_line()),
+            _ => false,
+        }
+    } else {
+        false
+    };
+    if linked_edit {
+        event.prevent_default();
+        return;
+    }
+    if key == "Escape" {
+        session::clear_linked();
+    }
     let did = {
         let mut borrowed = session.borrow_mut();
         // 行数の走査中は末尾が確定していないので、Ctrl+End は確定してから跳ぶ。
@@ -67,4 +84,23 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
         Did::Changed => changed(session),
     }
     event.prevent_default();
+}
+
+fn apply_linked_edit(
+    origin: &Rc<RefCell<Session>>,
+    edit: impl Fn(&mut super::model::Editor) -> Did,
+) -> bool {
+    let sessions = session::edit_sessions(origin);
+    if sessions.len() < 2 {
+        return false;
+    }
+    for session in sessions {
+        let did = edit(&mut session.borrow_mut().editor);
+        match did {
+            Did::Changed => changed(&session),
+            Did::Moved => redraw(&session),
+            Did::Nothing => {}
+        }
+    }
+    true
 }

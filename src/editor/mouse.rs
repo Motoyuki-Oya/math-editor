@@ -17,11 +17,24 @@ fn hit_at(session: &Rc<RefCell<Session>>, x: f64, y: f64) -> Hit {
 }
 
 /// クリックした入れ子Rowへキャレットを置き、そこで処理したかを返します。
-fn click_in_structure(session: &Rc<RefCell<Session>>, hit: &Hit, extend: bool) -> bool {
+fn click_in_structure(
+    session: &Rc<RefCell<Session>>,
+    hit: &Hit,
+    extend: bool,
+    add: bool,
+    replace: bool,
+) -> bool {
     let Hit::Inside(at, cursor) = hit else {
         return false;
     };
     let mut borrowed = session.borrow_mut();
+    if add {
+        return if replace {
+            borrowed.editor.select_nested(*at, cursor.clone())
+        } else {
+            borrowed.editor.add_nested(*at, cursor.clone())
+        };
+    }
     if !extend {
         return borrowed.editor.enter_at(*at, cursor);
     }
@@ -37,9 +50,11 @@ pub fn on_mousedown(session: &Rc<RefCell<Session>>, event: MouseEvent) {
         return;
     }
     event.prevent_default();
+    let adds = input::adds_caret(&event);
+    let crossed = super::session::choose_pane(session, adds);
     let (x, y) = (event.client_x() as f64, event.client_y() as f64);
     let hit = hit_at(session, x, y);
-    if !input::adds_caret(&event) && click_in_structure(session, &hit, event.shift_key()) {
+    if click_in_structure(session, &hit, event.shift_key(), adds, crossed) {
         session.borrow_mut().dragging = true;
         focus();
         redraw(session);
@@ -53,7 +68,9 @@ pub fn on_mousedown(session: &Rc<RefCell<Session>>, event: MouseEvent) {
     {
         let mut borrowed = session.borrow_mut();
         borrowed.dragging = true;
-        if input::adds_caret(&event) {
+        if crossed {
+            borrowed.editor.set_caret(pos);
+        } else if adds {
             borrowed.editor.add_caret(pos);
         } else if event.shift_key() {
             borrowed.editor.extend_to(pos);
@@ -73,7 +90,7 @@ pub fn on_mousemove(session: &Rc<RefCell<Session>>, event: MouseEvent) {
     if session.borrow().editor.nested_cursor().is_some() {
         // 入れ子Rowから外へドラッグした場合は、それを含む構造Node全体を選択します。
         let hit = hit_at(session, x, y);
-        if !click_in_structure(session, &hit, true) {
+        if !click_in_structure(session, &hit, true, false, false) {
             session.borrow_mut().editor.select_structure();
         }
         redraw(session);

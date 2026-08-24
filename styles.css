@@ -384,6 +384,12 @@ body {
   background: var(--fg);
 }
 
+.mn-cursor-inactive {
+  background: var(--muted);
+  animation: none;
+  opacity: 0.7;
+}
+
 /* キーストロークと IME を受け取り、候補 ウィンドウが適切な場所に表示されるようにキャレットに従います。 */
 .mn-input {
   position: absolute;

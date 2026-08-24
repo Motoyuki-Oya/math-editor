@@ -21,12 +21,30 @@ enum Seed {
 /// 構造ショートカットを完了する入力文字を処理し、入力を消費したかを返します。
 pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
     let sel = session.borrow().editor.primary();
-    if !sel.is_caret() || session.borrow().editor.sels().len() > 1 {
+    if !sel.is_caret() {
         return false;
     }
     // 入れ子のRowでは構造編集側が同じショートカットを処理します。
     if session.borrow().editor.nested_cursor().is_some() {
         return false;
+    }
+    let sels = session.borrow().editor.sels();
+    if sels.len() > 1 {
+        let all_trigger = sels.iter().all(|sel| {
+            sel.is_caret()
+                && seed_for(c, &text_before(session, sel.head))
+                    .is_some_and(|(_, seed)| !matches!(seed, Seed::Text(_)))
+        });
+        if !all_trigger {
+            return false;
+        }
+        {
+            let mut borrowed = session.borrow_mut();
+            borrowed.editor.start_structure();
+            borrowed.editor.insert_text(&c.to_string());
+        }
+        session::changed(session);
+        return true;
     }
     let before = text_before(session, sel.head);
     let Some((consume, seed)) = seed_for(c, &before) else {

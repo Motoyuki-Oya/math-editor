@@ -100,45 +100,106 @@ impl Editor {
     /// 捨てて届き直しを待ち、控えられていたキャレットへ戻る。
     pub fn apply_restored(&mut self, state: &str, touched_from: usize, line_count: usize) {
         self.text.reset_from(touched_from, line_count);
-        self.cursor = None;
-        self.transient_structure = None;
         self.restore_state(state);
         self.recorder.cut();
     }
 
     /// キャレットと選択の控え。文書の本体に預けるだけの不透明な文字列。
     pub(super) fn state_string(&self) -> String {
-        self.sels
+        self.cursors
             .iter()
-            .map(|sel| {
-                format!(
+            .map(|selection| {
+                let sel = selection.sel;
+                let base = format!(
                     "{}.{}-{}.{}",
                     sel.anchor.line, sel.anchor.col, sel.head.line, sel.head.col
+                );
+                let Some(cursor) = &selection.inside else {
+                    return base;
+                };
+                let path = cursor
+                    .path
+                    .iter()
+                    .map(|(node, slot)| format!("{node}.{slot}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let fills = cursor
+                    .fills
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let transient = selection
+                    .transient_structure
+                    .map_or_else(|| "_".to_string(), |at| at.to_string());
+                format!(
+                    "{base}@{path}@{}@{}@{fills}@{transient}",
+                    cursor.index, cursor.anchor
                 )
             })
             .collect::<Vec<_>>()
             .join(";")
     }
 
-    fn restore_state(&mut self, state: &str) {
+    pub(super) fn restore_state(&mut self, state: &str) {
+        use crate::structure::ast::Cursor;
         use crate::structure::text::{Pos, Sel};
-        let mut sels: Vec<Sel> = state
+        let mut cursors: Vec<super::UnifiedCursor> = state
             .split(';')
             .filter_map(|part| {
-                let (anchor, head) = part.split_once('-')?;
+                let mut fields = part.split('@');
+                let (anchor, head) = fields.next()?.split_once('-')?;
                 let parse = |s: &str| -> Option<Pos> {
                     let (line, col) = s.split_once('.')?;
                     Some(Pos::new(line.parse().ok()?, col.parse().ok()?))
                 };
-                Some(Sel {
+                let sel = Sel {
                     anchor: self.text.clamp(parse(anchor)?),
                     head: self.text.clamp(parse(head)?),
+                };
+                let Some(path) = fields.next() else {
+                    return Some(super::UnifiedCursor {
+                        sel,
+                        inside: None,
+                        transient_structure: None,
+                    });
+                };
+                let path = path
+                    .split(',')
+                    .filter(|part| !part.is_empty())
+                    .map(|part| {
+                        let (node, slot) = part.split_once('.')?;
+                        Some((node.parse().ok()?, slot.parse().ok()?))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                let index = fields.next()?.parse().ok()?;
+                let cursor_anchor = fields.next()?.parse().ok()?;
+                let fills = fields
+                    .next()?
+                    .split(',')
+                    .filter(|part| !part.is_empty())
+                    .map(str::parse)
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()?;
+                let transient = match fields.next()? {
+                    "_" => None,
+                    value => value.parse().ok(),
+                };
+                Some(super::UnifiedCursor {
+                    sel,
+                    inside: Some(Cursor {
+                        path,
+                        index,
+                        anchor: cursor_anchor,
+                        fills,
+                    }),
+                    transient_structure: transient,
                 })
             })
             .collect();
-        if sels.is_empty() {
-            sels.push(Sel::caret(Pos::default()));
+        if cursors.is_empty() {
+            cursors.push(super::UnifiedCursor::caret(Pos::default()));
         }
-        self.sels = sels;
+        self.cursors = cursors;
     }
 }

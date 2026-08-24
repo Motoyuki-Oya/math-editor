@@ -16,7 +16,7 @@ pub enum Inside {
 
 impl Editor {
     pub fn nested_cursor(&self) -> Option<&Cursor> {
-        self.cursor.as_ref()
+        self.primary_cursor().inside.as_ref()
     }
 
     /// Begin direct editing at the top-level insertion point. No wrapper node is created.
@@ -24,9 +24,10 @@ impl Editor {
         if self.touches_absent() {
             return;
         }
-        let at = self.primary().head;
-        self.cursor = Some(Cursor::root(at.col));
-        self.transient_structure = None;
+        for cursor in &mut self.cursors {
+            cursor.inside = Some(Cursor::root(cursor.head.col));
+            cursor.transient_structure = None;
+        }
         self.recorder.cut();
     }
 
@@ -37,8 +38,11 @@ impl Editor {
         if node.horizontal_slots().is_empty() {
             return false;
         }
-        self.sels = vec![Sel::caret(at)];
-        self.cursor = Some(Cursor::root(if from_start { at.col } else { at.col + 1 }));
+        self.cursors = vec![super::UnifiedCursor {
+            sel: Sel::caret(at),
+            inside: Some(Cursor::root(if from_start { at.col } else { at.col + 1 })),
+            transient_structure: None,
+        }];
         self.with_cursor(Inside::Move, |editing| {
             if from_start {
                 editing.move_right()
@@ -54,25 +58,32 @@ impl Editor {
             return false;
         }
         self.recorder.cut();
-        self.sels = vec![Sel::caret(at)];
-        self.cursor = Some(cursor.clone());
+        self.cursors = vec![super::UnifiedCursor {
+            sel: Sel::caret(at),
+            inside: Some(cursor.clone()),
+            transient_structure: None,
+        }];
         true
     }
 
     pub fn leave_structure(&mut self) -> bool {
-        let Some(cursor) = self.cursor.take() else {
-            return false;
-        };
-        self.transient_structure = None;
-        self.recorder.cut();
-        let col = cursor
-            .path
-            .first()
-            .map_or(cursor.index, |(node, _)| node + 1);
-        self.sels = vec![Sel::caret(
-            self.text.clamp(Pos::new(self.primary().head.line, col)),
-        )];
-        true
+        let mut left = false;
+        for selection in &mut self.cursors {
+            let Some(cursor) = selection.inside.take() else {
+                continue;
+            };
+            selection.transient_structure = None;
+            let col = cursor
+                .path
+                .first()
+                .map_or(cursor.index, |(node, _)| node + 1);
+            selection.sel = Sel::caret(self.text.clamp(Pos::new(selection.sel.head.line, col)));
+            left = true;
+        }
+        if left {
+            self.recorder.cut();
+        }
+        left
     }
 
     pub fn with_cursor(
@@ -80,10 +91,99 @@ impl Editor {
         kind: Inside,
         command: impl FnOnce(&mut Editing<'_>) -> Option<Escape>,
     ) -> bool {
-        let Some(mut cursor) = self.cursor.clone() else {
+        let index = self.cursors.len() - 1;
+        self.with_cursor_at(index, kind, command)
+    }
+
+    pub(super) fn with_each_cursor(
+        &mut self,
+        kind: Inside,
+        mut command: impl FnMut(&mut Editing<'_>) -> Option<Escape>,
+    ) -> bool {
+        let indices: Vec<usize> = self
+            .cursors
+            .iter()
+            .enumerate()
+            .filter_map(|(index, cursor)| cursor.inside.is_some().then_some(index))
+            .rev()
+            .collect();
+        let mut done = false;
+        self.one_step(|editor| {
+            let mut processed = Vec::new();
+            for index in indices {
+                let Some(before) = editor.cursors[index].inside.clone() else {
+                    continue;
+                };
+                let line = editor.cursors[index].head.line;
+                let before_len = row_at(editor.text.line(line), &before.path).map(|row| row.len());
+                done |= editor.with_cursor_at(index, kind, |editing| command(editing));
+                let after_len = row_at(editor.text.line(line), &before.path).map(|row| row.len());
+                if let (Some(before_len), Some(after_len)) = (before_len, after_len) {
+                    let delta = after_len as isize - before_len as isize;
+                    if delta != 0 {
+                        editor.shift_after_nested_edit(
+                            &processed,
+                            line,
+                            &before.path,
+                            before.index,
+                            delta,
+                        );
+                    }
+                }
+                processed.push(index);
+            }
+        });
+        done
+    }
+
+    fn shift_after_nested_edit(
+        &mut self,
+        processed: &[usize],
+        line: usize,
+        path: &[(usize, usize)],
+        at: usize,
+        delta: isize,
+    ) {
+        let shift = |value: usize| {
+            if value <= at {
+                value
+            } else if delta >= 0 {
+                value.saturating_add(delta as usize)
+            } else {
+                value.saturating_sub((-delta) as usize)
+            }
+        };
+        for &index in processed {
+            let selection = &mut self.cursors[index];
+            if selection.head.line != line {
+                continue;
+            }
+            let Some(cursor) = selection.inside.as_mut() else {
+                continue;
+            };
+            if cursor.path == path {
+                cursor.index = shift(cursor.index);
+                cursor.anchor = shift(cursor.anchor);
+            } else if cursor.path.starts_with(path) && cursor.path.len() > path.len() {
+                cursor.path[path.len()].0 = shift(cursor.path[path.len()].0);
+            }
+            if path.is_empty() {
+                selection.sel.anchor.col = shift(selection.sel.anchor.col);
+                selection.sel.head.col = shift(selection.sel.head.col);
+            }
+        }
+    }
+
+    fn with_cursor_at(
+        &mut self,
+        index: usize,
+        kind: Inside,
+        command: impl FnOnce(&mut Editing<'_>) -> Option<Escape>,
+    ) -> bool {
+        let Some(mut cursor) = self.cursors[index].inside.clone() else {
             return false;
         };
-        let line = self.primary().head.line;
+        let line = self.cursors[index].head.line;
         match kind {
             Inside::Move | Inside::Extend => self.recorder.cut(),
             Inside::Type => self.record(Step::Typing),
@@ -93,7 +193,7 @@ impl Editor {
             return false;
         };
         let escape = command(&mut Editing::new(root, &mut cursor));
-        let transient_done = self.transient_structure.is_some_and(|at| {
+        let transient_done = self.cursors[index].transient_structure.is_some_and(|at| {
             cursor.path.is_empty()
                 && root.get(at).is_some_and(|node| {
                     !matches!(
@@ -104,30 +204,48 @@ impl Editor {
                         || !node.lower.is_empty()
                 })
         });
-        self.cursor = Some(cursor);
+        self.cursors[index].inside = Some(cursor);
         if let Some(escape) = escape {
-            self.finish_cursor(line, escape);
+            self.finish_cursor(index, line, escape);
         } else if transient_done {
-            let col = self.cursor.as_ref().map_or(0, |cursor| cursor.index);
-            self.cursor = None;
-            self.transient_structure = None;
-            self.sels = vec![Sel::caret(Pos::new(line, col))];
+            let col = self.cursors[index]
+                .inside
+                .as_ref()
+                .map_or(0, |cursor| cursor.index);
+            self.cursors[index].inside = None;
+            self.cursors[index].transient_structure = None;
+            self.cursors[index].sel = Sel::caret(Pos::new(line, col));
         }
         true
     }
 
-    fn finish_cursor(&mut self, line: usize, escape: Escape) {
-        let cursor = self.cursor.take().unwrap_or_default();
-        self.transient_structure = None;
+    fn finish_cursor(&mut self, index: usize, line: usize, escape: Escape) {
+        let cursor = self.cursors[index].inside.take().unwrap_or_default();
+        self.cursors[index].transient_structure = None;
         let col = match escape {
             Escape::Left | Escape::Delete => 0,
             Escape::Right => cursor.index.min(self.text.line_len(line)),
         };
-        self.sels = vec![Sel::caret(Pos::new(line, col))];
+        self.cursors[index].sel = Sel::caret(Pos::new(line, col));
     }
 
     pub fn select_nested(&mut self, at: Pos, cursor: Cursor) -> bool {
         self.enter_at(at, &cursor)
+    }
+
+    pub fn add_nested(&mut self, at: Pos, cursor: Cursor) -> bool {
+        if row_at(self.text.line(at.line), &cursor.path).is_none_or(|row| cursor.index > row.len())
+        {
+            return false;
+        }
+        self.recorder.cut();
+        self.cursors.push(super::UnifiedCursor {
+            sel: Sel::caret(at),
+            inside: Some(cursor),
+            transient_structure: None,
+        });
+        self.merge_sels();
+        true
     }
 
     pub fn replace_nested(&mut self, at: Pos, cursor: Cursor, with: &str) -> bool {
@@ -146,7 +264,7 @@ impl Editor {
     }
 
     pub fn select_structure(&mut self) -> bool {
-        let Some(cursor) = self.cursor.take() else {
+        let Some(cursor) = self.primary_cursor_mut().inside.take() else {
             return false;
         };
         let Some((node, _)) = cursor.path.first().copied() else {
@@ -154,7 +272,10 @@ impl Editor {
         };
         self.recorder.cut();
         let line = self.primary().head.line;
-        self.sels = vec![Sel::range(Pos::new(line, node), Pos::new(line, node + 1))];
+        self.cursors = vec![super::UnifiedCursor::range(
+            Pos::new(line, node),
+            Pos::new(line, node + 1),
+        )];
         true
     }
 
@@ -167,7 +288,7 @@ impl Editor {
     }
 
     pub fn nested_selection(&self) -> Option<Row> {
-        let cursor = self.cursor.as_ref()?;
+        let cursor = self.primary_cursor().inside.as_ref()?;
         if cursor.is_caret() {
             return None;
         }
@@ -179,46 +300,143 @@ impl Editor {
         if self.touches_absent() {
             return false;
         }
-        self.with_cursor(Inside::Change, |editing| {
-            editing.insert(node);
-            None
-        })
+        let indices: Vec<usize> = self
+            .cursors
+            .iter()
+            .enumerate()
+            .filter_map(|(index, cursor)| cursor.inside.is_some().then_some(index))
+            .rev()
+            .collect();
+        let mut done = false;
+        self.one_step(|editor| {
+            for index in indices {
+                let node = node.clone();
+                done |= editor.with_cursor_at(index, Inside::Change, |editing| {
+                    editing.insert(node);
+                    None
+                });
+            }
+        });
+        done
     }
 
     pub fn insert_nested_row(&mut self, nodes: Row) -> bool {
         if self.touches_absent() {
             return false;
         }
-        self.with_cursor(Inside::Change, |editing| {
-            editing.insert_row(nodes);
-            None
-        })
+        let indices: Vec<usize> = self
+            .cursors
+            .iter()
+            .enumerate()
+            .filter_map(|(index, cursor)| cursor.inside.is_some().then_some(index))
+            .rev()
+            .collect();
+        let mut done = false;
+        self.one_step(|editor| {
+            for index in indices {
+                let nodes = nodes.clone();
+                done |= editor.with_cursor_at(index, Inside::Change, |editing| {
+                    editing.insert_row(nodes);
+                    None
+                });
+            }
+        });
+        done
     }
 
     pub(super) fn type_with_cursor(&mut self, c: char) -> bool {
-        let mut escaped = false;
-        let done = self.with_cursor(Inside::Type, |editing| {
-            if c == ' ' && editing.commit_command() {
-                return None;
+        let indices: Vec<usize> = self
+            .cursors
+            .iter()
+            .enumerate()
+            .filter_map(|(index, cursor)| cursor.inside.is_some().then_some(index))
+            .rev()
+            .collect();
+        let mut done = false;
+        let mut escaped = Vec::new();
+        self.one_step(|editor| {
+            let mut processed = Vec::new();
+            for index in indices {
+                let Some(before) = editor.cursors[index].inside.clone() else {
+                    continue;
+                };
+                let line = editor.cursors[index].head.line;
+                let before_len = row_at(editor.text.line(line), &before.path).map(|row| row.len());
+                let mut left = false;
+                done |= editor.with_cursor_at(index, Inside::Type, |editing| {
+                    if c == ' ' && editing.commit_command() {
+                        return None;
+                    }
+                    let escape = editing.insert_char(c);
+                    left = escape.is_some();
+                    escape
+                });
+                let after_len = row_at(editor.text.line(line), &before.path).map(|row| row.len());
+                if let (Some(before_len), Some(after_len)) = (before_len, after_len) {
+                    let delta = after_len as isize - before_len as isize;
+                    if delta != 0 {
+                        editor.shift_after_nested_edit(
+                            &processed,
+                            line,
+                            &before.path,
+                            before.index,
+                            delta,
+                        );
+                    }
+                }
+                if left {
+                    escaped.push(index);
+                }
+                processed.push(index);
             }
-            let result = editing.insert_char(c);
-            escaped = result.is_some();
-            result
         });
-        if done && escaped {
+        if !escaped.is_empty() {
             let mut buffer = [0u8; 4];
-            self.insert_text(c.encode_utf8(&mut buffer));
+            self.insert_indices(
+                vec![c.encode_utf8(&mut buffer).chars().map(Node::char).collect()],
+                escaped,
+            );
         }
         done
     }
 
     pub fn limit_trigger_to_structure(&mut self) {
-        self.transient_structure = self.cursor.as_ref().map(|cursor| cursor.index);
+        let transient = self
+            .primary_cursor()
+            .inside
+            .as_ref()
+            .map(|cursor| cursor.index);
+        self.primary_cursor_mut().transient_structure = transient;
+    }
+
+    pub(super) fn move_vertical_cursors(&mut self, down: bool) {
+        let indices: Vec<usize> = self
+            .cursors
+            .iter()
+            .enumerate()
+            .filter_map(|(index, cursor)| cursor.inside.is_some().then_some(index))
+            .rev()
+            .collect();
+        for index in indices {
+            let mut moved = false;
+            self.with_cursor_at(index, Inside::Move, |editing| {
+                moved = if down {
+                    editing.move_down()
+                } else {
+                    editing.move_up()
+                };
+                None
+            });
+            if !moved {
+                self.cursors[index].inside = None;
+                self.cursors[index].transient_structure = None;
+            }
+        }
     }
 
     pub(super) fn enter_node_beside(&mut self, forward: bool) -> bool {
         let sel = self.primary();
-        if !sel.is_caret() || self.sels.len() != 1 {
+        if !sel.is_caret() || self.cursors.len() != 1 {
             return false;
         }
         let at = if forward {
@@ -232,7 +450,7 @@ impl Editor {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::editor;
+    use super::super::tests::{editor, with_rows};
     use super::*;
     use crate::structure::ast::{Between, NodeKind};
 
@@ -264,6 +482,106 @@ mod tests {
         assert!(matches!(row[2].kind, NodeKind::Stack { .. }));
         assert!(matches!(row[3].kind, NodeKind::Char('+')));
         assert!(matches!(row[4].kind, NodeKind::Char('d')));
+    }
+
+    #[test]
+    fn multiple_nested_cursors_edit_different_structure_rows() {
+        let mut editor = with_rows(vec![
+            vec![Node::sqrt(None, Vec::new())],
+            vec![Node::sqrt(None, Vec::new())],
+        ]);
+        let cursor = Cursor {
+            path: vec![(0, 0)],
+            index: 0,
+            anchor: 0,
+            fills: Vec::new(),
+        };
+        assert!(editor.enter_at(Pos::new(0, 0), &cursor));
+        assert!(editor.add_nested(Pos::new(1, 0), cursor));
+        editor.insert_text("X");
+        for line in 0..2 {
+            assert_eq!(
+                row_at(editor.text().line(line), &[(0, 0)]),
+                Some([Node::char('X')].as_slice())
+            );
+        }
+    }
+
+    #[test]
+    fn multiple_nested_cursors_apply_structure_triggers() {
+        let mut editor = with_rows(vec![
+            vec![Node::sqrt(None, vec![Node::char('a')])],
+            vec![Node::sqrt(None, vec![Node::char('b')])],
+        ]);
+        let cursor = Cursor {
+            path: vec![(0, 0)],
+            index: 1,
+            anchor: 1,
+            fills: Vec::new(),
+        };
+        assert!(editor.enter_at(Pos::new(0, 0), &cursor));
+        assert!(editor.add_nested(Pos::new(1, 0), cursor));
+        editor.insert_text("/");
+        for line in 0..2 {
+            let row = row_at(editor.text().line(line), &[(0, 0)]).unwrap();
+            assert!(matches!(row[0].kind, NodeKind::Stack { .. }));
+        }
+    }
+
+    #[test]
+    fn two_cursors_in_one_nested_row_keep_their_positions_after_typing() {
+        let mut editor = with_rows(vec![vec![Node::sqrt(
+            None,
+            "a b".chars().map(Node::char).collect(),
+        )]]);
+        let first = Cursor {
+            path: vec![(0, 0)],
+            index: 1,
+            anchor: 1,
+            fills: Vec::new(),
+        };
+        let second = Cursor {
+            index: 3,
+            anchor: 3,
+            ..first.clone()
+        };
+        assert!(editor.enter_at(Pos::new(0, 0), &first));
+        assert!(editor.add_nested(Pos::new(0, 0), second));
+        editor.insert_text("X");
+        editor.insert_text("Y");
+        assert_eq!(
+            row_at(editor.text().line(0), &[(0, 0)]),
+            Some(
+                "aXY bXY"
+                    .chars()
+                    .map(Node::char)
+                    .collect::<Vec<_>>()
+                    .as_slice()
+            )
+        );
+    }
+
+    #[test]
+    fn tab_moves_every_nested_cursor_to_the_next_slot() {
+        let mut editor = with_rows(vec![
+            vec![Node::stack(Vec::new(), Vec::new(), Between::Rule)],
+            vec![Node::stack(Vec::new(), Vec::new(), Between::Rule)],
+        ]);
+        let cursor = Cursor {
+            path: vec![(0, 0)],
+            index: 0,
+            anchor: 0,
+            fills: Vec::new(),
+        };
+        assert!(editor.enter_at(Pos::new(0, 0), &cursor));
+        assert!(editor.add_nested(Pos::new(1, 0), cursor));
+        assert!(matches!(editor.tab(false), super::super::Did::Moved));
+        assert!(editor.cursors().iter().all(|selection| {
+            selection
+                .inside
+                .as_ref()
+                .is_some_and(|cursor| cursor.path == vec![(0, 1)])
+        }));
     }
 
     #[test]
