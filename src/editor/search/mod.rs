@@ -81,11 +81,23 @@ pub fn find_all(
     options: SearchOptions,
     file_size: Option<usize>,
 ) -> Vec<Found> {
+    find_range(text, query, options, file_size, 0..text.line_count())
+}
+
+/// 指定された行の窓だけを検索する。入力中のプレビューは可視行だけを調べ、
+/// 文書全体を走査しない。
+pub fn find_range(
+    text: &Text,
+    query: &str,
+    options: SearchOptions,
+    file_size: Option<usize>,
+    lines: std::ops::Range<usize>,
+) -> Vec<Found> {
     let Some(matcher) = compile(query, options, file_size) else {
         return Vec::new();
     };
     let mut found = Vec::new();
-    for line in 0..text.line_count() {
+    for line in lines.start..lines.end.min(text.line_count()) {
         line_matches(&matcher, text, line, &mut found);
     }
     found.sort_by_key(|found| found.place.start());
@@ -299,6 +311,19 @@ fn node_runs(row: &Row) -> Vec<(usize, String)> {
 mod tests {
     use super::*;
     use crate::structure::ast::Node;
+
+    #[test]
+    fn range_search_only_reports_matches_inside_the_window() {
+        let text = Text::from_lines(vec![
+            vec![Node::char('x')],
+            vec![Node::char('a')],
+            vec![Node::char('a')],
+            vec![Node::char('x')],
+        ]);
+        let found = find_range(&text, "a", SearchOptions::default(), None, 2..4);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].place.start().0.line, 2);
+    }
 
     #[test]
     fn groups_fill_the_replacement() {

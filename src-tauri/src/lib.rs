@@ -237,7 +237,7 @@ async fn search_lines(
     count: usize,
 ) -> Result<ScanPage, String> {
     let pattern = if regex {
-        query
+        query.clone()
     } else {
         regex::escape(&query)
     };
@@ -245,9 +245,31 @@ async fn search_lines(
         .case_insensitive(!case_sensitive)
         .build()
         .map_err(|e| format!("正規表現を読めませんでした: {e}"))?;
-    let (hits, scanned_to) =
-        state.with_doc(handle, |doc| doc.scan(&pattern, needle, from, count, 64))?;
+    let (hits, scanned_to) = state.with_doc(handle, |doc| {
+        if !regex && case_sensitive {
+            doc.scan_literal(&query, needle, from, count, 64)
+        } else {
+            doc.scan(&pattern, needle, from, count, 64)
+        }
+    })?;
     Ok(ScanPage { hits, scanned_to })
+}
+
+/// 等間隔の行窓を標本にして、全文のおよその一致数を返します。
+#[tauri::command(rename_all = "snake_case")]
+async fn estimate_matches(
+    state: State<'_, AppState>,
+    handle: u64,
+    query: String,
+    regex: bool,
+    case_sensitive: bool,
+) -> Result<usize, String> {
+    let pattern = if regex { query } else { regex::escape(&query) };
+    let pattern = regex::RegexBuilder::new(&pattern)
+        .case_insensitive(!case_sensitive)
+        .build()
+        .map_err(|e| format!("正規表現を読めませんでした: {e}"))?;
+    state.with_doc(handle, |doc| doc.estimate_matches(&pattern))
 }
 
 /// 範囲内で `needle` を含む行。frontend が読み替えの必要な行を探すのに使います。
@@ -574,6 +596,7 @@ pub fn run() {
             lines_containing,
             copy_range,
             search_lines,
+            estimate_matches,
             set_dirty,
             frontend_ready,
             confirm_discard,

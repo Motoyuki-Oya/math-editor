@@ -341,6 +341,33 @@ pub async fn search_lines(
     serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
 }
 
+/// 等間隔の標本から全文のおよその一致数を返します。
+pub async fn estimate_matches(
+    handle: u64,
+    query: &str,
+    regex: bool,
+    case_sensitive: bool,
+) -> Result<usize, String> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        handle: u64,
+        query: &'a str,
+        regex: bool,
+        case_sensitive: bool,
+    }
+    let value = call(
+        "estimate_matches",
+        Args {
+            handle,
+            query,
+            regex,
+            case_sensitive,
+        },
+    )
+    .await?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
+}
+
 /// 文書の本体から下書きを書きます。
 pub async fn save_draft(handle: u64, id: usize, path: Option<&str>) {
     #[derive(Serialize)]

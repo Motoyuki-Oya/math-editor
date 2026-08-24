@@ -24,6 +24,11 @@ pub struct Session {
     pub dragging: bool,
     /// 次の検索がどこから行われるか。構造の内部にある可能性があります。
     pub search_from: Option<search::Key>,
+    /// 入力中の検索。可視範囲だけを調べ、移動せずにハイライトする。
+    preview_query: String,
+    preview_options: search::SearchOptions,
+    preview_file_size: Option<usize>,
+    preview_found: Vec<search::Found>,
     /// 行数の走査がまだ終わっていないか。終わるまで Ctrl+End は保留する。
     pub counting: bool,
     /// 走査完了を待っている Ctrl+End（値は shift）。確定したら跳ぶ。
@@ -83,6 +88,10 @@ pub fn init(root: &HtmlElement) -> Option<usize> {
         preedit: String::new(),
         dragging: false,
         search_from: None,
+        preview_query: String::new(),
+        preview_options: search::SearchOptions::default(),
+        preview_file_size: None,
+        preview_found: Vec::new(),
         counting: false,
         jump_end: None,
     }));
@@ -176,6 +185,78 @@ fn request_missing(session: &Rc<RefCell<Session>>) {
     }
 }
 
+/// 検索欄の入力を可視範囲へ反映する。選択やキャレットは変更しない。
+pub fn preview_search(query: &str, options: search::SearchOptions) -> usize {
+    let Some(session) = session() else { return 0 };
+    {
+        let mut borrowed = session.borrow_mut();
+        borrowed.preview_query = query.to_string();
+        borrowed.preview_options = options;
+        refresh_preview(&mut borrowed);
+    }
+    redraw_preview_overlay(&session);
+    let count = session.borrow().preview_found.len();
+    count
+}
+
+pub fn clear_search_preview() {
+    let Some(session) = session() else { return };
+    {
+        let mut borrowed = session.borrow_mut();
+        borrowed.preview_query.clear();
+        borrowed.preview_found.clear();
+    }
+    redraw_preview_overlay(&session);
+}
+
+fn redraw_preview_overlay(session: &Rc<RefCell<Session>>) {
+    let borrowed = session.borrow();
+    let caret = caret_of(&borrowed);
+    let highlights = preview_highlights(&borrowed);
+    borrowed.view.redraw_overlay(
+        borrowed.editor.sels(),
+        &highlights,
+        &caret,
+        borrowed.focused,
+    );
+}
+
+fn refresh_preview(session: &mut Session) {
+    if session.preview_query.is_empty() {
+        session.preview_found.clear();
+        return;
+    }
+    session.preview_found = search::find_range(
+        session.editor.text(),
+        &session.preview_query,
+        session.preview_options,
+        session.preview_file_size,
+        session.view.drawn(),
+    );
+}
+
+fn preview_highlights(session: &Session) -> Vec<crate::view::document::Highlight> {
+    use search::Place;
+    session
+        .preview_found
+        .iter()
+        .map(|found| match &found.place {
+            Place::Text(sel) => crate::view::document::Highlight {
+                line: sel.start().line,
+                path: Vec::new(),
+                from: sel.start().col,
+                to: sel.end().col,
+            },
+            Place::Inside { at, cursor } => crate::view::document::Highlight {
+                line: at.line,
+                path: cursor.path.clone(),
+                from: cursor.start(),
+                to: cursor.end(),
+            },
+        })
+        .collect()
+}
+
 pub fn changed(session: &Rc<RefCell<Session>>) {
     session.borrow_mut().search_from = None;
     redraw(session);
@@ -191,9 +272,11 @@ pub fn redraw(session: &Rc<RefCell<Session>>) {
     {
         let session = session.borrow();
         let caret = caret_of(&session);
+        let highlights = preview_highlights(&session);
         session.view.draw(
             session.editor.text(),
             session.editor.sels(),
+            &highlights,
             &caret,
             session.focused,
         );
@@ -201,6 +284,9 @@ pub fn redraw(session: &Rc<RefCell<Session>>) {
             input::follow_caret(&session.textarea, rect);
         }
     }
+    // Ctrl+End などで窓が移った場合も、移動後の drawn 範囲を検索する。
+    refresh_preview(&mut session.borrow_mut());
+    redraw_preview_overlay(session);
     request_missing(session);
 }
 
@@ -222,13 +308,19 @@ pub fn scrolled(session: &Rc<RefCell<Session>>) {
     {
         let session = session.borrow();
         let caret = caret_of(&session);
+        let highlights = preview_highlights(&session);
         session.view.repaint(
             session.editor.text(),
             session.editor.sels(),
+            &highlights,
             &caret,
             session.focused,
         );
     }
+    // repaint で新しい窓が確定してから、その窓を検索して重ねだけを更新する。
+    // 先に検索すると、1つ前の drawn 範囲をハイライトしてしまう。
+    refresh_preview(&mut session.borrow_mut());
+    redraw_preview_overlay(session);
     request_missing(session);
 }
 

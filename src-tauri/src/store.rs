@@ -9,7 +9,7 @@
 //! を持つ。メモリは索引と編集量の分で済む。
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -214,6 +214,92 @@ impl Source {
 
     fn lines(&self) -> usize {
         self.index.state.lock().unwrap().lines
+    }
+
+    /// ディスク上の行範囲をひとかたまりで読み、通常文字列を memmem で探す。
+    /// 行ごとの read_until を避け、一致した場所だけ文字の列位置へ変換する。
+    fn literal_matches(
+        &mut self,
+        from: usize,
+        count: usize,
+        query: &str,
+        marker: u8,
+    ) -> Result<Vec<ScanHit>, String> {
+        if count == 0 || query.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.check()?;
+        let lines = self.lines();
+        let to = from.saturating_add(count).min(lines);
+        if from >= to {
+            return Ok(Vec::new());
+        }
+        let (base, start, end) = {
+            let state = self.index.state.lock().unwrap();
+            let group = from / STRIDE;
+            let end_group = to.div_ceil(STRIDE);
+            (
+                group * STRIDE,
+                state.marks[group],
+                state.marks.get(end_group).copied().unwrap_or(self.bytes),
+            )
+        };
+        let mut bytes = vec![0; (end - start) as usize];
+        let broken = |e| format!("{} を読めませんでした: {e}", self.path.display());
+        self.file.seek(SeekFrom::Start(start)).map_err(broken)?;
+        self.file.read_exact(&mut bytes).map_err(broken)?;
+        let finder = memchr::memmem::Finder::new(query.as_bytes());
+        let match_bytes: Vec<usize> = finder.find_iter(&bytes).collect();
+        let marker_bytes: Vec<usize> = memchr::memchr_iter(marker, &bytes).collect();
+        // 候補が無ければ行番号へ直す必要もない。巨大な改行配列を作らず返る。
+        if match_bytes.is_empty() && marker_bytes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let newlines: Vec<usize> = memchr::memchr_iter(b'\n', &bytes).collect();
+        let line_at = |byte: usize| base + newlines.partition_point(|newline| *newline < byte);
+        let mut marked = std::collections::HashSet::new();
+        for byte in marker_bytes {
+            let line = line_at(byte);
+            if line >= from && line < to {
+                marked.insert(line);
+            }
+        }
+        let mut hits: Vec<ScanHit> = marked
+            .iter()
+            .map(|line| ScanHit {
+                line: *line,
+                notation: true,
+                start: 0,
+                end: 0,
+            })
+            .collect();
+        for byte in match_bytes {
+            let line = line_at(byte);
+            if line < from || line >= to || marked.contains(&line) {
+                continue;
+            }
+            let end_byte = byte + query.len();
+            if bytes[byte..end_byte].contains(&b'\n') {
+                continue;
+            }
+            let line_start = (line - base)
+                .checked_sub(1)
+                .and_then(|index| newlines.get(index))
+                .map_or(0, |newline| newline + 1);
+            let start_col = std::str::from_utf8(&bytes[line_start..byte])
+                .map_err(|_| format!("{} は UTF-8 ではありません", self.path.display()))?
+                .chars()
+                .count();
+            let width = query.chars().count();
+            hits.push(ScanHit {
+                line,
+                notation: false,
+                start: start_col,
+                end: start_col + width,
+            });
+        }
+        hits.sort_by_key(|hit| (hit.line, hit.start));
+        Ok(hits)
     }
 
     /// ディスク上の行 `from` から `count` 行に `f` を呼ぶ。`f` が `false` を
@@ -606,6 +692,86 @@ impl Document {
         ))
     }
 
+    /// 通常の大小区別あり文字列検索。ディスクのピースはバイト範囲をまとめて
+    /// memmem で探し、編集で入った行も同じ結果形式へ合わせる。
+    pub fn scan_literal(
+        &mut self,
+        query: &str,
+        marker: char,
+        from: usize,
+        count: usize,
+        limit: usize,
+    ) -> Result<(Vec<ScanHit>, usize), String> {
+        let to = from.saturating_add(count).min(self.count);
+        let mut hits = Vec::new();
+        let mut line = 0usize;
+        for index in 0..self.pieces.len() {
+            let len = self.pieces[index].len();
+            let (start, end) = (line, line + len);
+            line = end;
+            if end <= from {
+                continue;
+            }
+            if start >= to {
+                break;
+            }
+            let skip = from.saturating_sub(start);
+            let take = to.min(end) - (start + skip);
+            match &self.pieces[index] {
+                Piece::Fresh(lines) => {
+                    let finder = memchr::memmem::Finder::new(query.as_bytes());
+                    for (offset, text) in lines[skip..skip + take].iter().enumerate() {
+                        let at = start + skip + offset;
+                        if text.contains(marker) {
+                            hits.push(ScanHit {
+                                line: at,
+                                notation: true,
+                                start: 0,
+                                end: 0,
+                            });
+                        } else {
+                            for byte in finder.find_iter(text.as_bytes()) {
+                                let start_col = text[..byte].chars().count();
+                                hits.push(ScanHit {
+                                    line: at,
+                                    notation: false,
+                                    start: start_col,
+                                    end: start_col + query.chars().count(),
+                                });
+                            }
+                        }
+                    }
+                }
+                Piece::Disk { from: disk, .. } => {
+                    let disk = *disk + skip;
+                    let base = start + skip;
+                    let source = self
+                        .source
+                        .as_mut()
+                        .expect("ディスクのピースがあるなら開いたファイルもある");
+                    hits.extend(
+                        source
+                            .literal_matches(disk, take, query, marker as u8)?
+                            .into_iter()
+                            .map(|hit| ScanHit {
+                                line: base + (hit.line - disk),
+                                ..hit
+                            }),
+                    );
+                }
+            }
+            if hits.len() >= limit {
+                hits.sort_by_key(|hit| (hit.line, hit.start));
+                hits.truncate(limit);
+                let scanned_to = hits.last().map_or(from, |hit| hit.line + 1);
+                return Ok((hits, scanned_to));
+            }
+        }
+        hits.sort_by_key(|hit| (hit.line, hit.start));
+        hits.truncate(limit);
+        Ok((hits, to))
+    }
+
     /// 検索の走査で見つかったもの: 素の行の一致か、読み替え（記法の解釈）を
     /// 要する行。行の順に並ぶ。
     pub fn scan(
@@ -647,6 +813,30 @@ impl Document {
             true
         })?;
         Ok((hits, scanned_to))
+    }
+
+    /// 文書から等間隔の窓を標本として検索し、全文の一致数を推定する。
+    /// 小さい文書は全行を調べるので正確な件数になる。
+    pub fn estimate_matches(&mut self, pattern: &regex::Regex) -> Result<usize, String> {
+        const WINDOWS: usize = 64;
+        const LINES_PER_WINDOW: usize = 2_000;
+        let step = self.count.div_ceil(WINDOWS).max(1);
+        let take = LINES_PER_WINDOW.min(step);
+        let mut hits = 0usize;
+        let mut sampled = 0usize;
+        for from in (0..self.count).step_by(step) {
+            let count = take.min(self.count - from);
+            self.each_line(from, count, &mut |_, line| {
+                hits += pattern.find_iter(line).count();
+                sampled += 1;
+                true
+            })?;
+        }
+        if sampled == 0 {
+            return Ok(0);
+        }
+        Ok(((hits as u128 * self.count as u128 + sampled as u128 / 2) / sampled as u128)
+            as usize)
     }
 
     /// `from..=to` の行のうち `needle` を含むもの。
@@ -949,6 +1139,35 @@ mod tests {
     }
 
     #[test]
+    fn estimating_matches_is_exact_when_every_line_is_sampled() {
+        let (mut doc, path) = disk_doc("estimate", &["hit hit", "none", "hit"]);
+        let pattern = regex::Regex::new("hit").unwrap();
+        assert_eq!(doc.estimate_matches(&pattern).unwrap(), 3);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn estimating_matches_extrapolates_uniform_samples() {
+        let lines: Vec<String> = (0..200_000).map(|_| "hit".to_string()).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (mut doc, path) = disk_doc("estimate-large", &refs);
+        let pattern = regex::Regex::new("hit").unwrap();
+        assert_eq!(doc.estimate_matches(&pattern).unwrap(), 200_000);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn literal_scan_reports_utf8_character_columns() {
+        let (mut doc, path) = disk_doc("literal-scan", &["前abc後abc"]);
+        let (hits, _) = doc.scan_literal("abc", '$', 0, 1, 64).unwrap();
+        assert_eq!(
+            hits.iter().map(|hit| (hit.start, hit.end)).collect::<Vec<_>>(),
+            vec![(1, 4), (5, 8)]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn finding_lines_that_contain_a_character() {
         let (mut doc, path) = disk_doc("contains", &["aa", "a$b", "cc", "$"]);
         assert_eq!(doc.lines_containing(0, 3, '$').unwrap(), vec![1, 3]);
@@ -1004,5 +1223,16 @@ mod tests {
         let start = std::time::Instant::now();
         let middle = doc.read(doc.line_count() / 2, 100).unwrap();
         println!("read 100 lines: {:?} ({} lines)", start.elapsed(), middle.len());
+        let missing = "planetext-not-present";
+        let start = std::time::Instant::now();
+        let _ = doc
+            .scan_literal(missing, '$', 0, doc.line_count(), 64)
+            .unwrap();
+        println!("literal full scan: {:?}", start.elapsed());
+        let start = std::time::Instant::now();
+        let estimate = doc
+            .estimate_matches(&regex::Regex::new("fox").unwrap())
+            .unwrap();
+        println!("estimate ({estimate} matches): {:?}", start.elapsed());
     }
 }

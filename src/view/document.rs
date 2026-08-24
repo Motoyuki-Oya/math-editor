@@ -20,6 +20,14 @@ use crate::view::viewport::Viewport;
 
 pub const LINE_CLASS: &str = "mn-line";
 pub(super) const LINE_ATTR: &str = "data-line";
+
+/// 入力中の検索に一致した、描画済みの行内の範囲。選択とは独立して描く。
+pub struct Highlight {
+    pub line: usize,
+    pub path: Vec<(usize, usize)>,
+    pub from: usize,
+    pub to: usize,
+}
 /// 線の横に表示される数字。ガターだけに配置されるため、テキストの描画、測定、ヒットテストには入りません。
 const NUMBER_CLASS: &str = "mn-number";
 
@@ -136,20 +144,48 @@ impl View {
         self.viewport.invalidate();
     }
 
+    /// 行DOMを作り直さず、検索一致・選択・キャレットの重ねだけを更新する。
+    pub fn redraw_overlay(
+        &self,
+        sels: &[Sel],
+        highlights: &[Highlight],
+        caret: &Caret<'_>,
+        focused: bool,
+    ) {
+        if let Some(doc) = self.overlay.owner_document() {
+            self.draw_overlay(&doc, sels, highlights, caret, focused);
+        }
+    }
+
     /// 変更後に描画し、キャレットの行をページ内に移動します。
-    pub fn draw(&self, text: &Text, sels: &[Sel], caret: &Caret<'_>, focused: bool) {
-        self.paint(text, sels, caret, focused, true);
+    pub fn draw(
+        &self,
+        text: &Text,
+        sels: &[Sel],
+        highlights: &[Highlight],
+        caret: &Caret<'_>,
+        focused: bool,
+    ) {
+        self.paint(text, sels, highlights, caret, focused, true);
     }
 
     /// スクロール後に描画します。これによりビューがキャレットに移動してはなりません。スクロールバーはキャレットではなくユーザーのものです。
-    pub fn repaint(&self, text: &Text, sels: &[Sel], caret: &Caret<'_>, focused: bool) {
-        self.paint(text, sels, caret, focused, false);
+    pub fn repaint(
+        &self,
+        text: &Text,
+        sels: &[Sel],
+        highlights: &[Highlight],
+        caret: &Caret<'_>,
+        focused: bool,
+    ) {
+        self.paint(text, sels, highlights, caret, focused, false);
     }
 
     fn paint(
         &self,
         text: &Text,
         sels: &[Sel],
+        highlights: &[Highlight],
         caret: &Caret<'_>,
         focused: bool,
         follow_caret: bool,
@@ -185,7 +221,7 @@ impl View {
             self.align_columns(text, window);
             self.rebuild_numbers(window);
             if let Some(doc) = self.overlay.owner_document() {
-                self.draw_carets(&doc, sels, caret, focused);
+                self.draw_overlay(&doc, sels, highlights, caret, focused);
             }
         };
         self.viewport
@@ -289,10 +325,27 @@ impl View {
         }
     }
 
-    /// テキスト内と構造内に同じようにすべてのキャレットとすべての選択範囲を描画します。それらはすべて、描画されたものから測定された長方形です。
-    fn draw_carets(&self, doc: &Document, sels: &[Sel], caret: &Caret<'_>, focused: bool) {
+    /// 検索一致、選択、キャレットを、描画済みDOMから測った矩形として重ねる。
+    fn draw_overlay(
+        &self,
+        doc: &Document,
+        sels: &[Sel],
+        highlights: &[Highlight],
+        caret: &Caret<'_>,
+        focused: bool,
+    ) {
         self.overlay.set_inner_html("");
         let origin = self.document.get_bounding_client_rect();
+        for highlight in highlights {
+            for rect in self.span_in_row(
+                highlight.line,
+                &highlight.path,
+                highlight.from,
+                Some(highlight.to),
+            ) {
+                self.shade_as(doc, rect, &origin, "mn-search-hit");
+            }
+        }
         // IME の作成中、下線付きのテキストは、
         let show_carets = focused && caret.composing.is_none();
         if let Some(cursor) = caret.inside {
@@ -328,7 +381,11 @@ impl View {
     }
 
     fn shade(&self, doc: &Document, rect: Box2, origin: &web_sys::DomRect) {
-        if let Some(shade) = element(doc, "div", "mn-sel") {
+        self.shade_as(doc, rect, origin, "mn-sel");
+    }
+
+    fn shade_as(&self, doc: &Document, rect: Box2, origin: &web_sys::DomRect, class: &str) {
+        if let Some(shade) = element(doc, "div", class) {
             set_box(&shade, rect.fix(), origin);
             append(&self.overlay, &shade);
         }

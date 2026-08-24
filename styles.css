@@ -132,6 +132,13 @@ body {
   color: var(--fg);
 }
 
+.find-count {
+  align-self: center;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .find-toggle {
   display: flex;
   align-items: center;
@@ -337,6 +344,12 @@ body {
 .mn-sel {
   position: absolute;
   background: color-mix(in srgb, var(--accent) 28%, transparent);
+  border-radius: 2px;
+}
+
+.mn-search-hit {
+  position: absolute;
+  background: color-mix(in srgb, #ffd54f 55%, transparent);
   border-radius: 2px;
 }
 

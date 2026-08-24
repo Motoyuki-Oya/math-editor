@@ -2,6 +2,7 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use wasm_bindgen::JsCast;
 use web_sys::KeyboardEvent;
 
 use super::shell::{Field, Shell};
@@ -16,6 +17,9 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
     let replacement = RwSignal::new(String::new());
     let regex = RwSignal::new(false);
     let case_sensitive = RwSignal::new(false);
+    let visible_count = RwSignal::new(0usize);
+    let estimated_count = RwSignal::new(None::<usize>);
+    let estimate_generation = RwSignal::new(0u64);
     let options = move || editor::SearchOptions {
         regex: regex.get_untracked(),
         case_sensitive: case_sensitive.get_untracked(),
@@ -42,7 +46,18 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                         node_ref=query_field
                         placeholder="検索"
                         prop:value=move || query.get()
-                        on:input=move |ev| query.set(event_target_value(&ev))
+                        on:input=move |ev| {
+                            let value = event_target_value(&ev);
+                            query.set(value.clone());
+                            update_preview(
+                                shell,
+                                value,
+                                options(),
+                                visible_count,
+                                estimated_count,
+                                estimate_generation,
+                            );
+                        }
                         on:keydown=move |ev: KeyboardEvent| {
                             if ev.key() == "Enter" {
                                 let shell = shell;
@@ -64,6 +79,15 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                             super::sync::find(shell, query, options, size);
                         });
                     }>"次を検索"</button>
+                    <span class="find-count">{move || match estimated_count.get() {
+                        Some(estimated) => format!(
+                            "表示 {} 件 / 全体 約{} 件",
+                            visible_count.get(),
+                            estimated,
+                        ),
+                        None if query.get().is_empty() => "表示 0 件".to_string(),
+                        None => format!("表示 {} 件 / 推定中…", visible_count.get()),
+                    }}</span>
                     <input
                         class="find-input"
                         node_ref=replacement_field
@@ -94,7 +118,17 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                         <input
                             type="checkbox"
                             prop:checked=move || case_sensitive.get()
-                            on:change=move |ev| case_sensitive.set(event_target_checked(&ev))
+                            on:change=move |ev| {
+                                case_sensitive.set(event_target_checked(&ev));
+                                update_preview(
+                                    shell,
+                                    query.get_untracked(),
+                                    options(),
+                                    visible_count,
+                                    estimated_count,
+                                    estimate_generation,
+                                );
+                            }
                         />
                         "Aa"
                     </label>
@@ -102,13 +136,75 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                         <input
                             type="checkbox"
                             prop:checked=move || regex.get()
-                            on:change=move |ev| regex.set(event_target_checked(&ev))
+                            on:change=move |ev| {
+                                regex.set(event_target_checked(&ev));
+                                update_preview(
+                                    shell,
+                                    query.get_untracked(),
+                                    options(),
+                                    visible_count,
+                                    estimated_count,
+                                    estimate_generation,
+                                );
+                            }
                         />
                         ".*"
                     </label>
-                    <button class="tool" on:click=move |_| shell.searching.set(false)>"閉じる"</button>
+                    <button class="tool" on:click=move |_| {
+                        editor::clear_search_preview();
+                        shell.searching.set(false);
+                    }>"閉じる"</button>
                 </div>
     }
+}
+
+fn update_preview(
+    shell: Shell,
+    query: String,
+    options: editor::SearchOptions,
+    visible_count: RwSignal<usize>,
+    estimated_count: RwSignal<Option<usize>>,
+    generation: RwSignal<u64>,
+) {
+    visible_count.set(editor::preview_search(&query, options));
+    estimated_count.set(None);
+    let current = generation.get_untracked() + 1;
+    generation.set(current);
+    if query.is_empty() {
+        return;
+    }
+    spawn_local(async move {
+        tick(200).await;
+        if generation.get_untracked() != current {
+            return;
+        }
+        let Some(handle) = shell.tab_untracked().doc.get_untracked() else {
+            return;
+        };
+        let result = ipc::estimate_matches(
+            handle,
+            &query,
+            options.regex,
+            options.case_sensitive,
+        )
+        .await;
+        if generation.get_untracked() == current {
+            if let Ok(count) = result {
+                estimated_count.set(Some(count));
+            }
+        }
+    });
+}
+
+async fn tick(ms: i32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        if let Some(window) = web_sys::window() {
+            window
+                .set_timeout_with_callback_and_timeout_and_arguments_0(resolve.unchecked_ref(), ms)
+                .ok();
+        }
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
 
 async fn file_size_for(shell: Shell) -> Option<usize> {
