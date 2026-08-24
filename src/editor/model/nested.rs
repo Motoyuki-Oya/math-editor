@@ -186,8 +186,14 @@ impl Editor {
         let line = self.cursors[index].head.line;
         match kind {
             Inside::Move | Inside::Extend => self.recorder.cut(),
-            Inside::Type => self.record(Step::Typing),
-            Inside::Change => self.record(Step::Other),
+            Inside::Type => {
+                self.record(Step::Typing);
+                self.modified_lines.insert(line);
+            }
+            Inside::Change => {
+                self.record(Step::Other);
+                self.modified_lines.insert(line);
+            }
         }
         let Some(root) = self.text.line_mut(line) else {
             return false;

@@ -43,6 +43,7 @@ pub struct View {
     document: Element,
     gutter: Element,
     overlay: Element,
+    ruler: Element,
     /// どの行をページに出すかと、窓をどこへ持っていくか。
     viewport: Viewport,
 }
@@ -51,6 +52,7 @@ pub struct View {
 pub struct Overlay<'a> {
     pub sels: &'a [Sel],
     pub highlights: &'a [Highlight],
+    pub modified: &'a [usize],
     pub primary: &'a Caret<'a>,
     pub carets: &'a [Caret<'a>],
     pub focused: bool,
@@ -100,6 +102,8 @@ impl View {
         let thumb_space = element(&doc, "div", "mn-thumb-space")?;
         append(&scrollbar, &thumb_space);
         append(&root, &scrollbar);
+        let ruler = element(&doc, "div", "mn-ruler")?;
+        append(&root, &ruler);
         Some(Self {
             viewport: Viewport::new(
                 root.clone(),
@@ -114,6 +118,7 @@ impl View {
             document,
             gutter,
             overlay,
+            ruler,
         })
     }
 
@@ -153,10 +158,11 @@ impl View {
         self.viewport.invalidate();
     }
 
-    /// 行DOMを作り直さず、検索一致・選択・キャレットの重ねだけを更新する。
-    pub fn redraw_overlay(&self, state: &Overlay<'_>) {
+    /// 行DOMを作り直さず、検索一致・選択・キャレット・ルーラーの重ねだけを更新する。
+    pub fn redraw_overlay(&self, line_count: usize, state: &Overlay<'_>) {
         if let Some(doc) = self.overlay.owner_document() {
             self.draw_overlay(&doc, state);
+            self.draw_ruler(&doc, line_count, state);
         }
     }
 
@@ -201,9 +207,10 @@ impl View {
         };
         let finish = |window: &Range<usize>| {
             self.align_columns(text, window);
-            self.rebuild_numbers(window);
+            self.rebuild_numbers(window, state.modified);
             if let Some(doc) = self.overlay.owner_document() {
                 self.draw_overlay(&doc, state);
+                self.draw_ruler(&doc, text.line_count(), state);
             }
         };
         self.viewport
@@ -223,7 +230,7 @@ impl View {
         style.set_property("--setting-gutter", &width).ok();
     }
 
-    fn rebuild_numbers(&self, window: &Range<usize>) {
+    fn rebuild_numbers(&self, window: &Range<usize>, modified: &[usize]) {
         self.gutter.set_inner_html("");
         if !crate::settings::line_numbers() {
             return;
@@ -239,13 +246,48 @@ impl View {
             let Some(rect) = measure::first_base_fragment(&holder) else {
                 continue;
             };
-            let Some(number) = element(&doc, "span", NUMBER_CLASS) else {
+            let is_modified = modified.contains(&line);
+            let class = if is_modified {
+                format!("{NUMBER_CLASS} mn-number-modified")
+            } else {
+                NUMBER_CLASS.to_string()
+            };
+            let Some(number) = element(&doc, "span", &class) else {
                 continue;
             };
             number.set_text_content(Some(&(line + 1).to_string()));
             let top = rect.top + rect.height / 2.0 - origin;
             number.set_attribute("style", &format!("top:{top}px")).ok();
             append(&self.gutter, &number);
+        }
+    }
+
+    /// スクロールバーのトラック上に変更行・検索ヒット位置のマーカー（Overview Ruler）を描画します。
+    fn draw_ruler(&self, doc: &Document, total_lines: usize, state: &Overlay<'_>) {
+        self.ruler.set_inner_html("");
+        if total_lines == 0 {
+            return;
+        }
+        let total = total_lines as f64;
+
+        // 変更行マーカー (青/accent)
+        for &line in state.modified {
+            let top_pct = (line as f64 + 0.5) / total * 100.0;
+            if let Some(mark) = element(doc, "div", "mn-ruler-item mn-ruler-modified") {
+                mark.set_attribute("style", &format!("top:{top_pct}%;"))
+                    .ok();
+                append(&self.ruler, &mark);
+            }
+        }
+
+        // 検索一致マーカー (黄/amber)
+        for hl in state.highlights {
+            let top_pct = (hl.line as f64 + 0.5) / total * 100.0;
+            if let Some(mark) = element(doc, "div", "mn-ruler-item mn-ruler-highlight") {
+                mark.set_attribute("style", &format!("top:{top_pct}%;"))
+                    .ok();
+                append(&self.ruler, &mark);
+            }
         }
     }
 

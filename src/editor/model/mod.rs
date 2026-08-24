@@ -39,6 +39,7 @@ pub struct Editor {
     text: Text,
     cursors: Vec<UnifiedCursor>,
     recorder: Recorder,
+    modified_lines: std::collections::BTreeSet<usize>,
 }
 
 impl Default for Editor {
@@ -47,6 +48,7 @@ impl Default for Editor {
             text: Text::default(),
             cursors: vec![UnifiedCursor::caret(Pos::default())],
             recorder: Recorder::default(),
+            modified_lines: std::collections::BTreeSet::new(),
         }
     }
 }
@@ -58,6 +60,39 @@ impl Editor {
 
     pub fn cursors(&self) -> &[UnifiedCursor] {
         &self.cursors
+    }
+
+    pub fn modified_lines(&self) -> Vec<usize> {
+        self.modified_lines.iter().copied().collect()
+    }
+
+    pub fn clear_modified(&mut self) {
+        self.modified_lines.clear();
+    }
+
+    pub(super) fn mark_lines_modified(
+        &mut self,
+        from_line: usize,
+        to_line: usize,
+        end_line: usize,
+    ) {
+        let removed_lines = to_line.saturating_sub(from_line);
+        let inserted_lines = end_line.saturating_sub(from_line);
+
+        let mut next_modified = std::collections::BTreeSet::new();
+        for &line in &self.modified_lines {
+            if line < from_line {
+                next_modified.insert(line);
+            } else if line > to_line {
+                let shifted = (line as isize + (inserted_lines as isize - removed_lines as isize))
+                    .max(0) as usize;
+                next_modified.insert(shifted);
+            }
+        }
+        for l in from_line..=end_line {
+            next_modified.insert(l);
+        }
+        self.modified_lines = next_modified;
     }
 
     /// 描画など本文の選択だけを見る境界で使う。
@@ -98,6 +133,7 @@ impl Editor {
         self.text = text;
         self.cursors = vec![UnifiedCursor::caret(Pos::default())];
         self.recorder = Recorder::default();
+        self.clear_modified();
     }
 
     /// 読み込んだ内容をまるごと文書の本体へ届くようにする。本体が
@@ -543,5 +579,25 @@ pub(crate) mod tests {
         editor.extend_to(Pos::new(0, 5));
         editor.insert_text("bye");
         assert_eq!(plain(&editor), "bye");
+    }
+
+    #[test]
+    fn modified_lines_tracks_edits_and_line_shifts() {
+        let mut editor = editor("line 1\nline 2\nline 3");
+        assert_eq!(editor.modified_lines(), Vec::<usize>::new());
+
+        // Edit line 1 (index 1)
+        editor.set_caret(Pos::new(1, 0));
+        editor.insert_text("edited ");
+        assert_eq!(editor.modified_lines(), vec![1]);
+
+        // Insert new line at line 0 (splits line 0 into lines 0 and 1, so line 1 becomes line 2)
+        editor.set_caret(Pos::new(0, 0));
+        editor.split_line();
+        assert_eq!(editor.modified_lines(), vec![0, 1, 2]);
+
+        // Clear modified
+        editor.clear_modified();
+        assert_eq!(editor.modified_lines(), Vec::<usize>::new());
     }
 }

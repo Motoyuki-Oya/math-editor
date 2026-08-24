@@ -330,6 +330,9 @@ impl Shell {
     pub(super) fn mark_clean_tab(&self, tab: Tab) {
         tab.dirty.set(false);
         drafts::forget(tab);
+        if let Some(pane) = self.pane_showing(tab) {
+            editor::clear_modified(pane.editor_pane());
+        }
         self.sync_dirty();
         self.refresh();
     }
