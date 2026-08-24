@@ -54,6 +54,13 @@ body {
   border-bottom: 1px solid var(--line);
 }
 
+.palette {
+  align-self: flex-end;
+  width: fit-content;
+  gap: 4px;
+  padding: 4px 8px;
+}
+
 .pref {
   display: flex;
   align-items: center;
@@ -95,6 +102,10 @@ body {
   align-items: center;
 }
 
+.palette .group {
+  gap: 2px;
+}
+
 .tool,
 .pal {
   border: 1px solid var(--line);
@@ -108,9 +119,11 @@ body {
 }
 
 .pal {
-  min-width: 32px;
-  font-family: var(--font-math);
-  font-size: 15px;
+  min-width: 28px;
+  padding: 3px 7px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.2;
 }
 
 .pal-word {
@@ -130,6 +143,13 @@ body {
   padding: 4px 8px;
   background: var(--bg);
   color: var(--fg);
+}
+
+.find-count {
+  align-self: center;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .find-toggle {
@@ -168,7 +188,8 @@ body {
 
 .tab-name,
 .tab-close,
-.tab-add {
+.tab-add,
+.tab-palette {
   border: none;
   background: none;
   color: var(--fg);
@@ -185,13 +206,19 @@ body {
 }
 
 .tab-close,
-.tab-add {
+.tab-add,
+.tab-palette {
   padding: 5px 8px;
   color: var(--muted);
 }
 
+.tab-palette {
+  margin-left: auto;
+}
+
 .tab-close:hover,
-.tab-add:hover {
+.tab-add:hover,
+.tab-palette:hover {
   color: var(--fg);
 }
 
@@ -340,6 +367,12 @@ body {
   border-radius: 2px;
 }
 
+.mn-search-hit {
+  position: absolute;
+  background: color-mix(in srgb, #ffd54f 55%, transparent);
+  border-radius: 2px;
+}
+
 .mn-cursor {
   position: absolute;
   background: var(--accent);
@@ -349,6 +382,12 @@ body {
 
 .mn-cursor-primary {
   background: var(--fg);
+}
+
+.mn-cursor-inactive {
+  background: var(--muted);
+  animation: none;
+  opacity: 0.7;
 }
 
 /* キーストロークと IME を受け取り、候補 ウィンドウが適切な場所に表示されるようにキャレットに従います。 */

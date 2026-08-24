@@ -70,7 +70,14 @@ fn fetch(shell: Shell, editor_pane: usize, range: Range<usize>) {
         let queue = queues.entry(id).or_default();
         for (_, task) in queue.iter_mut() {
             if let Task::Fetch(current) = task {
-                *current = current.start.min(range.start)..current.end.max(range.end);
+                // 重なるか隣り合う要求だけ 1 つにまとめる。離れた要求まで
+                // つなぐと間の何百万行も取り寄せてしまうので、古い方は
+                // 捨てて新しい窓を優先する。まだ要るなら描き直しが再要求する。
+                if range.start <= current.end && current.start <= range.end {
+                    *current = current.start.min(range.start)..current.end.max(range.end);
+                } else {
+                    *current = range.clone();
+                }
                 return true;
             }
         }
@@ -89,15 +96,18 @@ pub(super) fn flush(shell: Shell, editor_pane: usize) {
     let Some(tab) = shell.tab_of(editor_pane) else {
         return;
     };
+    cancel_running_search(tab);
     enqueue(tab, Task::Edits(batch));
 }
 
 pub(super) fn undo(shell: Shell, redo: bool) {
     let tab = shell.tab_untracked();
+    cancel_running_search(tab);
     enqueue(tab, Task::Undo { redo });
 }
 
 pub(super) fn save(tab: Tab, path: String) {
+    cancel_running_search(tab);
     enqueue(tab, Task::Save { path });
 }
 
@@ -106,19 +116,37 @@ pub(super) fn draft(tab: Tab) {
 }
 
 /// 次を検索。手元に全部ある文書はその場で、そうでなければ本体の走査で。
-pub(super) fn find(shell: Shell, query: String, options: editor::SearchOptions, file_size: Option<usize>) {
+pub(super) fn find(
+    shell: Shell,
+    query: String,
+    options: editor::SearchOptions,
+    file_size: Option<usize>,
+) {
     if editor::fully_resident() {
         editor::find_next(&query, options, file_size);
         return;
     }
+    let tab = shell.tab_untracked();
+    cancel_running_search(tab);
+    shell.status.set("検索しています…".into());
     enqueue(
-        shell.tab_untracked(),
+        tab,
         Task::Find {
             query,
             options,
             file_size,
         },
     );
+}
+
+fn cancel_running_search(tab: Tab) {
+    let id = tab.id.get_untracked();
+    if !BUSY.with(|busy| busy.borrow().contains(&id)) {
+        return;
+    }
+    if let Some(handle) = tab.doc.get_untracked() {
+        spawn_local(async move { ipc::cancel_search(handle).await });
+    }
 }
 
 fn enqueue(tab: Tab, task: Task) {
@@ -234,18 +262,18 @@ async fn execute(tab: Tab, task: Task) -> bool {
             options,
             file_size,
         } => match find_far(shell, tab, handle, &query, options, file_size).await {
-            Ok(_) => {}
+            Ok(Some(true)) => shell.status.set("見つかりました".into()),
+            Ok(Some(false)) => shell.status.set("見つかりませんでした".into()),
+            Ok(None) => {}
             Err(error) => shell.status.set(error),
         },
     }
     true
 }
 
-/// 1 回の走査で本体から取り寄せる行数。一致が見つかればもっと早く返る。
-const SCAN_LINES: usize = 200_000;
-
-/// 文書の本体を走査して次の一致へ跳ぶ。素の行の一致は本体が見つけ、記法を
-/// 含む行だけ取り寄せて手元の構造検索で調べる。端まで行ったら先頭へ回る。
+/// 文書の本体を走査して次の一致へ跳ぶ。空のページはnative内で読み進め、
+/// 記法を含む候補だけ必要に応じて手元で確認する。
+/// `None` は新しい検索や編集によるキャンセル。
 async fn find_far(
     shell: Shell,
     tab: Tab,
@@ -253,14 +281,14 @@ async fn find_far(
     query: &str,
     options: editor::SearchOptions,
     file_size: Option<usize>,
-) -> Result<bool, String> {
+) -> Result<Option<bool>, String> {
     use crate::format::document;
     use crate::structure::text::Pos;
     let Some(pane) = shell.pane_showing(tab).map(|pane| pane.editor_pane()) else {
-        return Ok(false);
+        return Ok(Some(false));
     };
     let Some((after, line_count)) = editor::far_search_start() else {
-        return Ok(false);
+        return Ok(Some(false));
     };
     let start_line = after.0.line;
     // 一巡り: 出発点の行から末尾まで、その後は先頭から出発点の行まで。
@@ -269,31 +297,35 @@ async fn find_far(
         (0, (start_line + 1).min(line_count), None),
     ];
     for (mut from, end, filter) in passes {
+        let mut after_col = filter.map(|after| after.0.col);
         while from < end {
-            let page = ipc::search_lines(
+            let page = ipc::search_document(
                 handle,
                 query,
                 options.regex,
                 options.case_sensitive,
                 document::NOTATION_MARK,
                 from,
-                (end - from).min(SCAN_LINES),
+                end,
+                after_col,
             )
             .await?;
+            if page.cancelled {
+                return Ok(None);
+            }
             for hit in &page.hits {
                 if hit.notation {
                     let lines = ipc::read_lines(handle, hit.line, 1).await?;
                     shell.feed(tab, hit.line, &lines);
-                    if editor::find_far_in_line(pane, hit.line, query, options, file_size, filter)
-                    {
-                        return Ok(true);
+                    if editor::find_far_in_line(pane, hit.line, query, options, file_size, filter) {
+                        return Ok(Some(true));
                     }
                 } else {
                     let key = (Pos::new(hit.line, hit.start), None);
                     if filter.is_none_or(|after| &key >= after)
                         && editor::apply_far_match(pane, hit.line, hit.start, hit.end)
                     {
-                        return Ok(true);
+                        return Ok(Some(true));
                     }
                 }
             }
@@ -301,9 +333,10 @@ async fn find_far(
                 break;
             }
             from = page.scanned_to;
+            after_col = None;
         }
     }
-    Ok(false)
+    Ok(Some(false))
 }
 
 /// まだ届いていない行を含む選択のコピー。記法の解釈を要する行だけを取り寄せて
@@ -313,9 +346,13 @@ async fn assemble_copy(handle: u64, copy: editor::FarCopy) -> Result<(), String>
     use crate::structure::plain;
     use crate::structure::text::SourceLine;
     let mut overrides = copy.overrides;
-    let notation =
-        ipc::lines_containing(handle, copy.from_line, copy.to_line, document::NOTATION_MARK)
-            .await?;
+    let notation = ipc::lines_containing(
+        handle,
+        copy.from_line,
+        copy.to_line,
+        document::NOTATION_MARK,
+    )
+    .await?;
     for line in notation {
         if (line == copy.from_line && copy.first.is_some())
             || (line == copy.to_line && copy.last.is_some())

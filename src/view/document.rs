@@ -20,6 +20,14 @@ use crate::view::viewport::Viewport;
 
 pub const LINE_CLASS: &str = "mn-line";
 pub(super) const LINE_ATTR: &str = "data-line";
+
+/// 入力中の検索に一致した、描画済みの行内の範囲。選択とは独立して描く。
+pub struct Highlight {
+    pub line: usize,
+    pub path: Vec<(usize, usize)>,
+    pub from: usize,
+    pub to: usize,
+}
 /// 線の横に表示される数字。ガターだけに配置されるため、テキストの描画、測定、ヒットテストには入りません。
 const NUMBER_CLASS: &str = "mn-number";
 
@@ -40,6 +48,15 @@ pub struct View {
 }
 
 /// キャレットがどこにあるか、描画がそれについて知る必要があるのはそれだけです。テキスト内の場所、キャレットがそこにある構造のどの深さまで到達しているか、IME がそこで何を構成しているかです。モードはありません。同じキャレットで両方のケースを説明します。
+pub struct Overlay<'a> {
+    pub sels: &'a [Sel],
+    pub highlights: &'a [Highlight],
+    pub primary: &'a Caret<'a>,
+    pub carets: &'a [Caret<'a>],
+    pub focused: bool,
+    pub linked: bool,
+}
+
 #[derive(Default)]
 pub struct Caret<'a> {
     pub at: Pos,
@@ -136,24 +153,25 @@ impl View {
         self.viewport.invalidate();
     }
 
+    /// 行DOMを作り直さず、検索一致・選択・キャレットの重ねだけを更新する。
+    pub fn redraw_overlay(&self, state: &Overlay<'_>) {
+        if let Some(doc) = self.overlay.owner_document() {
+            self.draw_overlay(&doc, state);
+        }
+    }
+
     /// 変更後に描画し、キャレットの行をページ内に移動します。
-    pub fn draw(&self, text: &Text, sels: &[Sel], caret: &Caret<'_>, focused: bool) {
-        self.paint(text, sels, caret, focused, true);
+    pub fn draw(&self, text: &Text, state: &Overlay<'_>) {
+        self.paint(text, state, true);
     }
 
     /// スクロール後に描画します。これによりビューがキャレットに移動してはなりません。スクロールバーはキャレットではなくユーザーのものです。
-    pub fn repaint(&self, text: &Text, sels: &[Sel], caret: &Caret<'_>, focused: bool) {
-        self.paint(text, sels, caret, focused, false);
+    pub fn repaint(&self, text: &Text, state: &Overlay<'_>) {
+        self.paint(text, state, false);
     }
 
-    fn paint(
-        &self,
-        text: &Text,
-        sels: &[Sel],
-        caret: &Caret<'_>,
-        focused: bool,
-        follow_caret: bool,
-    ) {
+    fn paint(&self, text: &Text, state: &Overlay<'_>, follow_caret: bool) {
+        let caret = state.primary;
         let wrap = crate::settings::wrap();
         if wrap {
             self.content.class_list().remove_1("mn-nowrap").ok();
@@ -185,7 +203,7 @@ impl View {
             self.align_columns(text, window);
             self.rebuild_numbers(window);
             if let Some(doc) = self.overlay.owner_document() {
-                self.draw_carets(&doc, sels, caret, focused);
+                self.draw_overlay(&doc, state);
             }
         };
         self.viewport
@@ -289,28 +307,47 @@ impl View {
         }
     }
 
-    /// テキスト内と構造内に同じようにすべてのキャレットとすべての選択範囲を描画します。それらはすべて、描画されたものから測定された長方形です。
-    fn draw_carets(&self, doc: &Document, sels: &[Sel], caret: &Caret<'_>, focused: bool) {
+    /// 検索一致、選択、キャレットを、描画済みDOMから測った矩形として重ねる。
+    fn draw_overlay(&self, doc: &Document, state: &Overlay<'_>) {
+        let sels = state.sels;
+        let highlights = state.highlights;
+        let caret = state.primary;
+        let carets = state.carets;
+        let focused = state.focused;
+        let linked = state.linked;
         self.overlay.set_inner_html("");
         let origin = self.document.get_bounding_client_rect();
-        // IME の作成中、下線付きのテキストは、
-        let show_carets = focused && caret.composing.is_none();
-        if let Some(cursor) = caret.inside {
+        for highlight in highlights {
+            for rect in self.span_in_row(
+                highlight.line,
+                &highlight.path,
+                highlight.from,
+                Some(highlight.to),
+            ) {
+                self.shade_as(doc, rect, &origin, "mn-search-hit");
+            }
+        }
+        // IME の作成中だけキャレットを隠す。非アクティブなペインは、
+        // Alt+クリックで同じ入力グループに入ったときだけ表示する。
+        let show_carets = (focused || linked) && caret.composing.is_none();
+        for (index, nested) in carets.iter().enumerate() {
+            let Some(cursor) = nested.inside else {
+                continue;
+            };
             if !cursor.is_caret() {
-                let (path, _) = caret.place();
+                let (path, _) = nested.place();
                 for rect in
-                    self.span_in_row(caret.at.line, &path, cursor.start(), Some(cursor.end()))
+                    self.span_in_row(nested.at.line, &path, cursor.start(), Some(cursor.end()))
                 {
                     self.shade(doc, rect, &origin);
                 }
             }
             if show_carets {
-                let (path, index) = caret.place();
-                if let Some(rect) = self.place_box(caret.at.line, &path, index) {
-                    self.mark_caret(doc, rect, &origin, true);
+                let (path, at) = nested.place();
+                if let Some(rect) = self.place_box(nested.at.line, &path, at) {
+                    self.mark_caret(doc, rect, &origin, index + 1 == carets.len(), focused);
                 }
             }
-            return;
         }
         for (index, sel) in sels.iter().enumerate() {
             if !sel.is_caret() {
@@ -322,23 +359,42 @@ impl View {
                 continue;
             }
             if let Some(rect) = self.caret_rect(sel.head) {
-                self.mark_caret(doc, rect, &origin, index + 1 == sels.len());
+                self.mark_caret(
+                    doc,
+                    rect,
+                    &origin,
+                    caret.inside.is_none() && index + 1 == sels.len(),
+                    focused,
+                );
             }
         }
     }
 
     fn shade(&self, doc: &Document, rect: Box2, origin: &web_sys::DomRect) {
-        if let Some(shade) = element(doc, "div", "mn-sel") {
+        self.shade_as(doc, rect, origin, "mn-sel");
+    }
+
+    fn shade_as(&self, doc: &Document, rect: Box2, origin: &web_sys::DomRect, class: &str) {
+        if let Some(shade) = element(doc, "div", class) {
             set_box(&shade, rect.fix(), origin);
             append(&self.overlay, &shade);
         }
     }
 
-    fn mark_caret(&self, doc: &Document, rect: Box2, origin: &web_sys::DomRect, primary: bool) {
+    fn mark_caret(
+        &self,
+        doc: &Document,
+        rect: Box2,
+        origin: &web_sys::DomRect,
+        primary: bool,
+        focused: bool,
+    ) {
         let Some(caret) = element(doc, "div", "mn-cursor") else {
             return;
         };
-        if primary {
+        if !focused {
+            caret.class_list().add_1("mn-cursor-inactive").ok();
+        } else if primary {
             caret.class_list().add_1("mn-cursor-primary").ok();
         }
         set_box(&caret, Box2 { width: 2.0, ..rect }.fix(), origin);

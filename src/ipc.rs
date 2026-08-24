@@ -120,6 +120,16 @@ pub async fn open_document(path: &str) -> Result<OpenedDocument, String> {
     serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
 }
 
+/// 走査の完了を待ち、確定した行数を返します。
+pub async fn finish_document(handle: u64) -> Result<usize, String> {
+    #[derive(Serialize)]
+    struct Args {
+        handle: u64,
+    }
+    let value = call("finish_document", Args { handle }).await?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
+}
+
 /// 新しい空の文書をネイティブ側のストアに作ります。
 pub async fn create_document() -> Option<OpenedDocument> {
     let value = call("create_document", NoArgs {}).await.ok()?;
@@ -288,23 +298,25 @@ pub struct ScanHit {
     pub end: usize,
 }
 
-/// 検索の 1 ページ分の走査結果。`scanned_to` から続きを頼める。
 #[derive(Deserialize)]
-pub struct ScanPage {
+pub struct SearchPage {
     pub hits: Vec<ScanHit>,
     pub scanned_to: usize,
+    pub cancelled: bool,
 }
 
-/// 文書の本体を `from` から `count` 行ぶん走査します。
-pub async fn search_lines(
+/// 空のページをnative側で読み進め、最初の候補群までを返します。
+#[allow(clippy::too_many_arguments)]
+pub async fn search_document(
     handle: u64,
     query: &str,
     regex: bool,
     case_sensitive: bool,
     needle: char,
     from: usize,
-    count: usize,
-) -> Result<ScanPage, String> {
+    end: usize,
+    after_col: Option<usize>,
+) -> Result<SearchPage, String> {
     #[derive(Serialize)]
     struct Args<'a> {
         handle: u64,
@@ -313,10 +325,11 @@ pub async fn search_lines(
         case_sensitive: bool,
         needle: char,
         from: usize,
-        count: usize,
+        end: usize,
+        after_col: Option<usize>,
     }
     let value = call(
-        "search_lines",
+        "search_document",
         Args {
             handle,
             query,
@@ -324,7 +337,43 @@ pub async fn search_lines(
             case_sensitive,
             needle,
             from,
-            count,
+            end,
+            after_col,
+        },
+    )
+    .await?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
+}
+
+pub async fn cancel_search(handle: u64) {
+    #[derive(Serialize)]
+    struct Args {
+        handle: u64,
+    }
+    let _ = call("cancel_search", Args { handle }).await;
+}
+
+/// 等間隔の標本から全文のおよその一致数を返します。
+pub async fn estimate_matches(
+    handle: u64,
+    query: &str,
+    regex: bool,
+    case_sensitive: bool,
+) -> Result<usize, String> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        handle: u64,
+        query: &'a str,
+        regex: bool,
+        case_sensitive: bool,
+    }
+    let value = call(
+        "estimate_matches",
+        Args {
+            handle,
+            query,
+            regex,
+            case_sensitive,
         },
     )
     .await?;

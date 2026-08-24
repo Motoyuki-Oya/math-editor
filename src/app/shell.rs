@@ -92,6 +92,8 @@ pub(super) struct Pane {
     pub(super) editor: StoredValue<Option<usize>>,
     pub(super) tabs: RwSignal<Vec<Tab>>,
     pub(super) current: RwSignal<usize>,
+    /// このペインで構造パレットが表示されているかどうか。
+    pub(super) palette: RwSignal<bool>,
     /// レンダリング間でペインの要素を保持します。
     pub(super) key: usize,
 }
@@ -104,6 +106,7 @@ impl Pane {
             editor: StoredValue::new(None),
             tabs: RwSignal::new(vec![tab]),
             current: RwSignal::new(0),
+            palette: RwSignal::new(false),
             key,
         }
     }
@@ -494,6 +497,18 @@ impl Shell {
                     tab.path.set(Some(path));
                     shell.status.set("開きました".into());
                     shell.mark_clean();
+                    // 行数はバックグラウンドで走査中。確定したら手元へ合わせる。
+                    let handle = doc.handle;
+                    let editor_pane = pane.editor_pane();
+                    spawn_local(async move {
+                        match ipc::finish_document(handle).await {
+                            Ok(count) => {
+                                editor::set_line_count(editor_pane, count);
+                                shell.refresh();
+                            }
+                            Err(error) => shell.status.set(error),
+                        }
+                    });
                 }
                 Err(error) => shell.status.set(error),
             }

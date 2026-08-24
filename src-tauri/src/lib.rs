@@ -3,7 +3,8 @@ mod store;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
@@ -20,10 +21,25 @@ struct AppState {
     /// 開いている文書の本体。webview は行の窓だけを取り寄せ、編集は
     /// 行範囲の置き換えとして届く。タブが閉じられると手放す。
     docs: Mutex<HashMap<u64, store::Document>>,
+    /// 文書ごとの検索世代。値が変われば走査スレッドは古い検索を中止する。
+    searches: Mutex<HashMap<u64, Arc<AtomicU64>>>,
     next_document: Mutex<u64>,
 }
 
 impl AppState {
+    /// 取っ手の文書へロックの中で触る。閉じられた文書は一律に断る。
+    fn with_doc<T>(
+        &self,
+        handle: u64,
+        f: impl FnOnce(&mut store::Document) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut docs = self.docs.lock().unwrap();
+        let doc = docs
+            .get_mut(&handle)
+            .ok_or_else(|| "文書はもう閉じられています".to_string())?;
+        f(doc)
+    }
+
     fn adopt(&self, doc: store::Document) -> OpenedDocument {
         let opened = OpenedDocument {
             handle: {
@@ -35,6 +51,10 @@ impl AppState {
             bytes: doc.bytes(),
         };
         self.docs.lock().unwrap().insert(opened.handle, doc);
+        self.searches
+            .lock()
+            .unwrap()
+            .insert(opened.handle, Arc::new(AtomicU64::new(0)));
         opened
     }
 }
@@ -95,7 +115,36 @@ struct OpenedDocument {
 /// async なのは UI を待たせないため。
 #[tauri::command]
 async fn open_document(state: State<'_, AppState>, path: String) -> Result<OpenedDocument, String> {
-    Ok(state.adopt(store::Document::open(&path)?))
+    let (doc, scan) = store::Document::open(&path)?;
+    let opened = state.adopt(doc);
+    if let Some(scan) = scan {
+        std::thread::spawn(move || {
+            let _ = scan.run();
+        });
+    }
+    Ok(opened)
+}
+
+/// 走査の完了を待ち、文書の行数を確定させる。
+async fn wait_scanned(state: &State<'_, AppState>, handle: u64) -> Result<(), String> {
+    let index = state.with_doc(handle, |doc| Ok(doc.scan_index()))?;
+    if let Some(index) = index {
+        while index.status()?.is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+    }
+    state.with_doc(handle, |doc| {
+        doc.confirm_scan();
+        Ok(())
+    })
+}
+
+/// 走査の完了を待ってから確定した行数を返す。frontend は開いた直後に
+/// これを 1 度呼び、返った行数で文書の長さを確定させる。
+#[tauri::command]
+async fn finish_document(state: State<'_, AppState>, handle: u64) -> Result<usize, String> {
+    wait_scanned(&state, handle).await?;
+    state.with_doc(handle, |doc| Ok(doc.line_count()))
 }
 
 /// 新しい空の文書をストアに作ります。すべての文書の本体がネイティブ側にあります。
@@ -113,16 +162,14 @@ async fn read_lines(
     from: usize,
     count: usize,
 ) -> Result<Vec<String>, String> {
-    let mut docs = state.docs.lock().unwrap();
-    let Some(doc) = docs.get_mut(&handle) else {
-        return Err("文書はもう閉じられています".to_string());
-    };
-    doc.read(from, count)
+    state.with_doc(handle, |doc| doc.read(from, count))
 }
 
 /// 編集の到着: `from..to` の行を `lines` へ置き換えます。同じ `group` が続く間は
 /// 元に戻す履歴の 1 ステップにつながります。新しい行数を返します。
 #[tauri::command]
+// 引数は frontend との受け渡しの形そのものなので、まとめると IPC の名前が変わる。
+#[allow(clippy::too_many_arguments)]
 async fn replace_lines(
     state: State<'_, AppState>,
     handle: u64,
@@ -133,11 +180,9 @@ async fn replace_lines(
     before: String,
     after: String,
 ) -> Result<usize, String> {
-    let mut docs = state.docs.lock().unwrap();
-    let Some(doc) = docs.get_mut(&handle) else {
-        return Err("文書はもう閉じられています".to_string());
-    };
-    doc.replace(from, to, lines, group, &before, &after)
+    state.with_doc(handle, |doc| {
+        doc.replace(from, to, lines, group, &before, &after)
+    })
 }
 
 /// 元に戻す・やり直すの結果。`state` は frontend が預けた控えそのもの。
@@ -154,17 +199,19 @@ async fn undo_lines(
     handle: u64,
     redo: bool,
 ) -> Result<Option<RestoredLines>, String> {
-    let mut docs = state.docs.lock().unwrap();
-    let Some(doc) = docs.get_mut(&handle) else {
+    // 閉じられた文書の元に戻すは「何もない」であってエラーではない。
+    if !state.docs.lock().unwrap().contains_key(&handle) {
         return Ok(None);
-    };
-    Ok(
-        (if redo { doc.redo() } else { doc.undo() })?.map(|restored| RestoredLines {
-            state: restored.state,
-            touched_from: restored.touched_from,
-            line_count: restored.line_count,
-        }),
-    )
+    }
+    state.with_doc(handle, |doc| {
+        Ok(
+            (if redo { doc.redo() } else { doc.undo() })?.map(|restored| RestoredLines {
+                state: restored.state,
+                touched_from: restored.touched_from,
+                line_count: restored.line_count,
+            }),
+        )
+    })
 }
 
 /// 文書をストアからディスクへ直接書きます。全文は webview を通りません。
@@ -174,32 +221,30 @@ async fn save_document(
     handle: u64,
     path: String,
 ) -> Result<(), String> {
-    let mut docs = state.docs.lock().unwrap();
-    let Some(doc) = docs.get_mut(&handle) else {
-        return Err("文書はもう閉じられています".to_string());
-    };
-    doc.save(&path)
+    state.with_doc(handle, |doc| doc.save(&path))
 }
 
 /// 閉じられたタブの文書を手放します。
 #[tauri::command]
 fn close_document(state: State<'_, AppState>, handle: u64) {
+    if let Some(generation) = state.searches.lock().unwrap().remove(&handle) {
+        generation.fetch_add(1, Ordering::Relaxed);
+    }
     state.docs.lock().unwrap().remove(&handle);
 }
 
-/// 検索の 1 ページ分の走査。素の行の一致と、読み替えの要る行が行の順で返り、
-/// `scanned_to` から続きを頼めます。パターンの意味は regex クレートのもの。
 #[derive(serde::Serialize)]
-struct ScanPage {
+struct SearchPage {
     hits: Vec<store::ScanHit>,
     scanned_to: usize,
+    cancelled: bool,
 }
 
-// 複数語の引数（case_sensitive）を snake_case のまま受け取る。既定の camelCase
-// 期待のままだと、frontend の引数が見つからず呼び出しが失敗する。
+/// 空のページをnative内で読み進め、最初の候補群までを1回のジョブで返す。
+/// 文書は開始時に複製したピースと独立ファイルハンドルで読み、docsをロックしない。
 #[tauri::command(rename_all = "snake_case")]
 #[allow(clippy::too_many_arguments)]
-async fn search_lines(
+async fn search_document(
     state: State<'_, AppState>,
     handle: u64,
     query: String,
@@ -207,10 +252,20 @@ async fn search_lines(
     case_sensitive: bool,
     needle: char,
     from: usize,
-    count: usize,
-) -> Result<ScanPage, String> {
+    end: usize,
+    after_col: Option<usize>,
+) -> Result<SearchPage, String> {
+    let generation = state
+        .searches
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .cloned()
+        .ok_or_else(|| "文書はもう閉じられています".to_string())?;
+    let ticket = generation.fetch_add(1, Ordering::Relaxed) + 1;
+    let mut snapshot = state.with_doc(handle, |doc| doc.search_snapshot())?;
     let pattern = if regex {
-        query
+        query.clone()
     } else {
         regex::escape(&query)
     };
@@ -218,12 +273,52 @@ async fn search_lines(
         .case_insensitive(!case_sensitive)
         .build()
         .map_err(|e| format!("正規表現を読めませんでした: {e}"))?;
-    let mut docs = state.docs.lock().unwrap();
-    let Some(doc) = docs.get_mut(&handle) else {
-        return Err("文書はもう閉じられています".to_string());
-    };
-    let (hits, scanned_to) = doc.scan(&pattern, needle, from, count, 64)?;
-    Ok(ScanPage { hits, scanned_to })
+    let literal = (!regex && (case_sensitive || query.is_ascii())).then_some(query);
+    let found = tauri::async_runtime::spawn_blocking(move || {
+        snapshot.search_candidates(
+            store::SearchSpec {
+                pattern: &pattern,
+                literal: literal.as_deref(),
+                case_sensitive,
+                marker: needle,
+                from,
+                end,
+                after_col,
+            },
+            &|| generation.load(Ordering::Relaxed) != ticket,
+        )
+    })
+    .await
+    .map_err(|e| format!("検索を続けられませんでした: {e}"))??;
+    Ok(SearchPage {
+        hits: found.hits,
+        scanned_to: found.scanned_to,
+        cancelled: found.cancelled,
+    })
+}
+
+#[tauri::command]
+fn cancel_search(state: State<'_, AppState>, handle: u64) {
+    if let Some(generation) = state.searches.lock().unwrap().get(&handle) {
+        generation.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// 等間隔の行窓を標本にして、全文のおよその一致数を返します。
+#[tauri::command(rename_all = "snake_case")]
+async fn estimate_matches(
+    state: State<'_, AppState>,
+    handle: u64,
+    query: String,
+    regex: bool,
+    case_sensitive: bool,
+) -> Result<usize, String> {
+    let pattern = if regex { query } else { regex::escape(&query) };
+    let pattern = regex::RegexBuilder::new(&pattern)
+        .case_insensitive(!case_sensitive)
+        .build()
+        .map_err(|e| format!("正規表現を読めませんでした: {e}"))?;
+    state.with_doc(handle, |doc| doc.estimate_matches(&pattern))
 }
 
 /// 範囲内で `needle` を含む行。frontend が読み替えの必要な行を探すのに使います。
@@ -237,11 +332,7 @@ async fn lines_containing(
     needle: char,
 ) -> Result<Vec<usize>, String> {
     let started = Instant::now();
-    let mut docs = state.docs.lock().unwrap();
-    let Some(doc) = docs.get_mut(&handle) else {
-        return Err("文書はもう閉じられています".to_string());
-    };
-    let found = doc.lines_containing(from, to, needle)?;
+    let found = state.with_doc(handle, |doc| doc.lines_containing(from, to, needle))?;
     store_log("lines_containing", started);
     Ok(found)
 }
@@ -260,13 +351,9 @@ async fn copy_range(
     overrides: Vec<(usize, String)>,
 ) -> Result<(), String> {
     let started = Instant::now();
-    let text = {
-        let mut docs = state.docs.lock().unwrap();
-        let Some(doc) = docs.get_mut(&handle) else {
-            return Err("文書はもう閉じられています".to_string());
-        };
-        doc.assemble(from, first, to, last, &overrides.into_iter().collect())?
-    };
+    let text = state.with_doc(handle, |doc| {
+        doc.assemble(from, first, to, last, &overrides.into_iter().collect())
+    })?;
     store_log("copy assemble", started);
     let started = Instant::now();
     let result = arboard::Clipboard::new()
@@ -435,18 +522,16 @@ async fn save_draft(
     let Some(dir) = drafts_dir(&app) else {
         return Err("下書きの保存先がありません".to_string());
     };
-    let mut docs = state.docs.lock().unwrap();
-    let Some(doc) = docs.get_mut(&handle) else {
-        return Err("文書はもう閉じられています".to_string());
-    };
-    let file = std::fs::File::create(dir.join(draft_name(&id)))
-        .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
-    let mut out = std::io::BufWriter::new(file);
-    use std::io::Write;
-    writeln!(out, "{}", path.unwrap_or_default())
-        .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
-    doc.write_to(&mut out)
-        .map_err(|e| format!("下書きを保存できませんでした: {e}"))
+    state.with_doc(handle, |doc| {
+        let file = std::fs::File::create(dir.join(draft_name(&id)))
+            .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+        let mut out = std::io::BufWriter::new(file);
+        use std::io::Write;
+        writeln!(out, "{}", path.unwrap_or_default())
+            .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+        doc.write_to(&mut out)
+            .map_err(|e| format!("下書きを保存できませんでした: {e}"))
+    })
 }
 
 /// 保存済みファイル、未保存なら下書きファイルのサイズを返します。
@@ -641,6 +726,7 @@ pub fn run() {
             dirty: Mutex::new(false),
             started: Instant::now(),
             docs: Mutex::new(HashMap::new()),
+            searches: Mutex::new(HashMap::new()),
             next_document: Mutex::new(0),
         })
         .setup(|app| {
@@ -662,6 +748,7 @@ pub fn run() {
             pick_open_path,
             pick_save_path,
             open_document,
+            finish_document,
             create_document,
             read_lines,
             replace_lines,
@@ -670,7 +757,9 @@ pub fn run() {
             close_document,
             lines_containing,
             copy_range,
-            search_lines,
+            search_document,
+            cancel_search,
+            estimate_matches,
             set_dirty,
             frontend_ready,
             confirm_discard,
