@@ -6,7 +6,7 @@ use web_sys::HtmlElement;
 
 use super::hold_focus;
 use super::palette::Palette;
-use super::shell::{Pane, Shell};
+use super::shell::{self, Pane, Shell};
 use crate::editor;
 
 /// タブストリップとエディタの下にある。
@@ -59,26 +59,100 @@ pub(super) fn PaneView(shell: Shell, pane: Pane) -> impl IntoView {
 #[component]
 fn Tabs(shell: Shell, pane: Pane) -> impl IntoView {
     view! {
-        <div class="tabbar">
+        <div
+            class=move || {
+                let is_end_target = shell
+                    .tab_drag
+                    .get()
+                    .and_then(|d| if d.is_dragging { d.drop_target } else { None })
+                    .map(|t| t.pane_key == pane.key && t.index >= pane.tabs.with(Vec::len))
+                    .unwrap_or(false);
+                if is_end_target {
+                    "tabbar tabbar-drop-end"
+                } else {
+                    "tabbar"
+                }
+            }
+            data-tabbar-pane=pane.key
+            data-tabbar-count=move || pane.tabs.with(Vec::len)
+        >
             {move || {
                 let current = pane.current.get();
-                pane.tabs
-                    .get()
-                    .into_iter()
+                let tabs = pane.tabs.get();
+                let tabs_len = tabs.len();
+                tabs.into_iter()
                     .enumerate()
                     .map(|(index, tab)| {
+                        let is_dragging = move || {
+                            shell
+                                .tab_drag
+                                .get()
+                                .map(|d| {
+                                    d.is_dragging
+                                        && d.src_pane_key == pane.key
+                                        && d.src_tab_index == index
+                                })
+                                .unwrap_or(false)
+                        };
+                        let drop_class = move || {
+                            let target = shell
+                                .tab_drag
+                                .get()
+                                .and_then(|d| if d.is_dragging { d.drop_target } else { None });
+                            match target {
+                                Some(t) if t.pane_key == pane.key && t.index == index => {
+                                    " tab-drop-before"
+                                }
+                                Some(t)
+                                    if t.pane_key == pane.key
+                                        && t.index == index + 1
+                                        && index == tabs_len.saturating_sub(1) =>
+                                {
+                                    " tab-drop-after"
+                                }
+                                _ => "",
+                            }
+                        };
                         view! {
-                            <span class=move || {
-                                if index == current { "tab tab-current" } else { "tab" }
-                            }>
-                                <button
-                                    class="tab-name"
-                                    on:mousedown=hold_focus
-                                    on:click=move |_| {
-                                        shell.focus_on(pane);
-                                        shell.switch(pane, index);
+                            <span
+                                class=move || {
+                                    format!(
+                                        "tab{}{}{}",
+                                        if index == current { " tab-current" } else { "" },
+                                        if is_dragging() { " tab-dragging" } else { "" },
+                                        drop_class(),
+                                    )
+                                }
+                                data-tab-pane=pane.key
+                                data-tab-index=index
+                                on:pointerdown=move |ev: web_sys::PointerEvent| {
+                                    if ev.button() != 0 {
+                                        return;
                                     }
-                                >
+                                    let name = tab.name();
+                                    let dirty = tab.dirty.get_untracked();
+                                    shell
+                                        .tab_drag
+                                        .set(
+                                            Some(shell::TabDragState {
+                                                src_pane_key: pane.key,
+                                                src_tab_index: index,
+                                                tab_name: format!(
+                                                    "{}{}",
+                                                    if dirty { "*" } else { "" },
+                                                    name,
+                                                ),
+                                                start_x: ev.client_x() as f64,
+                                                start_y: ev.client_y() as f64,
+                                                current_x: ev.client_x() as f64,
+                                                current_y: ev.client_y() as f64,
+                                                is_dragging: false,
+                                                drop_target: None,
+                                            }),
+                                        );
+                                }
+                            >
+                                <span class="tab-name">
                                     {move || {
                                         format!(
                                             "{}{}",
@@ -86,12 +160,13 @@ fn Tabs(shell: Shell, pane: Pane) -> impl IntoView {
                                             tab.name(),
                                         )
                                     }}
-                                </button>
+                                </span>
                                 <button
                                     class="tab-close"
                                     title="閉じる (Ctrl+W)"
-                                    on:mousedown=hold_focus
-                                    on:click=move |_| {
+                                    on:pointerdown=move |ev: web_sys::PointerEvent| ev.stop_propagation()
+                                    on:click=move |ev: web_sys::MouseEvent| {
+                                        ev.stop_propagation();
                                         shell.focus_on(pane);
                                         shell.close(pane, index);
                                     }

@@ -150,6 +150,29 @@ pub(super) struct Shell {
     pub(super) preferences: RwSignal<bool>,
     /// カーソルが画面上に表示されると、それを待機する検索バーのフィールド。
     pub(super) find_focus: RwSignal<Option<Field>>,
+    /// ドラッグ中のタブ情報（移動元、マウス位置、ドラッグ中フラグ、ホバー中ターゲット）。
+    pub(super) tab_drag: RwSignal<Option<TabDragState>>,
+}
+
+/// ドラッグ中のタブ状態。
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct TabDragState {
+    pub(super) src_pane_key: usize,
+    pub(super) src_tab_index: usize,
+    pub(super) tab_name: String,
+    pub(super) start_x: f64,
+    pub(super) start_y: f64,
+    pub(super) current_x: f64,
+    pub(super) current_y: f64,
+    pub(super) is_dragging: bool,
+    pub(super) drop_target: Option<DropTarget>,
+}
+
+/// ドロップ先のペインと挿入インデックス。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct DropTarget {
+    pub(super) pane_key: usize,
+    pub(super) index: usize,
 }
 
 /// 検索バーのフィールド。ショートカットで検索できるように名前が付けられています。
@@ -436,6 +459,109 @@ impl Shell {
                 shell.sync_dirty();
             }
         });
+    }
+
+    /// タブを並べ替えるか、別のペインへ移動します。
+    pub(super) fn move_tab(
+        &self,
+        src_pane_key: usize,
+        src_tab_idx: usize,
+        dst_pane: Pane,
+        dst_tab_idx: usize,
+    ) {
+        let Some(src_pane) = self
+            .panes
+            .with_untracked(|panes| panes.iter().find(|p| p.key == src_pane_key).copied())
+        else {
+            return;
+        };
+
+        if src_pane.key == dst_pane.key {
+            // 同一ペイン内での並べ替え
+            let tab_count = src_pane.tabs.with_untracked(Vec::len);
+            if src_tab_idx >= tab_count {
+                return;
+            }
+            let insert_pos = if src_tab_idx < dst_tab_idx {
+                dst_tab_idx.saturating_sub(1)
+            } else {
+                dst_tab_idx
+            }
+            .min(tab_count.saturating_sub(1));
+
+            if src_tab_idx == insert_pos {
+                return;
+            }
+
+            let active_tab_id = src_pane.tab_untracked().id.get_untracked();
+            src_pane.tabs.update(|tabs| {
+                let tab = tabs.remove(src_tab_idx);
+                tabs.insert(insert_pos, tab);
+            });
+            // アクティブなタブの新しい位置を特定して current を更新
+            if let Some(new_curr) = src_pane.tabs.with_untracked(|tabs| {
+                tabs.iter()
+                    .position(|t| t.id.get_untracked() == active_tab_id)
+            }) {
+                src_pane.current.set(new_curr);
+            }
+        } else {
+            // 分割ペイン間でのタブ移動
+            let Some(tab) = src_pane
+                .tabs
+                .with_untracked(|tabs| tabs.get(src_tab_idx).copied())
+            else {
+                return;
+            };
+
+            let src_current = src_pane.current.get_untracked();
+            if src_current == src_tab_idx {
+                // 移動元で表示中のタブを移動する場合、エディタの状態を park に退避
+                src_pane.park();
+            }
+
+            src_pane.tabs.update(|tabs| {
+                if src_tab_idx < tabs.len() {
+                    tabs.remove(src_tab_idx);
+                }
+            });
+
+            if src_pane.tabs.with_untracked(Vec::is_empty) {
+                // 元ペインが空になる場合、空の無題タブを新規作成してペインを維持
+                let new_tab = self.new_tab();
+                src_pane.tabs.set(vec![new_tab]);
+                src_pane.current.set(0);
+                self.show(src_pane, new_tab);
+            } else if src_current == src_tab_idx {
+                let last = src_pane.tabs.with_untracked(|tabs| tabs.len() - 1);
+                let next_idx = src_tab_idx.min(last);
+                src_pane.current.set(next_idx);
+                let next_tab = src_pane.tabs.with_untracked(|tabs| tabs[next_idx]);
+                self.show(src_pane, next_tab);
+            } else {
+                let last = src_pane.tabs.with_untracked(|tabs| tabs.len() - 1);
+                if src_tab_idx < src_current {
+                    src_pane.current.set(src_current - 1);
+                } else {
+                    src_pane.current.set(src_current.min(last));
+                }
+            }
+
+            // 宛先ペインへタブを挿入
+            let dst_count = dst_pane.tabs.with_untracked(Vec::len);
+            let insert_idx = dst_tab_idx.min(dst_count);
+            dst_pane.tabs.update(|tabs| {
+                tabs.insert(insert_idx, tab);
+            });
+
+            // 移動したタブを宛先ペインでアクティブにして表示
+            dst_pane.park();
+            dst_pane.current.set(insert_idx);
+            self.show(dst_pane, tab);
+            self.focus_on(dst_pane);
+            self.sync_dirty();
+            self.refresh();
+        }
     }
 
     /// 表示されているペインの横にペインを追加するか、表示されているペインを削除します。

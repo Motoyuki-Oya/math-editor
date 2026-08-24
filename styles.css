@@ -165,10 +165,12 @@ body {
   display: flex;
   align-items: stretch;
   gap: 2px;
-  padding: 4px 8px 0;
+  padding: 3px 6px 0;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
   overflow-x: auto;
+  font-size: 12.5px;
+  line-height: 1.3;
 }
 
 .tab {
@@ -176,14 +178,91 @@ body {
   align-items: center;
   border: 1px solid var(--line);
   border-bottom: none;
-  border-radius: 6px 6px 0 0;
+  border-radius: 5px 5px 0 0;
   background: var(--panel);
-  max-width: 220px;
+  max-width: 200px;
+  font-size: 12.5px;
+  cursor: grab;
+  user-select: none;
+  transition: opacity 0.1s, border-color 0.1s, background 0.1s;
+}
+
+.tab:active {
+  cursor: grabbing;
 }
 
 .tab-current {
   background: var(--bg);
   box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.tab-dragging {
+  opacity: 0.35;
+}
+
+.tab-drop-before {
+  position: relative;
+}
+
+.tab-drop-before::before {
+  content: "";
+  position: absolute;
+  left: -2px;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--accent);
+  border-radius: 2px;
+  z-index: 10;
+  box-shadow: 0 0 6px var(--accent);
+}
+
+.tab-drop-after {
+  position: relative;
+}
+
+.tab-drop-after::after {
+  content: "";
+  position: absolute;
+  right: -2px;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--accent);
+  border-radius: 2px;
+  z-index: 10;
+  box-shadow: 0 0 6px var(--accent);
+}
+
+.tabbar-drop-end::after {
+  content: "";
+  display: inline-block;
+  align-self: stretch;
+  width: 3px;
+  margin-left: 2px;
+  background: var(--accent);
+  border-radius: 2px;
+  box-shadow: 0 0 6px var(--accent);
+}
+
+.tab-ghost {
+  position: fixed;
+  pointer-events: none;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 12.5px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  opacity: 0.85;
+  transform: translate(-50%, -50%);
+  user-select: none;
+  white-space: nowrap;
 }
 
 .tab-name,
@@ -198,22 +277,33 @@ body {
 }
 
 .tab-name {
-  padding: 5px 4px 5px 10px;
-  max-width: 190px;
+  padding: 4px 4px 4px 8px;
+  max-width: 170px;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+  font-size: 12.5px;
+  cursor: inherit;
+  pointer-events: none;
 }
 
 .tab-close,
 .tab-add,
 .tab-palette {
-  padding: 5px 8px;
+  padding: 3px 6px;
   color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.tab-add {
+  font-size: 14px;
+  padding: 3px 8px;
 }
 
 .tab-palette {
   margin-left: auto;
+  font-size: 13px;
 }
 
 .tab-close:hover,
