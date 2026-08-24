@@ -509,15 +509,13 @@ body {
   pointer-events: none;
   user-select: none;
   background: var(--panel);
-  margin-right: 10px;
 }
 
 .mn-document {
   grid-column: 2;
   grid-row: 1;
   min-width: 0;
-  padding-right: 18px;
-  padding-bottom: 18px;
+  padding: 0 18px 18px 10px;
 }
 
 .mn-line {
