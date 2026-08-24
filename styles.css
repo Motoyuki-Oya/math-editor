@@ -414,7 +414,6 @@ body {
   pointer-events: none;
   user-select: none;
   background: var(--panel);
-  border-right: 1px solid var(--line);
   margin-right: 8px;
 }
 
