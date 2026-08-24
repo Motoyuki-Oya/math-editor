@@ -2,30 +2,17 @@
 //!
 //! すべてのコマンドは、複数のカーソルが予期される動作として、単一のステップとしてすべての選択に適用されます。ドキュメント自体は [`crate::structure::text`] であり、表記や画面については何も知りません。編集は行の入れ替えとして控えられ、文書の本体（元に戻す履歴を持つ側）へ引き渡されます。
 
+mod cursor;
+mod edit;
 mod history;
+mod movement;
 mod nested;
 
+pub use cursor::UnifiedCursor;
 pub use history::Flush;
 use history::{Recorder, Step};
-pub use nested::Inside;
 
-use super::clipboard::Clip;
-use crate::structure::ast::{row_at, Cursor, Node, Row};
-use crate::structure::text::{as_char, nodes_of, Pos, Sel, Text};
-
-/// `to` までのテキストが `end` で終わるテキストに置き換えられると、`p​​os` が終了します。
-fn shifted(pos: Pos, to: Pos, end: Pos) -> Pos {
-    if pos <= to {
-        // 編集が飲み込んだものはすべて最後に残ります。
-        return end;
-    }
-    let line = (pos.line + end.line).saturating_sub(to.line);
-    if pos.line == to.line {
-        Pos::new(line, pos.col - to.col + end.col)
-    } else {
-        Pos::new(line, pos.col)
-    }
-}
+use crate::structure::text::{Pos, Sel, Text};
 
 /// コマンドが何をしたか、つまり呼び出し元が反応するために必要なのはそれだけです。質問するモードはなく、何かが移動または変更されたかどうかだけを尋ねます。
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -39,7 +26,7 @@ pub enum Did {
 }
 
 impl Did {
-    fn moved(happened: bool) -> Did {
+    pub(super) fn moved(happened: bool) -> Did {
         if happened {
             Did::Moved
         } else {
@@ -50,11 +37,7 @@ impl Did {
 
 pub struct Editor {
     text: Text,
-    sels: Vec<Sel>,
-    /// 文書行のルートから、現在編集している入れ子の行までの位置。
-    cursor: Option<Cursor>,
-    /// 本文トリガーが今回構造を作る文書行内の位置。
-    transient_structure: Option<usize>,
+    cursors: Vec<UnifiedCursor>,
     recorder: Recorder,
 }
 
@@ -62,9 +45,7 @@ impl Default for Editor {
     fn default() -> Self {
         Self {
             text: Text::default(),
-            sels: vec![Sel::caret(Pos::default())],
-            cursor: None,
-            transient_structure: None,
+            cursors: vec![UnifiedCursor::caret(Pos::default())],
             recorder: Recorder::default(),
         }
     }
@@ -75,20 +56,47 @@ impl Editor {
         &self.text
     }
 
-    pub fn sels(&self) -> &[Sel] {
-        &self.sels
+    pub fn cursors(&self) -> &[UnifiedCursor] {
+        &self.cursors
+    }
+
+    /// 描画など本文の選択だけを見る境界で使う。
+    pub fn sels(&self) -> Vec<Sel> {
+        self.cursors
+            .iter()
+            .filter(|cursor| cursor.inside.is_none())
+            .map(|cursor| cursor.sel)
+            .collect()
     }
 
     /// 焦点を維持する選択。最後に追加したもの。
     pub fn primary(&self) -> Sel {
-        *self.sels.last().expect("at least one selection")
+        self.primary_cursor().sel
+    }
+
+    pub(super) fn primary_cursor(&self) -> &UnifiedCursor {
+        self.cursors.last().expect("at least one selection")
+    }
+
+    pub(super) fn primary_cursor_mut(&mut self) -> &mut UnifiedCursor {
+        self.cursors.last_mut().expect("at least one selection")
+    }
+
+    pub(super) fn has_inside(&self) -> bool {
+        self.cursors.iter().any(|cursor| cursor.inside.is_some())
+    }
+
+    pub(super) fn clear_inside(&mut self) {
+        for cursor in &mut self.cursors {
+            cursor.inside = None;
+            cursor.transient_structure = None;
+        }
     }
 
     /// ファイルから読み取られたばかりのドキュメントを表示します。
     pub fn load(&mut self, text: Text) {
         self.text = text;
-        self.sels = vec![Sel::caret(Pos::default())];
-        self.cursor = None;
+        self.cursors = vec![UnifiedCursor::caret(Pos::default())];
         self.recorder = Recorder::default();
     }
 
@@ -118,7 +126,7 @@ impl Editor {
     /// `keep` から遠い未編集の行を手放す。選択とキャレットの行は残す。
     pub fn evict_far(&mut self, keep: std::ops::Range<usize>) {
         let pinned: Vec<usize> = self
-            .sels
+            .cursors
             .iter()
             .flat_map(|sel| [sel.start().line, sel.end().line])
             .collect();
@@ -134,566 +142,26 @@ impl Editor {
 
     /// 選択のいずれかが、まだ届いていない行に触れているか。届く前の行は
     /// 空に見えているだけなので、そこへの編集は中身を黙って壊してしまう。
-    fn touches_absent(&self) -> bool {
+    pub(super) fn touches_absent(&self) -> bool {
         // 全部届いた文書では行を見に行かない。キー入力のたびに全行を
         // 走査すると、大きい文書の入力が重くなる。
         if self.text.absent_lines() == 0 {
             return false;
         }
-        self.sels.iter().any(|sel| {
+        self.cursors.iter().any(|sel| {
             self.text
                 .first_absent(sel.start().line)
                 .is_some_and(|absent| absent <= sel.end().line)
         })
     }
-
-    fn edit_each(&mut self, step: Step, edit: impl Fn(&Text, Sel) -> (Pos, Pos, Vec<Row>)) {
-        self.record(step);
-        self.cursor = None;
-        let mut order: Vec<usize> = (0..self.sels.len()).collect();
-        order.sort_by_key(|&i| self.sels[i].start());
-        for (done, &i) in order.iter().enumerate() {
-            let (from, to, what) = edit(&self.text, self.sels[i]);
-            let at = self.text.remove(from, to);
-            let end = self.text.insert(at, what);
-            self.sels[i] = Sel::caret(end);
-            for &later in &order[done + 1..] {
-                let sel = self.sels[later];
-                self.sels[later] =
-                    Sel::range(shifted(sel.anchor, to, end), shifted(sel.head, to, end));
-            }
-        }
-        self.merge_sels();
-    }
-
-    pub fn insert(&mut self, what: Vec<Row>) {
-        if self.touches_absent() {
-            return;
-        }
-        let typing = what.len() == 1 && what[0].len() == 1;
-        let step = if typing { Step::Typing } else { Step::Other };
-        self.edit_each(step, move |_, sel| (sel.start(), sel.end(), what.clone()));
-    }
-
-    /// キャレットがどこにあっても、そのキャレットにテキストを挿入します。単一の文字が入力されるため、構造内のショートカットは引き続き実行されます。それ以上のものはペーストなのでそのまま入ります。
-    pub fn insert_text(&mut self, text: &str) -> Did {
-        if self.touches_absent() {
-            return Did::Nothing;
-        }
-        if self.cursor.is_some() {
-            let mut chars = text.chars();
-            match (chars.next(), chars.next()) {
-                (Some(c), None) => self.type_with_cursor(c),
-                // 文字は文字のままです。貼り付けでは、文字を入力したときのショートカットが再実行されることはありません。構造体は 1 行を保持するため、その内部では改行は何の意味も持ちません。
-                _ => self.insert_nested_row(
-                    text.chars()
-                        .filter(|c| *c != '\n')
-                        .map(Node::char)
-                        .collect(),
-                ),
-            };
-            return Did::Changed;
-        }
-        self.insert(nodes_of(text));
-        Did::Changed
-    }
-
-    /// ドキュメントからコピーされた部分を、元の形状のまま元に戻します。他の場所からのテキストは、[`Self::insert_text`] を介して文字として到着します。
-    pub fn insert_clip(&mut self, clip: &Clip) -> Did {
-        if self.touches_absent() {
-            return Did::Nothing;
-        }
-        if self.cursor.is_some() {
-            self.insert_nested_row(clip.row());
-        } else {
-            self.insert(clip.lines());
-        }
-        Did::Changed
-    }
-
-    pub fn annotate(&mut self, upper: bool) -> Did {
-        if self.touches_absent() {
-            return Did::Nothing;
-        }
-        if let Some(cursor) = &self.cursor {
-            let can_annotate = row_at(self.text.line(self.primary().head.line), &cursor.path)
-                .is_some_and(|row| {
-                    if cursor.is_caret() {
-                        cursor.index > 0 || cursor.index < row.len()
-                    } else {
-                        cursor.start() < cursor.end().min(row.len())
-                    }
-                });
-            if !can_annotate {
-                return Did::Nothing;
-            }
-            let mut annotated = false;
-            let changed = self.with_cursor(Inside::Change, |editing| {
-                annotated = editing.annotate(upper);
-                None
-            });
-            return if changed && annotated {
-                Did::Changed
-            } else {
-                Did::Nothing
-            };
-        }
-        let sel = self.primary();
-        if sel.is_caret() && self.enter_node_beside(false) {
-            return self.annotate(upper);
-        }
-        if sel.is_caret() && self.enter_node_beside(true) {
-            return self.annotate(upper);
-        }
-        if !sel.is_caret() && sel.start().line == sel.end().line {
-            let lines = self.text.slice(sel.start(), sel.end());
-            let Some(items) = lines.first() else {
-                return Did::Nothing;
-            };
-            if items
-                .iter()
-                .any(|node| matches!(node.kind, crate::structure::ast::NodeKind::Tab))
-            {
-                return Did::Nothing;
-            }
-            let base = items.clone();
-            if base.is_empty() {
-                return Did::Nothing;
-            }
-            let node = Node::container(base);
-            let slot = if upper {
-                node.upper_slot()
-            } else {
-                node.lower_slot()
-            };
-            let at = sel.start();
-            self.replace_range_with(at, sel.end(), vec![vec![node]]);
-            self.sels = vec![Sel::caret(at)];
-            self.cursor = Some(Cursor {
-                path: vec![(at.col, slot)],
-                index: 0,
-                anchor: 0,
-                fills: Vec::new(),
-            });
-            return Did::Changed;
-        }
-        Did::Nothing
-    }
-
-    /// 本文では列区切りを挿入し、入れ子構造では次のスロットへ移動します。
-    pub fn tab(&mut self, back: bool) -> Did {
-        if self.touches_absent() {
-            return Did::Nothing;
-        }
-        if self
-            .cursor
-            .as_ref()
-            .is_some_and(|cursor| !cursor.path.is_empty())
-        {
-            self.with_cursor(Inside::Move, |editing| {
-                if back {
-                    editing.move_left()
-                } else {
-                    editing.move_right()
-                }
-            });
-            return Did::Moved;
-        }
-        if self.cursor.is_some() {
-            self.leave_structure();
-        }
-        self.insert(vec![vec![Node::tab()]]);
-        Did::Changed
-    }
-
-    /// 本文では行を分割し、入れ子構造の編集中なら改行せず構造を抜けます。
-    pub fn split_line(&mut self) -> Did {
-        if self.touches_absent() {
-            return Did::Nothing;
-        }
-        if self.leave_structure() {
-            return Did::Moved;
-        }
-        self.insert(vec![Vec::new(), Vec::new()]);
-        Did::Changed
-    }
-
-    /// 入れ子構造の編集を終了するか、余分なカーソルを削除します。
-    pub fn escape(&mut self) -> Did {
-        Did::moved(self.leave_structure() || self.collapse_sels())
-    }
-
-    pub fn backspace(&mut self) -> Did {
-        if self.touches_absent() {
-            return Did::Nothing;
-        }
-        if self.cursor.is_some() {
-            self.with_cursor(Inside::Change, |editing| editing.backspace());
-            return Did::Changed;
-        }
-        self.backspace_in_text();
-        Did::Changed
-    }
-
-    fn backspace_in_text(&mut self) {
-        self.edit_each(Step::Other, |text, sel| {
-            if sel.is_caret() {
-                (before(text, sel.head), sel.head, Vec::new())
-            } else {
-                (sel.start(), sel.end(), Vec::new())
-            }
-        });
-    }
-
-    pub fn delete_forward(&mut self) -> Did {
-        if self.touches_absent() {
-            return Did::Nothing;
-        }
-        if self.cursor.is_some() {
-            self.with_cursor(Inside::Change, |editing| {
-                editing.delete_forward();
-                None
-            });
-            return Did::Changed;
-        }
-        self.edit_each(Step::Other, |text, sel| {
-            if sel.is_caret() {
-                (sel.head, after(text, sel.head), Vec::new())
-            } else {
-                (sel.start(), sel.end(), Vec::new())
-            }
-        });
-        Did::Changed
-    }
-
-    /// ケアトのグリッドは、構造内のものだけを意味し、列によって成長します。
-    pub fn grow_matrix(&mut self) -> Did {
-        if self.touches_absent() {
-            return Did::Nothing;
-        }
-        if self.cursor.is_none() {
-            return Did::Nothing;
-        }
-        self.with_cursor(Inside::Change, |editing| {
-            editing.grow_matrix(true);
-            None
-        });
-        Did::Changed
-    }
-
-    /// 検索と置換によって使用される1つの範囲を置換します。
-    pub fn replace_range(&mut self, from: Pos, to: Pos, with: &str) {
-        self.replace_range_with(from, to, nodes_of(with));
-    }
-
-    /// カラムの区切り文字よりも多くの文字を入れる置換のために、アイテムと範囲を置換します。
-    pub fn replace_range_with(&mut self, from: Pos, to: Pos, with: Vec<Row>) {
-        if self
-            .text
-            .first_absent(from.line)
-            .is_some_and(|absent| absent <= to.line)
-        {
-            return;
-        }
-        self.record(Step::Other);
-        self.cursor = None;
-        let at = self.text.remove(from, to);
-        let end = self.text.insert(at, with);
-        self.sels = vec![Sel::caret(end)];
-    }
-
-    /// 左右へ1つ移動し、構造Nodeでは外側を飛び越えず編集可能なスロットへ入ります。
-    pub fn move_h(&mut self, forward: bool, extend: bool) -> Did {
-        if self.cursor.is_some() {
-            let kind = if extend { Inside::Extend } else { Inside::Move };
-            self.with_cursor(kind, |editing| {
-                if extend {
-                    editing.extend(forward)
-                } else if forward {
-                    editing.move_right()
-                } else {
-                    editing.move_left()
-                }
-            });
-            return Did::Moved;
-        }
-        if !extend && self.enter_node_beside(forward) {
-            return Did::Moved;
-        }
-        self.map_sels(extend, |text, head| {
-            if forward {
-                after(text, head)
-            } else {
-                before(text, head)
-            }
-        });
-        Did::Moved
-    }
-
-    /// 本文では行間を移動し、入れ子構造では内容のある上下スロット間を移動します。
-    pub fn move_v(&mut self, down: bool, extend: bool) -> Did {
-        if self.cursor.is_some() {
-            let mut moved = false;
-            self.with_cursor(Inside::Move, |editing| {
-                moved = if down {
-                    editing.move_down()
-                } else {
-                    editing.move_up()
-                };
-                None
-            });
-            if moved {
-                return Did::Moved;
-            }
-        }
-        self.map_sels(extend, |text, head| {
-            let line = if down {
-                head.line + 1
-            } else {
-                head.line.checked_sub(1).unwrap_or(head.line)
-            };
-            text.clamp(Pos::new(line.min(text.line_count() - 1), head.col))
-        });
-        Did::Moved
-    }
-
-    pub fn move_line_edge(&mut self, end: bool, extend: bool) -> Did {
-        if self.cursor.is_some() {
-            self.with_cursor(Inside::Move, |editing| {
-                if end {
-                    editing.move_end();
-                } else {
-                    editing.move_home();
-                }
-                None
-            });
-            return Did::Moved;
-        }
-        self.map_sels(extend, |text, head| {
-            Pos::new(head.line, if end { text.line_len(head.line) } else { 0 })
-        });
-        Did::Moved
-    }
-
-    pub fn move_document_edge(&mut self, end: bool, extend: bool) -> Did {
-        self.leave_structure();
-        self.map_sels(
-            extend,
-            |text, _| {
-                if end {
-                    text.end()
-                } else {
-                    Pos::default()
-                }
-            },
-        );
-        Did::Moved
-    }
-
-    fn map_sels(&mut self, extend: bool, step: impl Fn(&Text, Pos) -> Pos) {
-        self.recorder.cut();
-        self.cursor = None;
-        for sel in &mut self.sels {
-            // 他のエディタと同様に、Shift を使用せずに選択範囲を折りたたむと、近くの端が維持されます。
-            let from = if extend || sel.is_caret() {
-                sel.head
-            } else {
-                sel.head.min(sel.anchor).max(sel.start())
-            };
-            let head = step(&self.text, from);
-            sel.head = head;
-            if !extend {
-                sel.anchor = head;
-            }
-        }
-        self.merge_sels();
-    }
-
-    pub fn set_caret(&mut self, at: Pos) {
-        self.recorder.cut();
-        self.cursor = None;
-        self.sels = vec![Sel::caret(self.text.clamp(at))];
-    }
-
-    pub fn extend_to(&mut self, at: Pos) {
-        self.recorder.cut();
-        self.cursor = None;
-        let at = self.text.clamp(at);
-        if let Some(sel) = self.sels.last_mut() {
-            sel.head = at;
-        }
-        self.merge_sels();
-    }
-
-    pub fn add_caret(&mut self, at: Pos) {
-        self.recorder.cut();
-        self.cursor = None;
-        self.sels.push(Sel::caret(self.text.clamp(at)));
-        self.merge_sels();
-    }
-
-    /// キャレットが存在する場所を選択するために存在するものすべてを選択します (キャレットが含まれる構造の行、またはドキュメント全体)。
-    pub fn select_all(&mut self) -> Did {
-        if self.cursor.is_some() {
-            self.with_cursor(Inside::Extend, |editing| {
-                editing.select_row();
-                None
-            });
-            return Did::Moved;
-        }
-        self.recorder.cut();
-        self.sels = vec![Sel::range(Pos::default(), self.text.end())];
-        Did::Moved
-    }
-
-    pub fn set_sels(&mut self, sels: Vec<Sel>) {
-        self.recorder.cut();
-        self.cursor = None;
-        if sels.is_empty() {
-            return;
-        }
-        self.sels = sels;
-        self.merge_sels();
-    }
-
-    /// 余分なカーソルを削除し、フォーカスのあるカーソルを保持します。
-    pub fn collapse_sels(&mut self) -> bool {
-        if self.sels.len() == 1 {
-            return false;
-        }
-        self.sels = vec![self.primary()];
-        true
-    }
-
-    /// `Ctrl+D`: キャレットの単語を選択し、さらに押すたびに、同じテキストが表示される次の場所が追加されます。
-    pub fn add_next_occurrence(&mut self) -> bool {
-        // 構造体は 1 つのキャレットを保持するため、そこに追加するものは何もありません。
-        if self.cursor.is_some() {
-            return false;
-        }
-        self.recorder.cut();
-        let primary = self.primary();
-        if primary.is_caret() {
-            let Some(word) = word_at(&self.text, primary.head) else {
-                return false;
-            };
-            *self.sels.last_mut().expect("a selection") = word;
-            return true;
-        }
-        let needle: Row = self
-            .text
-            .slice(primary.start(), primary.end())
-            .into_iter()
-            .next()
-            .unwrap_or_default();
-        if needle.is_empty() || primary.start().line != primary.end().line {
-            return false;
-        }
-        let taken: Vec<Pos> = self.sels.iter().map(Sel::start).collect();
-        let Some(found) = find_after(&self.text, &needle, primary.end(), &taken) else {
-            return false;
-        };
-        self.sels.push(found);
-        true
-    }
-
-    /// 選択内容がソートされ、重複がない状態が維持されるため、入力によって同じ編集が 2 回適用されることはありません。
-    fn merge_sels(&mut self) {
-        let primary = self.primary();
-        self.sels.sort_by_key(|sel| (sel.start(), sel.end()));
-        let mut merged: Vec<Sel> = Vec::with_capacity(self.sels.len());
-        for sel in std::mem::take(&mut self.sels) {
-            match merged.last_mut() {
-                Some(last) if sel.start() <= last.end() => {
-                    if sel.end() > last.end() {
-                        *last = Sel::range(last.start(), sel.end());
-                    }
-                }
-                _ => merged.push(sel),
-            }
-        }
-        // 「プライマリ」がそれを意味し続けるように、フォーカスされた選択範囲は最後に残らなければなりません。
-        if let Some(index) = merged
-            .iter()
-            .position(|sel| sel.start() <= primary.start() && primary.end() <= sel.end())
-        {
-            let focused = merged.remove(index);
-            merged.push(focused);
-        }
-        self.sels = merged;
-    }
-}
-
-fn before(text: &Text, at: Pos) -> Pos {
-    if at.col > 0 {
-        Pos::new(at.line, at.col - 1)
-    } else if at.line > 0 {
-        Pos::new(at.line - 1, text.line_len(at.line - 1))
-    } else {
-        at
-    }
-}
-
-fn after(text: &Text, at: Pos) -> Pos {
-    if at.col < text.line_len(at.line) {
-        Pos::new(at.line, at.col + 1)
-    } else if at.line + 1 < text.line_count() {
-        Pos::new(at.line + 1, 0)
-    } else {
-        at
-    }
-}
-
-fn is_word(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
-}
-
-fn word_at(text: &Text, at: Pos) -> Option<Sel> {
-    let line = text.line(at.line);
-    let word = |col: usize| line.get(col).and_then(as_char).is_some_and(is_word);
-    let mut start = at.col;
-    while start > 0 && word(start - 1) {
-        start -= 1;
-    }
-    let mut end = at.col;
-    while word(end) {
-        end += 1;
-    }
-    (start < end).then(|| Sel::range(Pos::new(at.line, start), Pos::new(at.line, end)))
-}
-
-/// 既に選択した場所をスキップして、 `from` からアイテムを探します。
-fn find_after(text: &Text, needle: &[Node], from: Pos, taken: &[Pos]) -> Option<Sel> {
-    let mut at = from;
-    for _ in 0..text.line_count() + 1 {
-        for line in at.line..text.line_count() {
-            let items = text.line(line);
-            let start_col = if line == at.line { at.col } else { 0 };
-            for col in start_col..=items.len().saturating_sub(needle.len()) {
-                if items.len() < needle.len() {
-                    break;
-                }
-                if &items[col..col + needle.len()] == needle
-                    && !taken.contains(&Pos::new(line, col))
-                {
-                    return Some(Sel::range(
-                        Pos::new(line, col),
-                        Pos::new(line, col + needle.len()),
-                    ));
-                }
-            }
-        }
-        if at == Pos::default() {
-            return None;
-        }
-        at = Pos::default();
-    }
-    None
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::structure::ast::{Cursor, Node, Row};
+    use crate::structure::text::nodes_of;
+
     /// ここでは、表記を通過するものは何もありません。モデルは渡されるアイテムのみであるため、ファイル形式によってはこれらのテストを開始できません。
     pub(crate) fn editor(source: &str) -> Editor {
         with_rows(nodes_of(source))
@@ -838,6 +306,76 @@ pub(crate) mod tests {
         editor.split_line();
         assert_eq!(plain(&editor), "ab\n cd\n");
         assert_eq!(editor.sels()[1].head, Pos::new(2, 0));
+    }
+
+    #[test]
+    fn nested_cursor_state_roundtrips_for_history() {
+        let mut editor = editor("ab\ncd");
+        editor.set_caret(Pos::new(0, 1));
+        editor.add_caret(Pos::new(1, 1));
+        editor.start_structure();
+        editor.cursors[0].inside.as_mut().unwrap().fills = vec![2, 3];
+        editor.cursors[0].transient_structure = Some(1);
+        let state = editor.state_string();
+        let expected = editor.cursors.clone();
+        editor.set_caret(Pos::default());
+        editor.restore_state(&state);
+        assert_eq!(editor.cursors, expected);
+    }
+
+    #[test]
+    fn multiple_root_cursors_type_inside_structure_mode() {
+        let mut editor = editor("a\nb");
+        editor.set_caret(Pos::new(0, 1));
+        editor.add_caret(Pos::new(1, 1));
+        editor.start_structure();
+        editor.insert_text("X");
+        assert_eq!(plain(&editor), "aX\nbX");
+        assert_eq!(editor.cursors().len(), 2);
+        assert!(editor
+            .cursors()
+            .iter()
+            .all(|cursor| cursor.inside.is_some()));
+    }
+
+    #[test]
+    fn multiple_root_cursors_apply_fraction_trigger() {
+        let mut editor = editor("a\nb");
+        editor.set_caret(Pos::new(0, 1));
+        editor.add_caret(Pos::new(1, 1));
+        editor.start_structure();
+        editor.insert_text("/");
+        assert_eq!(plain(&editor), "a/\nb/");
+        assert!(editor
+            .cursors()
+            .iter()
+            .all(|cursor| cursor.inside.is_some()));
+    }
+
+    #[test]
+    fn multiple_root_cursors_transform_two_places_on_one_line() {
+        let mut editor = editor("a b");
+        editor.set_caret(Pos::new(0, 1));
+        editor.add_caret(Pos::new(0, 3));
+        editor.start_structure();
+        editor.insert_text("/");
+        let row = editor.text().line(0);
+        assert!(matches!(
+            row[0].kind,
+            crate::structure::ast::NodeKind::Stack { .. }
+        ));
+        assert!(matches!(
+            row[2].kind,
+            crate::structure::ast::NodeKind::Stack { .. }
+        ));
+        editor.insert_text("X");
+        for cursor in editor.cursors() {
+            let inside = cursor.inside.as_ref().expect("fraction slot");
+            assert_eq!(
+                crate::structure::ast::row_at(editor.text().line(0), &inside.path),
+                Some([Node::char('X')].as_slice())
+            );
+        }
     }
 
     #[test]

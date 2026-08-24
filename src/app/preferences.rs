@@ -28,12 +28,14 @@ pub(super) fn Preferences(open: RwSignal<bool>) -> impl IntoView {
     let font_size = RwSignal::new(current.font_size);
     let font_family = RwSignal::new(current.font_family);
     let caret_blink = RwSignal::new(current.caret_blink);
+    let global_shortcut = RwSignal::new(current.global_shortcut);
 
     let changed = move || {
         change(Settings {
             font_size: font_size.get_untracked(),
             font_family: font_family.get_untracked().trim().to_string(),
             caret_blink: caret_blink.get_untracked(),
+            global_shortcut: global_shortcut.get_untracked(),
             ..settings::current()
         });
     };
@@ -79,6 +81,17 @@ pub(super) fn Preferences(open: RwSignal<bool>) -> impl IntoView {
                 />
                 "カーソルを点滅させる"
             </label>
+            <label class="pref">
+                <input
+                    type="checkbox"
+                    prop:checked=move || global_shortcut.get()
+                    on:change=move |ev| {
+                        global_shortcut.set(event_target_checked(&ev));
+                        changed();
+                    }
+                />
+                "Ctrl+Alt+M で呼び出す"
+            </label>
             <button class="tool" on:click=move |_| {
                 let defaults = Settings {
                     column_gap: settings::current().column_gap,
@@ -88,6 +101,7 @@ pub(super) fn Preferences(open: RwSignal<bool>) -> impl IntoView {
                 font_size.set(defaults.font_size);
                 font_family.set(defaults.font_family.clone());
                 caret_blink.set(defaults.caret_blink);
+                global_shortcut.set(defaults.global_shortcut);
                 change(defaults);
             }>"既定に戻す"</button>
             <button class="tool" on:click=move |_| open.set(false)>"閉じる"</button>

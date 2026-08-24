@@ -7,8 +7,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use tauri::menu::{MenuBuilder, MenuItemBuilder};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, State, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
+
+fn debug_log(msg: &str) {
+    println!("{}", msg);
+}
+
+
+const GLOBAL_SHORTCUT: &str = "Ctrl+Shift+M";
+
 
 struct AppState {
     dirty: Mutex<bool>,
@@ -19,7 +30,9 @@ struct AppState {
     /// 文書ごとの検索世代。値が変われば走査スレッドは古い検索を中止する。
     searches: Mutex<HashMap<u64, Arc<AtomicU64>>>,
     next_document: Mutex<u64>,
+    tray: Mutex<Option<tauri::tray::TrayIcon>>,
 }
+
 
 impl AppState {
     /// 取っ手の文書へロックの中で触る。閉じられた文書は一律に断る。
@@ -380,11 +393,156 @@ fn read_settings(app: tauri::AppHandle) -> String {
         .unwrap_or_default()
 }
 
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+fn toggle_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let is_visible = window.is_visible().unwrap_or(false);
+        let is_minimized = window.is_minimized().unwrap_or(false);
+        let is_focused = window.is_focused().unwrap_or(false);
+        if is_visible && !is_minimized && is_focused {
+            let _ = window.hide();
+        } else {
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+    }
+}
+
+fn sync_global_shortcut(app: &tauri::AppHandle, settings_text: &str) {
+    let enabled = !settings_text.lines().any(|line| {
+        let Some((k, v)) = line.split_once('=') else {
+            return false;
+        };
+        k.trim() == "global_shortcut" && v.trim() == "false"
+    });
+
+    let configured_key = settings_text
+        .lines()
+        .find_map(|line| {
+            let (k, v) = line.split_once('=')?;
+            if k.trim() == "global_shortcut_key" {
+                let trimmed = v.trim().trim_matches('"').trim_matches('\'');
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+            None
+        })
+        .unwrap_or_else(|| GLOBAL_SHORTCUT.to_string());
+
+    debug_log(&format!("[SHORTCUT] Checking shortcut: enabled={enabled}, key={configured_key}"));
+    let gs = app.global_shortcut();
+
+    if enabled {
+        let mut target_keys = vec![configured_key.as_str()];
+        if configured_key == GLOBAL_SHORTCUT {
+            target_keys.push("Ctrl+Shift+M");
+        }
+        for key_str in target_keys {
+            if let Ok(shortcut) = key_str.parse::<Shortcut>() {
+                if !gs.is_registered(shortcut) {
+                    match gs.register(shortcut) {
+                        Ok(_) => {
+                            debug_log(&format!("[SHORTCUT] Successfully registered {key_str}"));
+                            break;
+                        }
+                        Err(e) => {
+                            debug_log(&format!("[SHORTCUT ERROR] Failed to register {key_str}: {e}"));
+                        }
+                    }
+                } else {
+                    debug_log(&format!("[SHORTCUT] Already registered {key_str}"));
+                    break;
+                }
+            }
+        }
+    } else {
+        if let Ok(shortcut) = configured_key.parse::<Shortcut>() {
+            if gs.is_registered(shortcut) {
+                let _ = gs.unregister(shortcut);
+                debug_log(&format!("[SHORTCUT] Unregistered {configured_key}"));
+            }
+        }
+    }
+}
+
+fn setup_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    debug_log("[TRAY] Setting up tray icon...");
+    let open_item = MenuItemBuilder::with_id("open", "Planetext を開く").build(app)?;
+    let quit_item = MenuItemBuilder::with_id("quit", "終了").build(app)?;
+    let menu = MenuBuilder::new(app)
+        .item(&open_item)
+        .separator()
+        .item(&quit_item)
+        .build()?;
+
+    let icon = app
+        .default_window_icon()
+        .cloned()
+        .unwrap_or_else(|| tauri::include_image!("icons/32x32.png"));
+
+    let tray = TrayIconBuilder::new()
+        .icon(icon)
+        .icon_as_template(false)
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .tooltip("Planetext")
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "open" => {
+                show_main_window(app);
+            }
+            "quit" => {
+                if is_dirty(app) {
+                    if let Some(window) = app.get_webview_window("main") {
+                        show_main_window(app);
+                        confirm_discard_on_close(&window);
+                        return;
+                    }
+                }
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| match event {
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            }
+            | TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            } => {
+                show_main_window(tray.app_handle());
+            }
+            _ => {}
+        })
+        .build(app)?;
+
+    if let Some(state) = app.try_state::<AppState>() {
+        state.tray.lock().unwrap().replace(tray);
+    }
+    debug_log("[TRAY] Tray icon initialized and stored in AppState successfully.");
+
+    Ok(())
+}
+
+
+
 #[tauri::command]
 fn write_settings(app: tauri::AppHandle, contents: String) -> Result<(), String> {
     let Some(path) = settings_path(&app) else {
         return Err("設定の保存先がありません".to_string());
     };
+    sync_global_shortcut(&app, &contents);
     std::fs::write(&path, contents).map_err(|e| format!("設定を保存できませんでした: {e}"))
 }
 
@@ -570,16 +728,15 @@ async fn confirm_discard(app: tauri::AppHandle, message: String) -> bool {
     rx.recv().unwrap_or(false)
 }
 
-fn is_dirty(window: &tauri::Window) -> bool {
-    window
-        .state::<AppState>()
+fn is_dirty(app: &tauri::AppHandle) -> bool {
+    app.state::<AppState>()
         .dirty
         .lock()
         .map(|dirty| *dirty)
         .unwrap_or(false)
 }
 
-fn confirm_discard_on_close(window: &tauri::Window) {
+fn confirm_discard_on_close(window: &tauri::WebviewWindow) {
     let target = window.clone();
     window
         .dialog()
@@ -606,25 +763,53 @@ fn confirm_discard_on_close(window: &tauri::Window) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_main_window(app);
+        }))
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    debug_log(&format!("[SHORTCUT EVENT] Shortcut {shortcut:?} triggered, state={:?}", event.state()));
+                    if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        toggle_main_window(app);
+                    }
+                })
+                .build(),
+        )
+
         .manage(AppState {
             dirty: Mutex::new(false),
             started: Instant::now(),
             docs: Mutex::new(HashMap::new()),
             searches: Mutex::new(HashMap::new()),
             next_document: Mutex::new(0),
+            tray: Mutex::new(None),
         })
+
         .setup(|app| {
+            debug_log("[SETUP] Starting setup hook...");
             restore_window_size(app.handle());
-            menu::install(app.handle())?;
+            if let Err(e) = menu::install(app.handle()) {
+                debug_log(&format!("[SETUP ERROR] menu::install failed: {e}"));
+            }
+            if let Err(e) = setup_tray(app.handle()) {
+                debug_log(&format!("[SETUP ERROR] setup_tray failed: {e}"));
+            }
+            let settings = read_settings(app.handle().clone());
+            debug_log(&format!("[SETUP] Settings loaded: length={}", settings.len()));
+            sync_global_shortcut(app.handle(), &settings);
+            show_main_window(app.handle());
+            debug_log("[SETUP] Setup hook completed and main window shown.");
             Ok(())
         })
+
+
+
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 save_window_size(window);
-                if is_dirty(window) {
-                    api.prevent_close();
-                    confirm_discard_on_close(window);
-                }
+                api.prevent_close();
+                let _ = window.hide();
             }
         })
         .invoke_handler(tauri::generate_handler![

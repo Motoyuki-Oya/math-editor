@@ -107,7 +107,6 @@ pub fn install(session: &Rc<RefCell<Session>>) {
     );
 
     on(&root, "mousedown", session, |session, event: MouseEvent| {
-        session::note_focus(session);
         mouse::on_mousedown(session, event);
     });
     on(&root, "mousemove", session, |session, event: MouseEvent| {
