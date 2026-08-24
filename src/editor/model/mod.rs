@@ -105,6 +105,26 @@ impl Editor {
         self.load(Text::pending(line_count));
     }
 
+    /// 走査で確定した行数へ合わせる。
+    pub fn resize_pending(&mut self, line_count: usize) {
+        self.text.resize_pending(line_count);
+    }
+
+    /// 手元に届いた行の数。捨てるかどうかの見分けに使う。
+    pub fn resident_lines(&self) -> usize {
+        self.text.line_count() - self.text.absent_lines()
+    }
+
+    /// `keep` から遠い未編集の行を手放す。選択とキャレットの行は残す。
+    pub fn evict_far(&mut self, keep: std::ops::Range<usize>) {
+        let pinned: Vec<usize> = self
+            .sels
+            .iter()
+            .flat_map(|sel| [sel.start().line, sel.end().line])
+            .collect();
+        self.text.evict_far(keep, &pinned);
+    }
+
     /// 届いた行を `from` から順に入れます。既にある行はそのまま。
     pub fn feed(&mut self, from: usize, lines: Vec<crate::structure::text::SourceLine>) {
         for (offset, line) in lines.into_iter().enumerate() {

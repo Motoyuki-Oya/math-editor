@@ -19,6 +19,12 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
     let shift = event.shift_key();
     let did = {
         let mut borrowed = session.borrow_mut();
+        // 行数の走査中は末尾が確定していないので、Ctrl+End は確定してから跳ぶ。
+        if ctrl && key == "End" && borrowed.counting {
+            borrowed.jump_end = Some(shift);
+            event.prevent_default();
+            return;
+        }
         let editor = &mut borrowed.editor;
         match (ctrl, key.as_str()) {
             (_, "ArrowLeft") => editor.move_h(false, shift),
