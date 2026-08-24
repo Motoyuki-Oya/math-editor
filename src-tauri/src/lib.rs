@@ -17,9 +17,7 @@ fn debug_log(msg: &str) {
     println!("{}", msg);
 }
 
-
 const GLOBAL_SHORTCUT: &str = "Ctrl+Shift+M";
-
 
 struct AppState {
     dirty: Mutex<bool>,
@@ -32,7 +30,6 @@ struct AppState {
     next_document: Mutex<u64>,
     tray: Mutex<Option<tauri::tray::TrayIcon>>,
 }
-
 
 impl AppState {
     /// 取っ手の文書へロックの中で触る。閉じられた文書は一律に断る。
@@ -438,7 +435,9 @@ fn sync_global_shortcut(app: &tauri::AppHandle, settings_text: &str) {
         })
         .unwrap_or_else(|| GLOBAL_SHORTCUT.to_string());
 
-    debug_log(&format!("[SHORTCUT] Checking shortcut: enabled={enabled}, key={configured_key}"));
+    debug_log(&format!(
+        "[SHORTCUT] Checking shortcut: enabled={enabled}, key={configured_key}"
+    ));
     let gs = app.global_shortcut();
 
     if enabled {
@@ -455,7 +454,9 @@ fn sync_global_shortcut(app: &tauri::AppHandle, settings_text: &str) {
                             break;
                         }
                         Err(e) => {
-                            debug_log(&format!("[SHORTCUT ERROR] Failed to register {key_str}: {e}"));
+                            debug_log(&format!(
+                                "[SHORTCUT ERROR] Failed to register {key_str}: {e}"
+                            ));
                         }
                     }
                 } else {
@@ -534,8 +535,6 @@ fn setup_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> 
 
     Ok(())
 }
-
-
 
 #[tauri::command]
 fn write_settings(app: tauri::AppHandle, contents: String) -> Result<(), String> {
@@ -769,14 +768,16 @@ pub fn run() {
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
-                    debug_log(&format!("[SHORTCUT EVENT] Shortcut {shortcut:?} triggered, state={:?}", event.state()));
+                    debug_log(&format!(
+                        "[SHORTCUT EVENT] Shortcut {shortcut:?} triggered, state={:?}",
+                        event.state()
+                    ));
                     if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
                         toggle_main_window(app);
                     }
                 })
                 .build(),
         )
-
         .manage(AppState {
             dirty: Mutex::new(false),
             started: Instant::now(),
@@ -785,7 +786,6 @@ pub fn run() {
             next_document: Mutex::new(0),
             tray: Mutex::new(None),
         })
-
         .setup(|app| {
             debug_log("[SETUP] Starting setup hook...");
             restore_window_size(app.handle());
@@ -796,15 +796,15 @@ pub fn run() {
                 debug_log(&format!("[SETUP ERROR] setup_tray failed: {e}"));
             }
             let settings = read_settings(app.handle().clone());
-            debug_log(&format!("[SETUP] Settings loaded: length={}", settings.len()));
+            debug_log(&format!(
+                "[SETUP] Settings loaded: length={}",
+                settings.len()
+            ));
             sync_global_shortcut(app.handle(), &settings);
             show_main_window(app.handle());
             debug_log("[SETUP] Setup hook completed and main window shown.");
             Ok(())
         })
-
-
-
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 save_window_size(window);

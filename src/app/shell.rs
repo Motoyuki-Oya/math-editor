@@ -500,7 +500,8 @@ impl Shell {
             });
             // アクティブなタブの新しい位置を特定して current を更新
             if let Some(new_curr) = src_pane.tabs.with_untracked(|tabs| {
-                tabs.iter().position(|t| t.id.get_untracked() == active_tab_id)
+                tabs.iter()
+                    .position(|t| t.id.get_untracked() == active_tab_id)
             }) {
                 src_pane.current.set(new_curr);
             }

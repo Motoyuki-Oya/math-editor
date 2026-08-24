@@ -62,92 +62,103 @@ pub fn App() -> impl IntoView {
         use wasm_bindgen::JsCast;
 
         let doc_clone = document.clone();
-        let on_pointer_move = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::PointerEvent)>::new(move |ev: web_sys::PointerEvent| {
-            let Some(mut drag) = shell.tab_drag.get_untracked() else {
-                return;
-            };
-            let x = ev.client_x() as f64;
-            let y = ev.client_y() as f64;
-            let dist = ((x - drag.start_x).powi(2) + (y - drag.start_y).powi(2)).sqrt();
-            if dist > 3.0 {
-                drag.is_dragging = true;
-            }
-            drag.current_x = x;
-            drag.current_y = y;
+        let on_pointer_move =
+            wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::PointerEvent)>::new(
+                move |ev: web_sys::PointerEvent| {
+                    let Some(mut drag) = shell.tab_drag.get_untracked() else {
+                        return;
+                    };
+                    let x = ev.client_x() as f64;
+                    let y = ev.client_y() as f64;
+                    let dist = ((x - drag.start_x).powi(2) + (y - drag.start_y).powi(2)).sqrt();
+                    if dist > 3.0 {
+                        drag.is_dragging = true;
+                    }
+                    drag.current_x = x;
+                    drag.current_y = y;
 
-            drag.drop_target = None;
-            if drag.is_dragging {
-                if let Some(ref doc) = doc_clone {
-                    if let Some(el) = doc.element_from_point(x as f32, y as f32) {
-                        if let Ok(Some(tab_el)) = el.closest("[data-tab-pane]") {
-                            if let (Some(pane_str), Some(idx_str)) = (
-                                tab_el.get_attribute("data-tab-pane"),
-                                tab_el.get_attribute("data-tab-index"),
-                            ) {
-                                if let (Ok(pane_key), Ok(tab_idx)) = (
-                                    pane_str.parse::<usize>(),
-                                    idx_str.parse::<usize>(),
-                                ) {
-                                    let rect = tab_el.get_bounding_client_rect();
-                                    let is_after = x > (rect.left() + rect.width() / 2.0);
-                                    let insert_index = if is_after { tab_idx + 1 } else { tab_idx };
-                                    drag.drop_target = Some(shell::DropTarget {
-                                        pane_key,
-                                        index: insert_index,
-                                    });
-                                }
-                            }
-                        } else if let Ok(Some(tabbar_el)) = el.closest("[data-tabbar-pane]") {
-                            if let (Some(pane_str), Some(count_str)) = (
-                                tabbar_el.get_attribute("data-tabbar-pane"),
-                                tabbar_el.get_attribute("data-tabbar-count"),
-                            ) {
-                                if let (Ok(pane_key), Ok(count)) = (
-                                    pane_str.parse::<usize>(),
-                                    count_str.parse::<usize>(),
-                                ) {
-                                    drag.drop_target = Some(shell::DropTarget {
-                                        pane_key,
-                                        index: count,
-                                    });
+                    drag.drop_target = None;
+                    if drag.is_dragging {
+                        if let Some(ref doc) = doc_clone {
+                            if let Some(el) = doc.element_from_point(x as f32, y as f32) {
+                                if let Ok(Some(tab_el)) = el.closest("[data-tab-pane]") {
+                                    if let (Some(pane_str), Some(idx_str)) = (
+                                        tab_el.get_attribute("data-tab-pane"),
+                                        tab_el.get_attribute("data-tab-index"),
+                                    ) {
+                                        if let (Ok(pane_key), Ok(tab_idx)) =
+                                            (pane_str.parse::<usize>(), idx_str.parse::<usize>())
+                                        {
+                                            let rect = tab_el.get_bounding_client_rect();
+                                            let is_after = x > (rect.left() + rect.width() / 2.0);
+                                            let insert_index =
+                                                if is_after { tab_idx + 1 } else { tab_idx };
+                                            drag.drop_target = Some(shell::DropTarget {
+                                                pane_key,
+                                                index: insert_index,
+                                            });
+                                        }
+                                    }
+                                } else if let Ok(Some(tabbar_el)) = el.closest("[data-tabbar-pane]")
+                                {
+                                    if let (Some(pane_str), Some(count_str)) = (
+                                        tabbar_el.get_attribute("data-tabbar-pane"),
+                                        tabbar_el.get_attribute("data-tabbar-count"),
+                                    ) {
+                                        if let (Ok(pane_key), Ok(count)) =
+                                            (pane_str.parse::<usize>(), count_str.parse::<usize>())
+                                        {
+                                            drag.drop_target = Some(shell::DropTarget {
+                                                pane_key,
+                                                index: count,
+                                            });
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                }
-            }
 
-            shell.tab_drag.set(Some(drag));
-        });
+                    shell.tab_drag.set(Some(drag));
+                },
+            );
 
-        let on_pointer_up = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::PointerEvent)>::new(move |_ev: web_sys::PointerEvent| {
-            let Some(drag) = shell.tab_drag.get_untracked() else {
-                return;
-            };
-            shell.tab_drag.set(None);
+        let on_pointer_up = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::PointerEvent)>::new(
+            move |_ev: web_sys::PointerEvent| {
+                let Some(drag) = shell.tab_drag.get_untracked() else {
+                    return;
+                };
+                shell.tab_drag.set(None);
 
-            if drag.is_dragging {
-                if let Some(target) = drag.drop_target {
-                    if let Some(dst_pane) = shell
-                        .panes
-                        .with_untracked(|panes| panes.iter().find(|p| p.key == target.pane_key).copied())
-                    {
-                        shell.move_tab(drag.src_pane_key, drag.src_tab_index, dst_pane, target.index);
+                if drag.is_dragging {
+                    if let Some(target) = drag.drop_target {
+                        if let Some(dst_pane) = shell.panes.with_untracked(|panes| {
+                            panes.iter().find(|p| p.key == target.pane_key).copied()
+                        }) {
+                            shell.move_tab(
+                                drag.src_pane_key,
+                                drag.src_tab_index,
+                                dst_pane,
+                                target.index,
+                            );
+                        }
+                    }
+                } else {
+                    if let Some(src_pane) = shell.panes.with_untracked(|panes| {
+                        panes.iter().find(|p| p.key == drag.src_pane_key).copied()
+                    }) {
+                        shell.focus_on(src_pane);
+                        shell.switch(src_pane, drag.src_tab_index);
                     }
                 }
-            } else {
-                if let Some(src_pane) = shell
-                    .panes
-                    .with_untracked(|panes| panes.iter().find(|p| p.key == drag.src_pane_key).copied())
-                {
-                    shell.focus_on(src_pane);
-                    shell.switch(src_pane, drag.src_tab_index);
-                }
-            }
-        });
+            },
+        );
 
         window
-            .add_event_listener_with_callback("pointermove", on_pointer_move.as_ref().unchecked_ref())
+            .add_event_listener_with_callback(
+                "pointermove",
+                on_pointer_move.as_ref().unchecked_ref(),
+            )
             .ok();
         window
             .add_event_listener_with_callback("pointerup", on_pointer_up.as_ref().unchecked_ref())
