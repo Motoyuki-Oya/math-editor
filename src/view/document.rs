@@ -243,16 +243,27 @@ impl View {
             let Some(holder) = self.line_element(line) else {
                 continue;
             };
+
+            // 変更行の連続した縦ラインを描画
+            if modified.contains(&line) {
+                let holder_rect = holder.get_bounding_client_rect();
+                let line_top = holder_rect.top() - origin;
+                let line_height = holder_rect.height();
+                if let Some(change_bar) = element(&doc, "div", "mn-gutter-change") {
+                    change_bar
+                        .set_attribute(
+                            "style",
+                            &format!("top:{line_top}px;height:{line_height}px;"),
+                        )
+                        .ok();
+                    append(&self.gutter, &change_bar);
+                }
+            }
+
             let Some(rect) = measure::first_base_fragment(&holder) else {
                 continue;
             };
-            let is_modified = modified.contains(&line);
-            let class = if is_modified {
-                format!("{NUMBER_CLASS} mn-number-modified")
-            } else {
-                NUMBER_CLASS.to_string()
-            };
-            let Some(number) = element(&doc, "span", &class) else {
+            let Some(number) = element(&doc, "span", NUMBER_CLASS) else {
                 continue;
             };
             number.set_text_content(Some(&(line + 1).to_string()));
@@ -270,12 +281,27 @@ impl View {
         }
         let total = total_lines as f64;
 
-        // 変更行マーカー (青/accent)
+        // 連続する変更行をグループ化して、途切れずにつながるバーとして描画
+        let mut spans: Vec<(usize, usize)> = Vec::new();
         for &line in state.modified {
-            let top_pct = (line as f64 + 0.5) / total * 100.0;
+            if let Some(last) = spans.last_mut() {
+                if last.1 + 1 == line {
+                    last.1 = line;
+                    continue;
+                }
+            }
+            spans.push((line, line));
+        }
+
+        for (start, end) in spans {
+            let top_pct = (start as f64) / total * 100.0;
+            let height_pct = ((end - start + 1) as f64) / total * 100.0;
             if let Some(mark) = element(doc, "div", "mn-ruler-item mn-ruler-modified") {
-                mark.set_attribute("style", &format!("top:{top_pct}%;"))
-                    .ok();
+                mark.set_attribute(
+                    "style",
+                    &format!("top:{top_pct}%;height:max(3px, {height_pct}%);"),
+                )
+                .ok();
                 append(&self.ruler, &mark);
             }
         }

@@ -547,20 +547,21 @@ body {
   position: absolute;
   right: 0;
   width: 10px;
-  height: 3px;
+  min-height: 3px;
   border-radius: 1px;
-  transform: translateY(-50%);
 }
 
 .mn-ruler-modified {
-  background: var(--accent);
+  background: #2ea043;
   opacity: 0.85;
 }
 
 .mn-ruler-highlight {
+  height: 3px;
   background: #f59e0b;
   opacity: 0.95;
   box-shadow: 0 0 2px rgba(245, 158, 11, 0.6);
+  transform: translateY(-50%);
 }
 
 /* ガター内の行番号。文書の行には属さず、描画後に本体フラグメントの中央へ配置されます。 */
@@ -576,17 +577,14 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-/* 変更行のガターインジケーター（VS Code風のカラーバー） */
-.mn-number.mn-number-modified::before {
-  content: "";
+/* ガター内の変更バー（VS Code風の途切れない縦ライン） */
+.mn-gutter-change {
   position: absolute;
   right: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 2.5px;
-  height: 1.3em;
-  background: var(--accent);
-  border-radius: 1px;
+  width: 3px;
+  background: #2ea043;
+  pointer-events: none;
+  z-index: 1;
 }
 
 /* 列区切り文字、$(t)。その幅は、隣接する行の 区切り文字が揃うように描画中に設定されます。 */
