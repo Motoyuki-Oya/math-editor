@@ -36,6 +36,8 @@ pub fn App() -> impl IntoView {
         preferences: RwSignal::new(false),
         find_focus: RwSignal::new(None),
         tab_drag: RwSignal::new(None),
+        split_ratio: RwSignal::new(0.5),
+        resizing_split: RwSignal::new(false),
     };
 
     Effect::new(move |_| {
@@ -65,6 +67,21 @@ pub fn App() -> impl IntoView {
         let on_pointer_move =
             wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::PointerEvent)>::new(
                 move |ev: web_sys::PointerEvent| {
+                    if shell.resizing_split.get_untracked() {
+                        if let Some(ref doc) = doc_clone {
+                            if let Some(panes_el) = doc.query_selector(".panes").ok().flatten() {
+                                let rect = panes_el.get_bounding_client_rect();
+                                let width = rect.width();
+                                if width > 0.0 {
+                                    let ratio = ((ev.client_x() as f64 - rect.left()) / width)
+                                        .clamp(0.1, 0.9);
+                                    shell.split_ratio.set(ratio);
+                                }
+                            }
+                        }
+                        return;
+                    }
+
                     let Some(mut drag) = shell.tab_drag.get_untracked() else {
                         return;
                     };
@@ -125,6 +142,12 @@ pub fn App() -> impl IntoView {
 
         let on_pointer_up = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::PointerEvent)>::new(
             move |_ev: web_sys::PointerEvent| {
+                if shell.resizing_split.get_untracked() {
+                    shell.resizing_split.set(false);
+                    editor::redraw_all();
+                    return;
+                }
+
                 let Some(drag) = shell.tab_drag.get_untracked() else {
                     return;
                 };
@@ -189,9 +212,57 @@ pub fn App() -> impl IntoView {
             </Show>
 
             <div class="panes">
-                <For each=move || shell.panes.get() key=|pane| pane.key let:pane>
-                    <PaneView shell=shell pane=pane/>
-                </For>
+                {move || {
+                    let panes = shell.panes.get();
+                    let count = panes.len();
+                    panes
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, pane)| {
+                            let style = Signal::derive(move || {
+                                if count == 2 {
+                                    let r = shell.split_ratio.get();
+                                    if i == 0 {
+                                        format!("flex: {r} 1 0px;")
+                                    } else {
+                                        format!("flex: {} 1 0px;", 1.0 - r)
+                                    }
+                                } else {
+                                    "flex: 1 1 0px;".to_string()
+                                }
+                            });
+                            let is_resizing = shell.resizing_split;
+                            view! {
+                                {if i > 0 {
+                                    Some(view! {
+                                        <div
+                                            class=move || {
+                                                if is_resizing.get() {
+                                                    "pane-divider pane-divider-active"
+                                                } else {
+                                                    "pane-divider"
+                                                }
+                                            }
+                                            on:pointerdown=move |ev: web_sys::PointerEvent| {
+                                                if ev.button() == 0 {
+                                                    ev.prevent_default();
+                                                    shell.resizing_split.set(true);
+                                                }
+                                            }
+                                            on:dblclick=move |_| {
+                                                shell.split_ratio.set(0.5);
+                                                editor::redraw_all();
+                                            }
+                                        />
+                                    })
+                                } else {
+                                    None
+                                }}
+                                <PaneView shell=shell pane=pane style=style/>
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                }}
             </div>
 
             <div class="statusbar">

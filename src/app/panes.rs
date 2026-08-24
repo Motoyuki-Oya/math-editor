@@ -11,7 +11,11 @@ use crate::editor;
 
 /// タブストリップとエディタの下にある。
 #[component]
-pub(super) fn PaneView(shell: Shell, pane: Pane) -> impl IntoView {
+pub(super) fn PaneView(
+    shell: Shell,
+    pane: Pane,
+    #[prop(into, optional)] style: Option<Signal<String>>,
+) -> impl IntoView {
     let editor_ref = NodeRef::<leptos::html::Div>::new();
 
     Effect::new(move |_| {
@@ -43,6 +47,7 @@ pub(super) fn PaneView(shell: Shell, pane: Pane) -> impl IntoView {
     view! {
         <div
             class=move || if focused() { "pane pane-focused" } else { "pane" }
+            style=move || style.as_ref().map(|s| s.get()).unwrap_or_else(|| "flex: 1 1 0px;".to_string())
             on:mousedown=move |_| shell.note_focus(pane)
             on:focusin=move |_| shell.note_focus(pane)
         >

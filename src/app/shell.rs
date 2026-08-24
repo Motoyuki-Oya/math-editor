@@ -152,6 +152,10 @@ pub(super) struct Shell {
     pub(super) find_focus: RwSignal<Option<Field>>,
     /// ドラッグ中のタブ情報（移動元、マウス位置、ドラッグ中フラグ、ホバー中ターゲット）。
     pub(super) tab_drag: RwSignal<Option<TabDragState>>,
+    /// 左右分割ペインの幅比率（0.1 〜 0.9、既定 0.5）。
+    pub(super) split_ratio: RwSignal<f64>,
+    /// 分割線のドラッグ中フラグ。
+    pub(super) resizing_split: RwSignal<bool>,
 }
 
 /// ドラッグ中のタブ状態。
