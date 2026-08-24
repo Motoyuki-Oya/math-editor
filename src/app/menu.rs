@@ -48,7 +48,7 @@ pub(super) fn choose(shell: Shell, name: &str, from: From) {
         "redo" => super::sync::undo(shell, true),
         "find" => shell.find(Field::Query),
         "replace" => shell.find(Field::Replacement),
-        "insert_structure" => editor::insert_structure(),
+        "insert_structure" => shell.pane().palette.update(|open| *open = !*open),
         "wrap" => change(Settings {
             wrap: !current.wrap,
             ..current

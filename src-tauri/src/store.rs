@@ -131,8 +131,8 @@ impl Source {
         let bytes = file.metadata().ok().map_or(0, |m| m.len());
         // try_clone はカーソルを共有し、読みの seek が走査の位置を壊すので、
         // 走査には独立したハンドルを開く。
-        let scan_file = File::open(path)
-            .map_err(|e| format!("{} を読めませんでした: {e}", path.display()))?;
+        let scan_file =
+            File::open(path).map_err(|e| format!("{} を読めませんでした: {e}", path.display()))?;
         let mut reader = BufReader::with_capacity(CHUNK, scan_file);
         let index = Arc::new(ScanIndex {
             state: Mutex::new(ScanState {
@@ -315,10 +315,7 @@ impl Source {
         }
         let (lines, mark) = {
             let state = self.index.state.lock().unwrap();
-            (
-                state.lines,
-                *state.marks.get(from / STRIDE).unwrap_or(&0),
-            )
+            (state.lines, *state.marks.get(from / STRIDE).unwrap_or(&0))
         };
         if from >= lines {
             return Ok(());
@@ -440,7 +437,10 @@ impl Document {
         let count = source.lines();
         Ok((
             Document {
-                pieces: vec![Piece::Disk { from: 0, lines: count }],
+                pieces: vec![Piece::Disk {
+                    from: 0,
+                    lines: count,
+                }],
                 count,
                 source: Some(source),
                 undo: Vec::new(),
@@ -465,7 +465,9 @@ impl Document {
     }
 
     pub fn bytes(&self) -> usize {
-        self.source.as_ref().map_or(0, |source| source.bytes as usize)
+        self.source
+            .as_ref()
+            .map_or(0, |source| source.bytes as usize)
     }
 
     pub fn scan_index(&self) -> Option<Arc<ScanIndex>> {
@@ -835,8 +837,7 @@ impl Document {
         if sampled == 0 {
             return Ok(0);
         }
-        Ok(((hits as u128 * self.count as u128 + sampled as u128 / 2) / sampled as u128)
-            as usize)
+        Ok(((hits as u128 * self.count as u128 + sampled as u128 / 2) / sampled as u128) as usize)
     }
 
     /// `from..=to` の行のうち `needle` を含むもの。
@@ -907,7 +908,9 @@ impl Document {
         })?;
         match broken {
             Some(error) => Err(error),
-            None => out.flush().map_err(|e| format!("書き込めませんでした: {e}")),
+            None => out
+                .flush()
+                .map_err(|e| format!("書き込めませんでした: {e}")),
         }
     }
 
@@ -1023,7 +1026,10 @@ mod tests {
         assert_eq!(doc.line_count(), STRIDE * 2 + 5);
         assert_eq!(
             doc.read(STRIDE + 3, 2).unwrap(),
-            vec![format!("line {}", STRIDE + 3), format!("line {}", STRIDE + 4)]
+            vec![
+                format!("line {}", STRIDE + 3),
+                format!("line {}", STRIDE + 4)
+            ]
         );
         assert_eq!(
             doc.read(STRIDE * 2 + 4, 5).unwrap(),
@@ -1161,7 +1167,9 @@ mod tests {
         let (mut doc, path) = disk_doc("literal-scan", &["前abc後abc"]);
         let (hits, _) = doc.scan_literal("abc", '$', 0, 1, 64).unwrap();
         assert_eq!(
-            hits.iter().map(|hit| (hit.start, hit.end)).collect::<Vec<_>>(),
+            hits.iter()
+                .map(|hit| (hit.start, hit.end))
+                .collect::<Vec<_>>(),
             vec![(1, 4), (5, 8)]
         );
         std::fs::remove_file(path).ok();
@@ -1179,7 +1187,8 @@ mod tests {
     #[test]
     fn saving_adopts_the_written_file_as_the_source() {
         let (mut doc, path) = disk_doc("save", &["a", "b"]);
-        doc.replace(1, 2, vec!["B".into()], 1, "before", "").unwrap();
+        doc.replace(1, 2, vec!["B".into()], 1, "before", "")
+            .unwrap();
         doc.save(&path).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nB");
         assert_eq!(all(&mut doc), vec!["a", "B"]);
@@ -1219,10 +1228,18 @@ mod tests {
             scan.run().unwrap();
         }
         doc.confirm_scan();
-        println!("scan (exact {} lines): {:?}", doc.line_count(), start.elapsed());
+        println!(
+            "scan (exact {} lines): {:?}",
+            doc.line_count(),
+            start.elapsed()
+        );
         let start = std::time::Instant::now();
         let middle = doc.read(doc.line_count() / 2, 100).unwrap();
-        println!("read 100 lines: {:?} ({} lines)", start.elapsed(), middle.len());
+        println!(
+            "read 100 lines: {:?} ({} lines)",
+            start.elapsed(),
+            middle.len()
+        );
         let missing = "planetext-not-present";
         let start = std::time::Instant::now();
         let _ = doc

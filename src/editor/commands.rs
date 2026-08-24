@@ -71,14 +71,6 @@ pub fn insert_text(session: &Rc<RefCell<Session>>, text: &str) {
     changed(session);
 }
 
-/// キャレットにアイランドを配置し、編集を開始します。
-pub fn insert_structure() {
-    let Some(session) = session() else { return };
-    session.borrow_mut().editor.start_structure();
-    focus();
-    changed(&session);
-}
-
 /// パレットから構造をキャレット位置へ配置し、その編集スロットへ入ります。
 pub fn annotate(upper: bool) {
     let Some(session) = session() else { return };
@@ -183,8 +175,7 @@ fn far_copy(session: &Session) -> Option<FarCopy> {
         return None;
     }
     // まだ届いていない行の長さは 0 なので、切り出しのある端の行は必ず手元にある。
-    let first =
-        (from.col > 0).then(|| plain::row(&text.line(from.line)[from.col..].to_vec()));
+    let first = (from.col > 0).then(|| plain::row(&text.line(from.line)[from.col..].to_vec()));
     let last = (to.col > 0 || !text.is_absent(to.line))
         .then(|| plain::row(&text.line(to.line)[..to.col].to_vec()));
     let mut overrides = Vec::new();
@@ -296,7 +287,14 @@ pub fn find_far_in_line(
     };
     let found = {
         let borrowed = session.borrow();
-        search::find_in_line(borrowed.editor.text(), line, query, options, file_size, after)
+        search::find_in_line(
+            borrowed.editor.text(),
+            line,
+            query,
+            options,
+            file_size,
+            after,
+        )
     };
     let Some(found) = found else {
         return false;

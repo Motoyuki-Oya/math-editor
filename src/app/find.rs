@@ -181,13 +181,8 @@ fn update_preview(
         let Some(handle) = shell.tab_untracked().doc.get_untracked() else {
             return;
         };
-        let result = ipc::estimate_matches(
-            handle,
-            &query,
-            options.regex,
-            options.case_sensitive,
-        )
-        .await;
+        let result =
+            ipc::estimate_matches(handle, &query, options.regex, options.case_sensitive).await;
         if generation.get_untracked() == current {
             if let Ok(count) = result {
                 estimated_count.set(Some(count));

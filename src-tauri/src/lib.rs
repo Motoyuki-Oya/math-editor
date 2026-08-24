@@ -156,6 +156,8 @@ async fn read_lines(
 /// 編集の到着: `from..to` の行を `lines` へ置き換えます。同じ `group` が続く間は
 /// 元に戻す履歴の 1 ステップにつながります。新しい行数を返します。
 #[tauri::command]
+// 引数は frontend との受け渡しの形そのものなので、まとめると IPC の名前が変わる。
+#[allow(clippy::too_many_arguments)]
 async fn replace_lines(
     state: State<'_, AppState>,
     handle: u64,
@@ -166,7 +168,9 @@ async fn replace_lines(
     before: String,
     after: String,
 ) -> Result<usize, String> {
-    state.with_doc(handle, |doc| doc.replace(from, to, lines, group, &before, &after))
+    state.with_doc(handle, |doc| {
+        doc.replace(from, to, lines, group, &before, &after)
+    })
 }
 
 /// 元に戻す・やり直すの結果。`state` は frontend が預けた控えそのもの。

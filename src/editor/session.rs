@@ -419,7 +419,9 @@ pub fn load_pending(line_count: usize) {
 /// 走査で確定した行数をペインの文書へ合わせます。保留していた Ctrl+End が
 /// あればここで跳びます。
 pub fn set_line_count(pane: usize, count: usize) {
-    let Some(session) = pane_session(pane) else { return };
+    let Some(session) = pane_session(pane) else {
+        return;
+    };
     {
         let mut borrowed = session.borrow_mut();
         borrowed.editor.resize_pending(count);
@@ -449,9 +451,9 @@ pub fn feed_pane(pane: usize, from: usize, lines: &[String]) {
         let mut borrowed = session.borrow_mut();
         if borrowed.editor.resident_lines() > RESIDENT_LIMIT {
             let drawn = borrowed.view.drawn();
-            borrowed.editor.evict_far(
-                drawn.start.saturating_sub(RESIDENT_KEEP)..drawn.end + RESIDENT_KEEP,
-            );
+            borrowed
+                .editor
+                .evict_far(drawn.start.saturating_sub(RESIDENT_KEEP)..drawn.end + RESIDENT_KEEP);
         }
     }
     // 描き直すのは届いた行が画面に見えるときだけ。見えない行のために毎回
