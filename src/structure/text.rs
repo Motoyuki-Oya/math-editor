@@ -6,7 +6,7 @@
 //! [`Text`] の複製（元に戻す履歴のスナップショット）は行を共有して、変更された
 //! 行だけが書き込み時に複製される。
 
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell};
 use std::rc::Rc;
 
 use super::ast::{Node, NodeKind, Row};
@@ -154,6 +154,8 @@ pub struct Text {
     changes: Vec<LineChange>,
     /// まだ届いていない行の数。残っているかを行を数えずに答えるための控え。
     absent: usize,
+    /// 手元にある文字数のキャッシュ（O(1) stats用）。
+    total_chars: Cell<Option<usize>>,
 }
 
 /// 行の中身が同じなら同じ文書。入れ替えの控えは持ち方の話で、意味ではない。
@@ -169,6 +171,7 @@ impl Default for Text {
             lines: vec![Rc::new(Line::Rows(Row::new()))],
             changes: Vec::new(),
             absent: 0,
+            total_chars: Cell::new(Some(0)),
         }
     }
 }
@@ -186,18 +189,29 @@ impl Text {
         if lines.is_empty() {
             return Self::default();
         }
+        let mut total = 0;
+        let line_objs: Vec<Rc<Line>> = lines
+            .into_iter()
+            .map(|line| {
+                let (l, len) = match line {
+                    SourceLine::Plain(source) => {
+                        let len = source.chars().count();
+                        (Line::raw(source), len)
+                    }
+                    SourceLine::Parsed(row) => {
+                        let len = row.len();
+                        (Line::Rows(row), len)
+                    }
+                };
+                total += len;
+                Rc::new(l)
+            })
+            .collect();
         Self {
-            lines: lines
-                .into_iter()
-                .map(|line| {
-                    Rc::new(match line {
-                        SourceLine::Plain(source) => Line::raw(source),
-                        SourceLine::Parsed(row) => Line::Rows(row),
-                    })
-                })
-                .collect(),
+            lines: line_objs,
             changes: Vec::new(),
             absent: 0,
+            total_chars: Cell::new(Some(total)),
         }
     }
 
@@ -279,6 +293,7 @@ impl Text {
             lines: vec![absent; line_count],
             changes: Vec::new(),
             absent: line_count,
+            total_chars: Cell::new(Some(0)),
         }
     }
 
@@ -287,6 +302,7 @@ impl Text {
     /// キャレットの行）は捨てない。これは編集ではないので控えには残らない。
     pub fn evict_far(&mut self, keep: std::ops::Range<usize>, pinned: &[usize]) {
         let absent = Rc::new(Line::Absent);
+        let mut evicted_chars = 0;
         for (i, slot) in self.lines.iter_mut().enumerate() {
             if keep.contains(&i)
                 || pinned.contains(&i)
@@ -298,8 +314,12 @@ impl Text {
             {
                 continue;
             }
+            evicted_chars += slot.len();
             *slot = absent.clone();
             self.absent += 1;
+        }
+        if let Some(c) = self.total_chars.get() {
+            self.total_chars.set(Some(c.saturating_sub(evicted_chars)));
         }
     }
 
@@ -336,6 +356,7 @@ impl Text {
             .iter()
             .filter(|line| matches!(line.as_ref(), Line::Absent))
             .count();
+        self.total_chars.set(None);
     }
 
     /// まだ届いていない行へ中身を入れる。既に届いた行はそのまま。
@@ -346,11 +367,18 @@ impl Text {
         if !matches!(slot.as_ref(), Line::Absent) {
             return;
         }
+        let added = match &source {
+            SourceLine::Plain(source) => source.chars().count(),
+            SourceLine::Parsed(row) => row.len(),
+        };
         *slot = Rc::new(match source {
             SourceLine::Plain(source) => Line::raw(source),
             SourceLine::Parsed(row) => Line::Rows(row),
         });
         self.absent -= 1;
+        if let Some(c) = self.total_chars.get() {
+            self.total_chars.set(Some(c + added));
+        }
     }
 
     /// `from` 以降で最初のまだ届いていない行。読み込みの続きがどこかを答える。
@@ -380,6 +408,7 @@ impl Text {
         }
         self.record(line, 1, 1);
         self.count_filled(line);
+        self.total_chars.set(None);
         Some(Rc::make_mut(&mut self.lines[line]).row_mut())
     }
 
@@ -426,11 +455,24 @@ impl Text {
         if from == to {
             return from;
         }
+        let removed_chars = if from.line == to.line {
+            to.col.saturating_sub(from.col)
+        } else {
+            let mut chars = self.line_len(from.line).saturating_sub(from.col);
+            for line in from.line + 1..to.line {
+                chars += self.line_len(line);
+            }
+            chars += to.col.min(self.line_len(to.line));
+            chars
+        };
         // 行を丸ごと消すときは、境界の行に触らない。大きいファイルの行の
         // 出し入れが、素の行を展開せずに済むように。
         if from.col == 0 && to.col == 0 {
             self.record(from.line, to.line - from.line, 0);
             self.drain_counting(from.line, to.line);
+            if let Some(c) = self.total_chars.get() {
+                self.total_chars.set(Some(c.saturating_sub(removed_chars)));
+            }
             return from;
         }
         self.record(from.line, to.line - from.line + 1, 1);
@@ -440,6 +482,9 @@ impl Text {
         first.truncate(from.col);
         first.extend(tail);
         self.drain_counting(from.line + 1, to.line + 1);
+        if let Some(c) = self.total_chars.get() {
+            self.total_chars.set(Some(c.saturating_sub(removed_chars)));
+        }
         from
     }
 
@@ -458,6 +503,7 @@ impl Text {
         if what.is_empty() {
             return at;
         }
+        let added_chars: usize = what.iter().map(Row::len).sum();
         self.record(at.line, 1, what.len());
         self.count_filled(at.line);
         let first_line = Rc::make_mut(&mut self.lines[at.line]).row_mut();
@@ -467,6 +513,9 @@ impl Text {
             let col = at.col + only.len();
             first_line.extend(only);
             first_line.extend(tail);
+            if let Some(c) = self.total_chars.get() {
+                self.total_chars.set(Some(c + added_chars));
+            }
             return Pos::new(at.line, col);
         }
         let last = what.pop().expect("more than one line");
@@ -481,14 +530,19 @@ impl Text {
             self.lines
                 .insert(at.line + 1 + offset, Rc::new(Line::Rows(line)));
         }
+        if let Some(c) = self.total_chars.get() {
+            self.total_chars.set(Some(c + added_chars));
+        }
         end
     }
 
     pub fn stats(&self) -> (usize, usize) {
-        (
-            self.lines.iter().map(|line| line.len()).sum(),
-            self.line_count(),
-        )
+        let count = self.total_chars.get().unwrap_or_else(|| {
+            let sum: usize = self.lines.iter().map(|line| line.len()).sum();
+            self.total_chars.set(Some(sum));
+            sum
+        });
+        (count, self.line_count())
     }
 }
 
@@ -725,5 +779,28 @@ mod tests {
         assert_eq!(text.line_count(), 2);
         assert_eq!(text.line(0), nodes_of("abX")[0].as_slice());
         assert_eq!(text.line(1), nodes_of("Ycd")[0].as_slice());
+    }
+
+    #[test]
+    fn stats_tracks_character_count_and_line_count_accurately() {
+        let mut text = raw_text(&["hello", "world"]);
+        assert_eq!(text.stats(), (10, 2));
+
+        text.insert(Pos::new(0, 5), nodes_of("!"));
+        assert_eq!(text.stats(), (11, 2));
+
+        text.insert(Pos::new(1, 5), nodes_of("\nfoo"));
+        assert_eq!(text.stats(), (14, 3));
+
+        text.remove(Pos::new(0, 0), Pos::new(0, 1));
+        assert_eq!(text.stats(), (13, 3));
+
+        text.remove(Pos::new(1, 0), Pos::new(2, 0));
+        assert_eq!(text.stats(), (8, 2));
+
+        let mut pending = Text::pending(100);
+        assert_eq!(pending.stats(), (0, 100));
+        pending.fill_line(0, SourceLine::Plain("abc".into()));
+        assert_eq!(pending.stats(), (3, 100));
     }
 }
