@@ -18,5 +18,5 @@ pub use search::SearchOptions;
 pub use session::{
     apply_restored, clear_search_preview, close_pane, feed_pane, focus_pane, fully_resident, init,
     load, load_pending, park, preview_search, redraw_all, restore, set_line_count, set_on_change,
-    set_on_far_copy, set_on_missing, stats, take_flush, FlushBatch, Parked,
+    set_on_far_copy, set_on_missing, set_on_tail, show_tail, stats, take_flush, FlushBatch, Parked,
 };

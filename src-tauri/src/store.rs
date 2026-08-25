@@ -27,10 +27,22 @@ const CHUNK: usize = 1 << 20;
 /// チャンク内の改行を数え、STRIDE 行ごとの行頭バイト位置を `marks` へ足す。
 /// `line` は通し行数、`offset` はチャンク先頭のファイル内バイト位置。
 fn index_chunk(chunk: &[u8], offset: u64, line: &mut usize, marks: &mut Vec<u64>) {
-    for at in memchr::memchr_iter(b'\n', chunk) {
-        *line += 1;
-        if (*line).is_multiple_of(STRIDE) {
-            marks.push(offset + at as u64 + 1);
+    // memchrのcountはSIMD実装を持つ。4KBごとに改行数だけ先に数え、STRIDEの
+    // 境界を含む小区間だけ位置を列挙することで、debugでも全改行をRust側で
+    // 1件ずつ反復しない。
+    const BLOCK: usize = 4 << 10;
+    for (block_index, block) in chunk.chunks(BLOCK).enumerate() {
+        let count = memchr::memchr_iter(b'\n', block).count();
+        let next_mark = (*line / STRIDE + 1) * STRIDE;
+        if *line + count < next_mark {
+            *line += count;
+            continue;
+        }
+        for at in memchr::memchr_iter(b'\n', block) {
+            *line += 1;
+            if (*line).is_multiple_of(STRIDE) {
+                marks.push(offset + (block_index * BLOCK + at) as u64 + 1);
+            }
         }
     }
 }
@@ -196,7 +208,6 @@ impl Source {
         let mut line = 0usize;
         let mut offset = 0u64;
         let mut carry: Vec<u8> = Vec::new();
-
         {
             let chunk = reader
                 .fill_buf()
@@ -266,6 +277,49 @@ impl Source {
         self.index.state.lock().unwrap().lines
     }
 
+    /// 総行数や間引き索引を待たず、EOFから後ろの行だけを読む。
+    fn read_tail(&mut self, count: usize) -> Result<Vec<String>, String> {
+        if count == 0 || self.bytes == 0 {
+            return Ok(Vec::new());
+        }
+        self.check()?;
+        const TAIL_CHUNK: u64 = 64 << 10;
+        const MAX_TAIL_BYTES: u64 = 8 << 20;
+        let mut at = self.bytes;
+        let mut chunks = Vec::new();
+        let mut newlines = 0usize;
+        let mut read_bytes = 0u64;
+        while at > 0 && newlines < count && read_bytes < MAX_TAIL_BYTES {
+            let from = at.saturating_sub(TAIL_CHUNK);
+            let mut chunk = vec![0; (at - from) as usize];
+            self.file
+                .seek(SeekFrom::Start(from))
+                .map_err(|e| format!("{} を読めませんでした: {e}", self.path.display()))?;
+            self.file
+                .read_exact(&mut chunk)
+                .map_err(|e| format!("{} を読めませんでした: {e}", self.path.display()))?;
+            newlines += memchr::memchr_iter(b'\n', &chunk).count();
+            read_bytes += chunk.len() as u64;
+            chunks.push(chunk);
+            at = from;
+        }
+        if at > 0 && newlines < count {
+            return Err("末尾の行が8MBを超えるため表示できません".to_string());
+        }
+        chunks.reverse();
+        let bytes: Vec<u8> = chunks.into_iter().flatten().collect();
+        let lines: Vec<&[u8]> = bytes.split(|byte| *byte == b'\n').collect();
+        let first = lines.len().saturating_sub(count);
+        lines[first..]
+            .iter()
+            .map(|line| {
+                std::str::from_utf8(line)
+                    .map(str::to_string)
+                    .map_err(|_| format!("{} は UTF-8 ではありません", self.path.display()))
+            })
+            .collect()
+    }
+
     /// 検索スレッド専用の独立したファイルハンドルを持つ同じソース。
     fn search_copy(&self) -> Result<Source, String> {
         self.check()?;
@@ -301,7 +355,7 @@ impl Source {
         }
         let (base, start, end) = {
             let state = self.index.state.lock().unwrap();
-            let group = from / STRIDE;
+            let group = (from / STRIDE).min(state.marks.len().saturating_sub(1));
             let end_group = to.div_ceil(STRIDE);
             (
                 group * STRIDE,
@@ -377,9 +431,13 @@ impl Source {
         if count == 0 {
             return Ok(());
         }
-        let (lines, mark) = {
+        let (lines, mark_index, mark) = {
             let state = self.index.state.lock().unwrap();
-            (state.lines, *state.marks.get(from / STRIDE).unwrap_or(&0))
+            if let Some(error) = &state.broken {
+                return Err(error.clone());
+            }
+            let mark_index = (from / STRIDE).min(state.marks.len().saturating_sub(1));
+            (state.lines, mark_index, state.marks[mark_index])
         };
         if from >= lines {
             return Ok(());
@@ -389,8 +447,8 @@ impl Source {
         self.file.seek(SeekFrom::Start(mark)).map_err(broken)?;
         let mut reader = BufReader::with_capacity(CHUNK, &self.file);
         let mut buffer = Vec::new();
-        // 索引からその行までの読み飛ばし。高々 STRIDE 行。
-        for _ in 0..from % STRIDE {
+        // 遅延索引が目的行へまだ届いていなければ、最後にある印から正しく読む。
+        for _ in 0..from - mark_index * STRIDE {
             buffer.clear();
             reader.read_until(b'\n', &mut buffer).map_err(broken)?;
         }
@@ -401,7 +459,9 @@ impl Source {
             if buffer.last() == Some(&b'\n') {
                 buffer.pop();
             }
-            if !f(line, &String::from_utf8_lossy(&buffer)) {
+            let text = std::str::from_utf8(&buffer)
+                .map_err(|_| format!("{} は UTF-8 ではありません", self.path.display()))?;
+            if !f(line, text) {
                 return Ok(());
             }
         }
@@ -412,6 +472,11 @@ impl Source {
 /// チャンクの並びが UTF-8 かどうか。文字の途中でチャンクが切れることがある
 /// ので、切れ端は `carry` に持ち越して次のチャンクの頭と合わせて見る。
 fn valid_utf8(carry: &mut Vec<u8>, mut chunk: &[u8]) -> bool {
+    // 巨大なログや生成テキストの大半はASCII。sliceのword-at-a-time判定で
+    // 通れば、汎用UTF-8検証をもう一度全バイトへ掛けない。
+    if carry.is_empty() && chunk.is_ascii() {
+        return true;
+    }
     while !carry.is_empty() && !chunk.is_empty() {
         carry.push(chunk[0]);
         chunk = &chunk[1..];
@@ -617,10 +682,9 @@ impl Document {
                     let disk = *disk + skip;
                     let base = start + skip;
                     let mut go = true;
-                    let source = self
-                        .source
-                        .as_mut()
-                        .expect("ディスクのピースがあるなら開いたファイルもある");
+                    let source = self.source.as_mut().ok_or_else(|| {
+                        "文書ストアのディスク参照が失われました。開き直してください".to_string()
+                    })?;
                     source.each_line(disk, take, &mut |at, text| {
                         go = f(base + (at - disk), text);
                         go
@@ -641,6 +705,22 @@ impl Document {
             true
         })?;
         Ok(lines)
+    }
+
+    pub fn read_tail(&mut self, count: usize) -> Result<Vec<String>, String> {
+        let scan_done = self
+            .source
+            .as_ref()
+            .and_then(|source| source.index.status().ok().flatten())
+            .is_some();
+        if scan_done {
+            self.confirm_scan();
+            return self.read(self.count.saturating_sub(count), count);
+        }
+        self.source
+            .as_mut()
+            .ok_or_else(|| "末尾を読むファイルがありません".to_string())?
+            .read_tail(count)
     }
 
     /// `from..to` の行を `lines` に置き換え、逆操作を履歴に書く。
@@ -899,10 +979,9 @@ impl Document {
                 Piece::Disk { from: disk, .. } => {
                     let disk = *disk + skip;
                     let base = start + skip;
-                    let source = self
-                        .source
-                        .as_mut()
-                        .expect("ディスクのピースがあるなら開いたファイルもある");
+                    let source = self.source.as_mut().ok_or_else(|| {
+                        "文書ストアのディスク参照が失われました。開き直してください".to_string()
+                    })?;
                     hits.extend(
                         source
                             .literal_matches(disk, take, query, case_sensitive, marker as u8)?
@@ -1106,16 +1185,26 @@ impl Document {
             }
             out.flush().map_err(|e| fail(e.to_string()))?;
         }
-        // 自分が読んでいる元ファイルへ重ねるかもしれないので、先に手を放す。
-        if self
+        // 自分が読んでいる元ファイルへ重ねる場合だけ、rename の直前に手を放す。
+        // rename が失敗したら必ず戻す。Disk piece を残したまま Source だけ失うと、
+        // その後の読みがパニックし、文書マップの Mutex まで poison される。
+        let replacing_source = self
             .source
             .as_ref()
-            .is_some_and(|source| source.path == Path::new(path))
-        {
-            self.source = None;
+            .is_some_and(|source| source.path == Path::new(path));
+        let old_source = replacing_source.then(|| self.source.take()).flatten();
+        if let Err(error) = std::fs::rename(&tmp, path) {
+            self.source = old_source;
+            std::fs::remove_file(&tmp).ok();
+            return Err(fail(error.to_string()));
         }
-        std::fs::rename(&tmp, path).map_err(|e| fail(e.to_string()))?;
-        let file = File::open(path).map_err(|e| fail(e.to_string()))?;
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(error) => {
+                self.source = old_source;
+                return Err(fail(error.to_string()));
+            }
+        };
         let modified = file.metadata().ok().and_then(|meta| meta.modified().ok());
         self.source = Some(Source {
             path: Path::new(path).to_path_buf(),
@@ -1166,6 +1255,26 @@ mod tests {
         assert_eq!(doc.line_count(), 3);
         assert_eq!(all(&mut doc), vec!["ab", "", "cd"]);
         assert_eq!(doc.read(2, 1).unwrap(), vec!["cd"]);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn background_scan_confirms_and_reads_the_empty_final_line() {
+        let path = std::env::temp_dir().join(format!(
+            "planetext-store-{}-background-final.txt",
+            std::process::id()
+        ));
+        let line = "0123456789\n";
+        let complete_lines = 100_000usize;
+        std::fs::write(&path, line.repeat(complete_lines)).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let (mut doc, scan) = Document::open(&path).unwrap();
+        assert!(scan.is_some());
+        assert_eq!(doc.read_tail(2).unwrap(), vec!["0123456789", ""]);
+        scan.unwrap().run().unwrap();
+        doc.confirm_scan();
+        assert_eq!(doc.line_count(), complete_lines + 1);
+        assert_eq!(doc.read(complete_lines, 1).unwrap(), vec![""]);
         std::fs::remove_file(path).ok();
     }
 
@@ -1420,6 +1529,19 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
+    #[test]
+    fn a_failed_overwrite_keeps_the_open_source_readable() {
+        let (mut doc, path) = disk_doc("failed-save", &["a", "b"]);
+        let original_permissions = std::fs::metadata(&path).unwrap().permissions();
+        let mut readonly = original_permissions.clone();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&path, readonly).unwrap();
+        assert!(doc.save(&path).is_err());
+        std::fs::set_permissions(&path, original_permissions).unwrap();
+        assert_eq!(doc.read(0, 2).unwrap(), vec!["a", "b"]);
+        std::fs::remove_file(path).ok();
+    }
+
     /// 開いている間の外部変更は、壊れた読みを返さずに断る。
     #[test]
     fn outside_changes_are_refused_instead_of_read_wrong() {
@@ -1427,6 +1549,45 @@ mod tests {
         std::fs::write(&path, "changed elsewhere\nlonger than before").unwrap();
         assert!(doc.read(0, 2).is_err());
         std::fs::remove_file(path).ok();
+    }
+
+    /// EOF seekによる末尾読みの実測。行数走査は開始しない。
+    #[test]
+    #[ignore]
+    fn scale_check_reading_the_tail_without_line_count() {
+        let path = r"C:\workspace\test-800mb.txt";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let (mut doc, _scan) = Document::open(path).unwrap();
+        let start = std::time::Instant::now();
+        let tail = doc.read_tail(100).unwrap();
+        println!("read tail: {:?} ({} lines)", start.elapsed(), tail.len());
+        assert_eq!(tail.len(), 100);
+    }
+
+    /// 先頭1MBの同期読みと、残りの行数・間引き索引走査だけの実測。
+    #[test]
+    #[ignore]
+    fn scale_check_counting_lines() {
+        let path = r"C:\workspace\test-800mb.txt";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let start = std::time::Instant::now();
+        let (mut doc, scan) = Document::open(path).unwrap();
+        let opened = start.elapsed();
+        let start = std::time::Instant::now();
+        if let Some(scan) = scan {
+            scan.run().unwrap();
+        }
+        doc.confirm_scan();
+        println!(
+            "open: {opened:?}, scan: {:?}, lines: {}",
+            start.elapsed(),
+            doc.line_count()
+        );
+        assert_eq!(doc.line_count(), 16_000_001);
     }
 
     /// 規模の実測: `cargo test -p planetext --release -- --ignored --nocapture`。

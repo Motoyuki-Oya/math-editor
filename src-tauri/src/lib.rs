@@ -170,6 +170,16 @@ async fn read_lines(
     state.with_doc(handle, |doc| doc.read(from, count))
 }
 
+/// 行数走査を待たず、EOF基準で末尾の行を返します。
+#[tauri::command]
+async fn read_tail(
+    state: State<'_, AppState>,
+    handle: u64,
+    count: usize,
+) -> Result<Vec<String>, String> {
+    state.with_doc(handle, |doc| doc.read_tail(count))
+}
+
 /// 編集の到着: `from..to` の行を `lines` へ置き換えます。同じ `group` が続く間は
 /// 元に戻す履歴の 1 ステップにつながります。新しい行数を返します。
 #[tauri::command]
@@ -819,6 +829,7 @@ pub fn run() {
             finish_document,
             create_document,
             read_lines,
+            read_tail,
             replace_lines,
             undo_lines,
             save_document,
