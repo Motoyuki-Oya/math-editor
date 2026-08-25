@@ -71,8 +71,8 @@ fn insert_text_one(session: &Rc<RefCell<Session>>, text: &str) {
     }
     // ドキュメントからコピーされた部分は、元の形状で戻ります。それ以外のテキストは、そのままの文字です。
     match clipboard::pasted(text) {
-        Some(clip) => session.borrow_mut().editor.insert_clip(&clip),
-        None => session.borrow_mut().editor.insert_text(text),
+        Some(clip) => session.borrow().editor.borrow_mut().insert_clip(&clip),
+        None => session.borrow().editor.borrow_mut().insert_text(text),
     };
     changed(session);
 }
@@ -80,7 +80,7 @@ fn insert_text_one(session: &Rc<RefCell<Session>>, text: &str) {
 /// パレットから構造をキャレット位置へ配置し、その編集スロットへ入ります。
 pub fn annotate(upper: bool) {
     let Some(session) = session() else { return };
-    let did = session.borrow_mut().editor.annotate(upper);
+    let did = session.borrow().editor.borrow_mut().annotate(upper);
     focus();
     match did {
         Did::Changed => changed(&session),
@@ -93,8 +93,8 @@ pub fn insert_node(node: Node) {
     let Some(session) = session() else { return };
     {
         // 構造の配置と編集開始は 1 つの操作なので、1 回元に戻すと両方を戻します。
-        let mut borrowed = session.borrow_mut();
-        borrowed.editor.one_step(|editor| {
+        let borrowed = session.borrow();
+        borrowed.editor.borrow_mut().one_step(|editor| {
             if editor.nested_cursor().is_none() {
                 editor.start_structure();
             }
@@ -108,7 +108,7 @@ pub fn insert_node(node: Node) {
 /// キャレットがある場所すべてを選択します。キャレットが含まれる構造の行、または全体文書。システム独自の全選択アイテムは、テキストではなく非表示の入力要素に到達するため、これは独自のアイテムです。
 pub fn select_all() {
     let Some(session) = session() else { return };
-    session.borrow_mut().editor.select_all();
+    session.borrow().editor.borrow_mut().select_all();
     focus();
     redraw(&session);
 }
@@ -118,20 +118,21 @@ pub fn select_all() {
 /// 「なし」は、何も選択されていないことを意味します。空の構造など、テキストが空の選択範囲は依然として選択範囲であり、切り取ることができます。
 pub fn selected_text(session: &Rc<RefCell<Session>>) -> Option<String> {
     let borrowed = session.borrow();
+    let editor = borrowed.editor.borrow();
     // 構造内の選択範囲は、構造のその部分をコピーします。クリップボードはどちらの方法でも同じです。
-    if let Some(row) = borrowed.editor.nested_selection() {
+    if let Some(row) = editor.nested_selection() {
         return Some(clipboard::keep(Clip::Row(row)));
     }
-    let sel = borrowed.editor.primary();
+    let sel = editor.primary();
     if sel.is_caret() {
         return None;
     }
-    let lines = borrowed.editor.text().slice(sel.start(), sel.end());
+    let lines = editor.text().slice(sel.start(), sel.end());
     Some(clipboard::keep(Clip::Text(lines)))
 }
 
 pub fn delete_selection(session: &Rc<RefCell<Session>>) {
-    session.borrow_mut().editor.backspace();
+    session.borrow().editor.borrow_mut().backspace();
     changed(session);
 }
 
@@ -164,7 +165,7 @@ pub fn request_far_copy(session: &Rc<RefCell<Session>>) -> bool {
 
 fn far_copy(session: &Session) -> Option<FarCopy> {
     use crate::structure::plain;
-    let editor = &session.editor;
+    let editor = session.editor.borrow();
     if editor.nested_selection().is_some() {
         return None;
     }
@@ -206,7 +207,7 @@ fn far_copy(session: &Session) -> Option<FarCopy> {
 
 /// 入れ子構造の編集を停止し、その直後にキャレットを残します。
 pub fn leave_structure(session: &Rc<RefCell<Session>>) {
-    session.borrow_mut().editor.leave_structure();
+    session.borrow().editor.borrow_mut().leave_structure();
 }
 
 pub fn find_next(query: &str, options: SearchOptions, file_size: Option<usize>) -> bool {
@@ -215,13 +216,12 @@ pub fn find_next(query: &str, options: SearchOptions, file_size: Option<usize>) 
     };
     let found = {
         let borrowed = session.borrow();
-        let from = borrowed.search_from.clone().unwrap_or_else(|| {
-            search::key_at(
-                borrowed.editor.primary().end(),
-                borrowed.editor.nested_cursor(),
-            )
-        });
-        search::find_next(borrowed.editor.text(), query, options, file_size, from)
+        let editor = borrowed.editor.borrow();
+        let from = borrowed
+            .search_from
+            .clone()
+            .unwrap_or_else(|| search::key_at(editor.primary().end(), editor.nested_cursor()));
+        search::find_next(editor.text(), query, options, file_size, from)
     };
     let Some(found) = found else {
         return false;
@@ -230,16 +230,16 @@ pub fn find_next(query: &str, options: SearchOptions, file_size: Option<usize>) 
     true
 }
 
-/// 一致を選択して見せ、「次を検索」がそこから続くようにします。
 fn apply_found(session: &Rc<RefCell<Session>>, found: search::Found) {
     {
-        let mut borrowed = session.borrow_mut();
-        borrowed.search_from = Some(found.place.end());
+        session.borrow_mut().search_from = Some(found.place.end());
+        let borrowed = session.borrow();
+        let mut editor = borrowed.editor.borrow_mut();
         match found.place {
-            // 構造内の一致がその中に表示されるため、どちらの方法でも見つかったものが選択されたものになります。
-            Place::Text(sel) => borrowed.editor.set_sels(vec![sel]),
+            // 一致の内部を表示するため、どの方法でも見つかったものが選択されたものになります。
+            Place::Text(sel) => editor.set_sels(vec![sel]),
             Place::Inside { at, cursor } => {
-                borrowed.editor.select_nested(at, cursor);
+                editor.select_nested(at, cursor);
             }
         }
     }
@@ -251,13 +251,12 @@ fn apply_found(session: &Rc<RefCell<Session>>, found: search::Found) {
 pub fn far_search_start() -> Option<(search::Key, usize)> {
     let session = session()?;
     let borrowed = session.borrow();
-    let from = borrowed.search_from.clone().unwrap_or_else(|| {
-        search::key_at(
-            borrowed.editor.primary().end(),
-            borrowed.editor.nested_cursor(),
-        )
-    });
-    Some((from, borrowed.editor.text().line_count()))
+    let editor = borrowed.editor.borrow();
+    let from = borrowed
+        .search_from
+        .clone()
+        .unwrap_or_else(|| search::key_at(editor.primary().end(), editor.nested_cursor()));
+    Some((from, editor.text().line_count()))
 }
 
 /// 本体の走査が見つけた素の行の一致へ跳びます。
@@ -293,14 +292,8 @@ pub fn find_far_in_line(
     };
     let found = {
         let borrowed = session.borrow();
-        search::find_in_line(
-            borrowed.editor.text(),
-            line,
-            query,
-            options,
-            file_size,
-            after,
-        )
+        let editor = borrowed.editor.borrow();
+        search::find_in_line(editor.text(), line, query, options, file_size, after)
     };
     let Some(found) = found else {
         return false;
@@ -319,15 +312,16 @@ pub fn replace_all(
     leave_structure(&session);
     let matches = {
         let borrowed = session.borrow();
-        search::find_all(borrowed.editor.text(), query, options, file_size)
+        let editor = borrowed.editor.borrow();
+        search::find_all(editor.text(), query, options, file_size)
     };
     if matches.is_empty() {
         return 0;
     }
     {
-        let mut borrowed = session.borrow_mut();
+        let borrowed = session.borrow();
         // すべての置き換えが履歴の 1 ステップに入り、1 回の元に戻すで全部戻る。
-        borrowed.editor.one_step(|editor| {
+        borrowed.editor.borrow_mut().one_step(|editor| {
             // 後ろから前に置き換えると、以前の位置が有効になります。
             for found in matches.iter().rev() {
                 let text = search::expand(&found.groups, replacement, options);
@@ -343,7 +337,7 @@ pub fn replace_all(
                 }
             }
         });
-        borrowed.editor.leave_structure();
+        borrowed.editor.borrow_mut().leave_structure();
     }
     changed(&session);
     matches.len()

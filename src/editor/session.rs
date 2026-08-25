@@ -1,6 +1,8 @@
-//! ペインごとに 1 つの編集セッション: 誰が画面上にあるか、誰がフォーカスを持っているか、および変更が画面とシェルにどのように到達するかの台帳。
+//! ペインごとに 1 つの編集セッション (V): 誰が画面上にあるか、誰がフォーカスを持っているか、および変更が画面とシェルにどのように到達するかの台帳。
+//! 各セッションは Document ID を通じて共有の Document Model (M: Rc<RefCell<Editor>>) を参照します。
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use web_sys::{HtmlElement, HtmlTextAreaElement};
@@ -14,7 +16,10 @@ use crate::view::document::{Caret, Overlay, View};
 pub struct Session {
     /// このドキュメントが表示されているペインに名前を付けます。
     pub pane: usize,
-    pub editor: Editor,
+    /// 現在表示している Document Model の ID。
+    pub doc_id: usize,
+    /// Document Model (M) への参照。
+    pub editor: Rc<RefCell<Editor>>,
     pub view: View,
     pub textarea: HtmlTextAreaElement,
     pub focused: bool,
@@ -41,12 +46,31 @@ pub struct Session {
 type OnChange = Rc<dyn Fn(usize)>;
 
 thread_local! {
-    /// ペインごとに 1 つのセッション画面。分割ビューはリストを作成します。
+    /// 全ての開いているドキュメントの Model (M)。タブID（doc_id）ごとに 1 つ保持される。
+    static DOCUMENTS: RefCell<HashMap<usize, Rc<RefCell<Editor>>>> = RefCell::new(HashMap::new());
+    /// ペインごとに 1 つのセッション画面 (V)。分割ビューはリストを作成します。
     static PANES: RefCell<Vec<Rc<RefCell<Session>>>> = const { RefCell::new(Vec::new()) };
     /// 入力を行うペイン。
     static FOCUSED: Cell<usize> = const { Cell::new(0) };
     static NEXT_PANE: Cell<usize> = const { Cell::new(0) };
     static ON_CHANGE: RefCell<Option<OnChange>> = const { RefCell::new(None) };
+}
+
+/// 指定IDの Document Model を取得、無ければ新規作成して返します。
+pub fn get_or_create_doc(id: usize) -> Rc<RefCell<Editor>> {
+    DOCUMENTS.with(|docs| {
+        docs.borrow_mut()
+            .entry(id)
+            .or_insert_with(|| Rc::new(RefCell::new(Editor::default())))
+            .clone()
+    })
+}
+
+/// タブがすべてのペインから破棄された際に、Document Model を解放します。
+pub fn release_doc(id: usize) {
+    DOCUMENTS.with(|docs| {
+        docs.borrow_mut().remove(&id);
+    });
 }
 
 /// 入力を行うペインのセッション。
@@ -72,7 +96,23 @@ pub(super) fn pane_session(pane: usize) -> Option<Rc<RefCell<Session>>> {
     })
 }
 
-/// `root` 内にエディターを構築します。返された番号はペインに名前を付けます。
+/// ペインに特定のドキュメント (tab.id) をバインドして表示します。
+pub fn bind_doc(pane: usize, doc_id: usize) {
+    let Some(session) = pane_session(pane) else {
+        return;
+    };
+    let doc = get_or_create_doc(doc_id);
+    {
+        let mut borrowed = session.borrow_mut();
+        borrowed.doc_id = doc_id;
+        borrowed.editor = doc;
+        borrowed.preedit.clear();
+        borrowed.search_from = None;
+    }
+    redraw(&session);
+}
+
+/// root 内にエディターを構築します。返された番号はペインに名前を付けます。
 pub fn init(root: &HtmlElement) -> Option<usize> {
     let doc = root.owner_document()?;
     let view = View::new(root.clone())?;
@@ -80,9 +120,12 @@ pub fn init(root: &HtmlElement) -> Option<usize> {
     let textarea = input::build(&doc, &view.scroller())?;
     let pane = NEXT_PANE.get();
     NEXT_PANE.set(pane + 1);
+    let doc_id = 0;
+    let editor = get_or_create_doc(doc_id);
     let session = Rc::new(RefCell::new(Session {
         pane,
-        editor: Editor::default(),
+        doc_id,
+        editor,
         view,
         textarea,
         focused: false,
@@ -236,8 +279,9 @@ pub(super) fn request_far_copy(pane: usize, copy: super::commands::FarCopy) {
 fn request_missing(session: &Rc<RefCell<Session>>) {
     let (pane, range) = {
         let borrowed = session.borrow();
+        let editor = borrowed.editor.borrow();
         let drawn = borrowed.view.drawn();
-        let Some(first) = borrowed.editor.text().first_absent(drawn.start) else {
+        let Some(first) = editor.text().first_absent(drawn.start) else {
             return;
         };
         if first >= drawn.end {
@@ -276,14 +320,15 @@ pub fn clear_search_preview() {
 }
 
 fn redraw_preview_overlay(session: &Rc<RefCell<Session>>) {
-    let borrowed = session.borrow();
-    let caret = caret_of(&borrowed);
-    let carets = carets_of(&borrowed);
-    let highlights = preview_highlights(&borrowed);
-    let modified = borrowed.editor.modified_lines();
-    let sels = borrowed.editor.sels();
-    let line_count = borrowed.editor.text().line_count();
-    borrowed.view.redraw_overlay(
+    let session = session.borrow();
+    let editor = session.editor.borrow();
+    let caret = caret_of(&session, &editor);
+    let carets = carets_of(&session, &editor);
+    let highlights = preview_highlights(&session);
+    let modified = editor.modified_lines();
+    let sels = editor.sels();
+    let line_count = editor.text().line_count();
+    session.view.redraw_overlay(
         line_count,
         &Overlay {
             sels: &sels,
@@ -291,8 +336,8 @@ fn redraw_preview_overlay(session: &Rc<RefCell<Session>>) {
             modified: &modified,
             primary: &caret,
             carets: &carets,
-            focused: borrowed.focused,
-            linked: borrowed.linked,
+            focused: session.focused,
+            linked: session.linked,
         },
     );
 }
@@ -302,8 +347,9 @@ fn refresh_preview(session: &mut Session) {
         session.preview_found.clear();
         return;
     }
+    let editor = session.editor.borrow();
     session.preview_found = search::find_range(
-        session.editor.text(),
+        editor.text(),
         &session.preview_query,
         session.preview_options,
         session.preview_file_size,
@@ -334,12 +380,36 @@ fn preview_highlights(session: &Session) -> Vec<crate::view::document::Highlight
 }
 
 pub fn changed(session: &Rc<RefCell<Session>>) {
-    session.borrow_mut().search_from = None;
-    redraw(session);
+    let doc_id = session.borrow().doc_id;
     let pane = session.borrow().pane;
+    session.borrow_mut().search_from = None;
+
+    // 同じ doc_id を表示しているすべてのセッション（View）を再描画
+    redraw_doc(doc_id, Some(pane));
+
     let callback = ON_CHANGE.with(|slot| slot.borrow().clone());
     if let Some(callback) = callback {
         callback(pane);
+    }
+}
+
+/// 同一の Document Model を表示しているすべてのペイン（View）を再描画します。
+pub fn redraw_doc(doc_id: usize, origin_pane: Option<usize>) {
+    let sessions = PANES.with(|panes| {
+        panes
+            .borrow()
+            .iter()
+            .filter(|s| s.borrow().doc_id == doc_id)
+            .cloned()
+            .collect::<Vec<_>>()
+    });
+    for s in sessions {
+        let is_origin = origin_pane.is_some_and(|p| p == s.borrow().pane);
+        if is_origin {
+            redraw(&s);
+        } else {
+            scrolled(&s);
+        }
     }
 }
 
@@ -347,13 +417,14 @@ pub fn changed(session: &Rc<RefCell<Session>>) {
 pub fn redraw(session: &Rc<RefCell<Session>>) {
     {
         let session = session.borrow();
-        let caret = caret_of(&session);
-        let carets = carets_of(&session);
+        let editor = session.editor.borrow();
+        let caret = caret_of(&session, &editor);
+        let carets = carets_of(&session, &editor);
         let highlights = preview_highlights(&session);
-        let modified = session.editor.modified_lines();
-        let sels = session.editor.sels();
+        let modified = editor.modified_lines();
+        let sels = editor.sels();
         session.view.draw(
-            session.editor.text(),
+            editor.text(),
             &Overlay {
                 sels: &sels,
                 highlights: &highlights,
@@ -387,17 +458,18 @@ pub(super) fn thumb_moved(session: &Rc<RefCell<Session>>) {
     }
 }
 
-/// ビューがスクロールされた後に再度描画するため、表示された行がページに配置されます。 [`redraw`] とは異なり、これはユーザーがスクロールしたビューを残し、キャレットに移動しません。
+/// ビューがスクロールされた後に再度描画するため、表示された行がページに配置されます。 redraw とは異なり、これはユーザーがスクロールしたビューを残し、キャレットに移動しません。
 pub fn scrolled(session: &Rc<RefCell<Session>>) {
     {
         let session = session.borrow();
-        let caret = caret_of(&session);
-        let carets = carets_of(&session);
+        let editor = session.editor.borrow();
+        let caret = caret_of(&session, &editor);
+        let carets = carets_of(&session, &editor);
         let highlights = preview_highlights(&session);
-        let modified = session.editor.modified_lines();
-        let sels = session.editor.sels();
+        let modified = editor.modified_lines();
+        let sels = editor.sels();
         session.view.repaint(
-            session.editor.text(),
+            editor.text(),
             &Overlay {
                 sels: &sels,
                 highlights: &highlights,
@@ -417,18 +489,17 @@ pub fn scrolled(session: &Rc<RefCell<Session>>) {
 }
 
 /// 1 つのキャレットで両方のケースを説明するため、描画に選択するモードはありません。
-fn caret_of(session: &Session) -> Caret<'_> {
+fn caret_of<'a>(session: &'a Session, editor: &'a Editor) -> Caret<'a> {
     Caret {
-        at: session.editor.primary().head,
-        inside: session.editor.nested_cursor(),
+        at: editor.primary().head,
+        inside: editor.nested_cursor(),
         composing: (!session.preedit.is_empty()).then_some(session.preedit.as_str()),
     }
 }
 
-fn carets_of(session: &Session) -> Vec<Caret<'_>> {
-    let last = session.editor.cursors().len().saturating_sub(1);
-    session
-        .editor
+fn carets_of<'a>(session: &'a Session, editor: &'a Editor) -> Vec<Caret<'a>> {
+    let last = editor.cursors().len().saturating_sub(1);
+    editor
         .cursors()
         .iter()
         .enumerate()
@@ -460,64 +531,28 @@ pub fn focus() {
     }
 }
 
-/// 脇に置かれた文書 1 つ分。別のタブが表示されている間、ここに保ちます。
-pub struct Parked {
-    editor: Editor,
-}
-
-impl Parked {
-    /// 画面の外にある文書にも、届いた行は同じように入ります。
-    pub fn feed(&mut self, from: usize, lines: &[String]) {
-        self.editor.feed(
-            from,
-            lines.iter().map(|line| document::read_line(line)).collect(),
-        );
-    }
-
-    /// 画面の外にある文書も、本体の巻き戻しに合わせます。
-    pub fn apply_restored(&mut self, state: &str, touched_from: usize, line_count: usize) {
-        self.editor.apply_restored(state, touched_from, line_count);
-    }
-}
-
-/// ペインのドキュメントを取り出して、別のペインがその場所に移動できるようにします。
-pub fn park(pane: usize) -> Option<Parked> {
-    let session = pane_session(pane)?;
-    let editor = std::mem::take(&mut session.borrow_mut().editor);
-    Some(Parked { editor })
-}
-
-/// 「ペイン」に保留されているドキュメント、または空のドキュメントを表示します。
-pub fn restore(pane: usize, parked: Option<Parked>) {
-    let Some(session) = pane_session(pane) else {
-        return;
-    };
-    {
-        let mut borrowed = session.borrow_mut();
-        borrowed.preedit.clear();
-        borrowed.editor = parked.map(|parked| parked.editor).unwrap_or_default();
-    }
-    changed(&session);
-}
-
 /// 読み込んだ内容を表示し、文書の本体（1 行の空文書）へまるごと届くようにします。
 /// 下書きの復元で使われます。
 pub fn load(text: &str) {
     let Some(session) = session() else { return };
     session
-        .borrow_mut()
+        .borrow()
         .editor
+        .borrow_mut()
         .load_contents(document::read(text));
     changed(&session);
 }
 
 /// 行数だけ分かっている文書を出します。行は見えた場所から取り寄せられます。
-/// 行数は走査中の途中値なので、確定は [`set_line_count`] で届く。
+/// 行数は走査中の途中値なので、確定は [set_line_count] で届く。
 pub fn load_pending(line_count: usize) {
     let Some(session) = session() else { return };
     {
+        let borrowed = session.borrow();
+        borrowed.editor.borrow_mut().load_pending(line_count);
+    }
+    {
         let mut borrowed = session.borrow_mut();
-        borrowed.editor.load_pending(line_count);
         borrowed.counting = true;
         borrowed.jump_end = None;
     }
@@ -531,11 +566,14 @@ pub fn set_line_count(pane: usize, count: usize) {
         return;
     };
     {
+        let borrowed = session.borrow();
+        borrowed.editor.borrow_mut().resize_pending(count);
+    }
+    {
         let mut borrowed = session.borrow_mut();
-        borrowed.editor.resize_pending(count);
         borrowed.counting = false;
         if let Some(shift) = borrowed.jump_end.take() {
-            borrowed.editor.move_document_edge(true, shift);
+            borrowed.editor.borrow_mut().move_document_edge(true, shift);
         }
     }
     redraw(&session);
@@ -551,35 +589,31 @@ pub fn feed_pane(pane: usize, from: usize, lines: &[String]) {
     let Some(session) = pane_session(pane) else {
         return;
     };
-    session.borrow_mut().editor.feed(
+    session.borrow().editor.borrow_mut().feed(
         from,
         lines.iter().map(|line| document::read_line(line)).collect(),
     );
     {
-        let mut borrowed = session.borrow_mut();
-        if borrowed.editor.resident_lines() > RESIDENT_LIMIT {
+        let borrowed = session.borrow();
+        let mut editor = borrowed.editor.borrow_mut();
+        if editor.resident_lines() > RESIDENT_LIMIT {
             let drawn = borrowed.view.drawn();
-            borrowed
-                .editor
-                .evict_far(drawn.start.saturating_sub(RESIDENT_KEEP)..drawn.end + RESIDENT_KEEP);
+            editor.evict_far(drawn.start.saturating_sub(RESIDENT_KEEP)..drawn.end + RESIDENT_KEEP);
         }
     }
-    // 描き直すのは届いた行が画面に見えるときだけ。見えない行のために毎回
-    // 描き直すと、取り寄せより描画が高くつく。描き直しはユーザーの置いた
-    // スクロールを尊重する。届いた行のためにキャレットへ跳んではいけない。
+    // 描き直すのは届いた行が画面に見えるときだけ。
     let (visible, follows_caret) = {
         let borrowed = session.borrow();
+        let editor = borrowed.editor.borrow();
         let drawn = borrowed.view.drawn();
         (
             from < drawn.end && from + lines.len() > drawn.start,
-            drawn.contains(&borrowed.editor.primary().head.line),
+            drawn.contains(&editor.primary().head.line),
         )
     };
     if visible {
         session.borrow().view.invalidate();
         if follows_caret {
-            // Ctrl+End など、目的の行の中身が届いた。目的行を含む窓を直接
-            // 描き直してそこへ着地する。スクロール座標から窓を推定し直さない。
             redraw(&session);
         } else {
             scrolled(&session);
@@ -587,11 +621,12 @@ pub fn feed_pane(pane: usize, from: usize, lines: &[String]) {
     }
 }
 
-/// たまった編集を、文書の本体へ送れる形で渡します。何もなければ `None`。
+/// たまった編集を、文書の本体へ送れる形で渡します。何もなければ None。
 pub fn take_flush(pane: usize) -> Option<FlushBatch> {
     let session = pane_session(pane)?;
-    let mut borrowed = session.borrow_mut();
-    take_flush_of(&mut borrowed.editor)
+    let borrowed = session.borrow();
+    let mut editor = borrowed.editor.borrow_mut();
+    take_flush_of(&mut editor)
 }
 
 /// 入れ替えの行番号は本体側（編集前）の行番号で、後ろの入れ替えから先に
@@ -644,34 +679,23 @@ pub struct FlushEdit {
     pub lines: Vec<String>,
 }
 
-/// 文書の本体が巻き戻ったのに合わせます。
-pub fn apply_restored(pane: usize, state: &str, touched_from: usize, line_count: usize) {
-    let Some(session) = pane_session(pane) else {
-        return;
-    };
-    session
-        .borrow_mut()
-        .editor
-        .apply_restored(state, touched_from, line_count);
-    redraw(&session);
-}
-
 pub fn stats() -> (usize, usize) {
     session()
-        .map(|session| session.borrow().editor.text().stats())
+        .map(|session| session.borrow().editor.borrow().text().stats())
         .unwrap_or((0, 1))
 }
 
 /// 入力を受けるペインの文書が手元に全部あるか。検索や置換が文書の本体の
 /// 走査を要るかの見分け。
 pub fn fully_resident() -> bool {
-    session().is_some_and(|session| session.borrow().editor.text().absent_lines() == 0)
+    session().is_some_and(|session| session.borrow().editor.borrow().text().absent_lines() == 0)
 }
 
 /// 保存などで文書がファイルと一致した際、変更行マーカーをクリアします。
 pub fn clear_modified(pane: usize) {
     if let Some(session) = pane_session(pane) {
-        session.borrow_mut().editor.clear_modified();
-        redraw(&session);
+        let doc_id = session.borrow().doc_id;
+        session.borrow().editor.borrow_mut().clear_modified();
+        redraw_doc(doc_id, None);
     }
 }

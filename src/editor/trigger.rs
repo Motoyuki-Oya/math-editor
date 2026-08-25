@@ -20,15 +20,18 @@ enum Seed {
 
 /// 構造ショートカットを完了する入力文字を処理し、入力を消費したかを返します。
 pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
-    let sel = session.borrow().editor.primary();
-    if !sel.is_caret() {
+    let (sel, is_nested, sels) = {
+        let borrowed = session.borrow();
+        let editor = borrowed.editor.borrow();
+        (
+            editor.primary(),
+            editor.nested_cursor().is_some(),
+            editor.sels(),
+        )
+    };
+    if !sel.is_caret() || is_nested {
         return false;
     }
-    // 入れ子のRowでは構造編集側が同じショートカットを処理します。
-    if session.borrow().editor.nested_cursor().is_some() {
-        return false;
-    }
-    let sels = session.borrow().editor.sels();
     if sels.len() > 1 {
         let all_trigger = sels.iter().all(|sel| {
             sel.is_caret()
@@ -39,9 +42,10 @@ pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
             return false;
         }
         {
-            let mut borrowed = session.borrow_mut();
-            borrowed.editor.start_structure();
-            borrowed.editor.insert_text(&c.to_string());
+            let borrowed = session.borrow();
+            let mut editor = borrowed.editor.borrow_mut();
+            editor.start_structure();
+            editor.insert_text(&c.to_string());
         }
         session::changed(session);
         return true;
@@ -54,17 +58,19 @@ pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
     match seed {
         Seed::Text(text) => {
             session
-                .borrow_mut()
+                .borrow()
                 .editor
+                .borrow_mut()
                 .replace_range(from, sel.head, &text);
             session::changed(session);
             true
         }
         seed => {
             {
-                let mut borrowed = session.borrow_mut();
+                let borrowed = session.borrow();
+                let mut editor = borrowed.editor.borrow_mut();
                 // ショートカット文字列の置換と構造の配置を、履歴上の1操作にまとめます。
-                borrowed.editor.one_step(|editor| {
+                editor.one_step(|editor| {
                     editor.replace_range(from, sel.head, "");
                     editor.start_structure();
                     // 本文トリガーの編集状態は、今回作る構造が完成した時点で終了します。
@@ -98,9 +104,9 @@ pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
 
 /// キャレットの前にある、構造Nodeを空白として読み替えた文字列。
 fn text_before(session: &Rc<RefCell<Session>>, at: Pos) -> String {
-    let borrowed = session.borrow();
-    borrowed
-        .editor
+    let editor_rc = session.borrow().editor.clone();
+    let editor = editor_rc.borrow();
+    editor
         .text()
         .line(at.line)
         .iter()

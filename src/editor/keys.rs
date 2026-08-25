@@ -42,7 +42,8 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
             event.prevent_default();
             return;
         }
-        let editor = &mut borrowed.editor;
+        let mut editor = borrowed.editor.borrow_mut();
+        let editor = &mut *editor;
         match (ctrl, key.as_str()) {
             (_, "ArrowLeft") => editor.move_h(false, shift),
             (_, "ArrowRight") => editor.move_h(true, shift),
@@ -95,7 +96,7 @@ fn apply_linked_edit(
         return false;
     }
     for session in sessions {
-        let did = edit(&mut session.borrow_mut().editor);
+        let did = edit(&mut session.borrow().editor.borrow_mut());
         match did {
             Did::Changed => changed(&session),
             Did::Moved => redraw(&session),

@@ -13,7 +13,8 @@ use crate::view::measure::Hit;
 /// ビュー内の点の位置、深さに関係なく: テキストと構造について同じ質問が行われ、1 つの答えで両方がカバーされます。
 fn hit_at(session: &Rc<RefCell<Session>>, x: f64, y: f64) -> Hit {
     let borrowed = session.borrow();
-    borrowed.view.hit(borrowed.editor.text(), x, y)
+    let editor = borrowed.editor.borrow();
+    borrowed.view.hit(editor.text(), x, y)
 }
 
 /// クリックした入れ子Rowへキャレットを置き、そこで処理したかを返します。
@@ -27,22 +28,23 @@ fn click_in_structure(
     let Hit::Inside(at, cursor) = hit else {
         return false;
     };
-    let mut borrowed = session.borrow_mut();
+    let borrowed = session.borrow();
+    let mut editor = borrowed.editor.borrow_mut();
     if add {
         return if replace {
-            borrowed.editor.select_nested(*at, cursor.clone())
+            editor.select_nested(*at, cursor.clone())
         } else {
-            borrowed.editor.add_nested(*at, cursor.clone())
+            editor.add_nested(*at, cursor.clone())
         };
     }
     if !extend {
-        return borrowed.editor.enter_at(*at, cursor);
+        return editor.enter_at(*at, cursor);
     }
     // 入れ子Row内で始めた選択は、同じ文書行のそのRow内に留めます。
-    if borrowed.editor.nested_cursor().is_none() || borrowed.editor.primary().head != *at {
+    if editor.nested_cursor().is_none() || editor.primary().head != *at {
         return false;
     }
-    borrowed.editor.extend_nested(cursor)
+    editor.extend_nested(cursor)
 }
 
 pub fn on_mousedown(session: &Rc<RefCell<Session>>, event: MouseEvent) {
@@ -63,19 +65,21 @@ pub fn on_mousedown(session: &Rc<RefCell<Session>>, event: MouseEvent) {
     leave_structure(session);
     let pos = {
         let borrowed = session.borrow();
-        borrowed.view.pos_at_point(borrowed.editor.text(), x, y)
+        let editor = borrowed.editor.borrow();
+        borrowed.view.pos_at_point(editor.text(), x, y)
     };
     {
-        let mut borrowed = session.borrow_mut();
-        borrowed.dragging = true;
+        session.borrow_mut().dragging = true;
+        let borrowed = session.borrow();
+        let mut editor = borrowed.editor.borrow_mut();
         if crossed {
-            borrowed.editor.set_caret(pos);
+            editor.set_caret(pos);
         } else if adds {
-            borrowed.editor.add_caret(pos);
+            editor.add_caret(pos);
         } else if event.shift_key() {
-            borrowed.editor.extend_to(pos);
+            editor.extend_to(pos);
         } else {
-            borrowed.editor.set_caret(pos);
+            editor.set_caret(pos);
         }
     }
     focus();
@@ -87,46 +91,54 @@ pub fn on_mousemove(session: &Rc<RefCell<Session>>, event: MouseEvent) {
         return;
     }
     let (x, y) = (event.client_x() as f64, event.client_y() as f64);
-    if session.borrow().editor.nested_cursor().is_some() {
+    if session.borrow().editor.borrow().nested_cursor().is_some() {
         // 入れ子Rowから外へドラッグした場合は、それを含む構造Node全体を選択します。
         let hit = hit_at(session, x, y);
         if !click_in_structure(session, &hit, true, false, false) {
-            session.borrow_mut().editor.select_structure();
+            session.borrow().editor.borrow_mut().select_structure();
         }
         redraw(session);
         return;
     }
     let pos = {
         let borrowed = session.borrow();
-        borrowed.view.pos_at_point(
-            borrowed.editor.text(),
+        let editor = borrowed.editor.borrow();
+        let p = borrowed.view.pos_at_point(
+            editor.text(),
             event.client_x() as f64,
             event.client_y() as f64,
-        )
+        );
+        drop(editor);
+        drop(borrowed);
+        p
     };
-    session.borrow_mut().editor.extend_to(pos);
+    session.borrow().editor.borrow_mut().extend_to(pos);
     redraw(session);
 }
 
 pub fn on_dblclick(session: &Rc<RefCell<Session>>, event: MouseEvent) {
     // 入れ子Rowでは外側の文書選択へ広げず、そのRowを選択単位にします。
-    if session.borrow().editor.nested_cursor().is_some() {
-        session.borrow_mut().editor.select_all();
+    if session.borrow().editor.borrow().nested_cursor().is_some() {
+        session.borrow().editor.borrow_mut().select_all();
         redraw(session);
         return;
     }
     let pos = {
         let borrowed = session.borrow();
-        borrowed.view.pos_at_point(
-            borrowed.editor.text(),
+        let editor = borrowed.editor.borrow();
+        let p = borrowed.view.pos_at_point(
+            editor.text(),
             event.client_x() as f64,
             event.client_y() as f64,
-        )
+        );
+        drop(editor);
+        drop(borrowed);
+        p
     };
     {
-        let mut borrowed = session.borrow_mut();
-        borrowed.editor.set_caret(pos);
-        borrowed.editor.add_next_occurrence();
+        let borrowed = session.borrow();
+        borrowed.editor.borrow_mut().set_caret(pos);
+        borrowed.editor.borrow_mut().add_next_occurrence();
     }
     redraw(session);
 }
