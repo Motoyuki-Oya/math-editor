@@ -8,6 +8,7 @@
 //!
 //! ページには見えている行だけがあります。どの行を出すか、描かれていない行の場所取り、ビューをどこへ持っていくかは [`crate::view::viewport`] の仕事で、ここは頼まれた行を描くだけです。
 
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 
 use web_sys::{Document, Element, HtmlElement};
@@ -31,6 +32,13 @@ pub struct Highlight {
 /// 線の横に表示される数字。ガターだけに配置されるため、テキストの描画、測定、ヒットテストには入りません。
 const NUMBER_CLASS: &str = "mn-number";
 
+#[derive(Default, PartialEq, Eq)]
+struct RulerCache {
+    total_lines: usize,
+    modified: Vec<usize>,
+    highlights: Vec<usize>,
+}
+
 pub struct View {
     /// エディター全体の箱。マウスとホイールを受け取ります。縦にはスクロール
     /// しません。文書はファイルを覗く窓で、ページに置くのは見えている行だけです。
@@ -46,6 +54,10 @@ pub struct View {
     ruler: Element,
     /// どの行をページに出すかと、窓をどこへ持っていくか。
     viewport: Viewport,
+    /// スクロールバー上の変更・ハイライトマーカーの前回描画状態キャッシュ。
+    ruler_cache: RefCell<RulerCache>,
+    /// 前回のガター桁数（桁数が変わった時だけCSSスタイル更新を行う）。
+    gutter_digits: Cell<usize>,
 }
 
 /// キャレットがどこにあるか、描画がそれについて知る必要があるのはそれだけです。テキスト内の場所、キャレットがそこにある構造のどの深さまで到達しているか、IME がそこで何を構成しているかです。モードはありません。同じキャレットで両方のケースを説明します。
@@ -119,6 +131,8 @@ impl View {
             gutter,
             overlay,
             ruler,
+            ruler_cache: RefCell::new(RulerCache::default()),
+            gutter_digits: Cell::new(0),
         })
     }
 
@@ -221,13 +235,19 @@ impl View {
     fn fit_numbers(&self, count: usize) {
         let style = self.root.style();
         if !crate::settings::line_numbers() {
-            style.remove_property("--setting-gutter").ok();
-            self.gutter.set_inner_html("");
+            if self.gutter_digits.get() != 0 {
+                self.gutter_digits.set(0);
+                style.remove_property("--setting-gutter").ok();
+                self.gutter.set_inner_html("");
+            }
             return;
         }
         let digits = count.max(1).to_string().len();
-        let width = format!("calc({digits}ch + 20px)");
-        style.set_property("--setting-gutter", &width).ok();
+        if self.gutter_digits.get() != digits {
+            self.gutter_digits.set(digits);
+            let width = format!("calc({digits}ch + 20px)");
+            style.set_property("--setting-gutter", &width).ok();
+        }
     }
 
     fn rebuild_numbers(&self, window: &Range<usize>, modified: &[usize]) {
@@ -244,8 +264,8 @@ impl View {
                 continue;
             };
 
-            // 変更行の連続した縦ラインを描画
-            if modified.contains(&line) {
+            // 変更行の連続した縦ラインを描画（modified はソート済みなので二分探索）
+            if modified.binary_search(&line).is_ok() {
                 let holder_rect = holder.get_bounding_client_rect();
                 let line_top = holder_rect.top() - origin;
                 let line_height = holder_rect.height();
@@ -275,8 +295,25 @@ impl View {
 
     /// スクロールバーのトラック上に変更行・検索ヒット位置のマーカー（Overview Ruler）を描画します。
     fn draw_ruler(&self, doc: &Document, total_lines: usize, state: &Overlay<'_>) {
+        let next_highlights: Vec<usize> = state.highlights.iter().map(|hl| hl.line).collect();
+        {
+            let cache = self.ruler_cache.borrow();
+            if cache.total_lines == total_lines
+                && cache.modified.as_slice() == state.modified
+                && cache.highlights == next_highlights
+            {
+                // 差分がなければ DOM 再生成をスキップ
+                return;
+            }
+        }
+
         self.ruler.set_inner_html("");
         if total_lines == 0 {
+            *self.ruler_cache.borrow_mut() = RulerCache {
+                total_lines: 0,
+                modified: Vec::new(),
+                highlights: Vec::new(),
+            };
             return;
         }
         let total = total_lines as f64;
@@ -315,6 +352,12 @@ impl View {
                 append(&self.ruler, &mark);
             }
         }
+
+        *self.ruler_cache.borrow_mut() = RulerCache {
+            total_lines,
+            modified: state.modified.to_vec(),
+            highlights: next_highlights,
+        };
     }
 
     fn draw_line(
