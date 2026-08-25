@@ -81,18 +81,6 @@ impl Viewport {
     /// 行の要素は、子の中での位置ではなく、その行が表す行によって決まります。
     /// ページ内には行の一部のみが存在します。
     pub(super) fn line_element(&self, line: usize) -> Option<Element> {
-        let drawn = self.drawn.borrow();
-        if drawn.contains(&line) {
-            let index = (line - drawn.start) as u32;
-            if let Some(child) = self.document.children().item(index) {
-                if child
-                    .get_attribute(LINE_ATTR)
-                    .is_some_and(|attr| attr.parse::<usize>().ok() == Some(line))
-                {
-                    return Some(child);
-                }
-            }
-        }
         self.document
             .query_selector(&format!("[{LINE_ATTR}=\"{line}\"]"))
             .ok()
