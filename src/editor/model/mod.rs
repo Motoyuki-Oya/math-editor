@@ -628,7 +628,9 @@ pub(crate) mod tests {
         // 100,000〜100,010 行に同一キーワード "target_keyword" を含む行を配置
         let mut lines = Vec::new();
         for i in 0..10 {
-            lines.push(SourceLine::Plain(format!("let value_{i} = target_keyword + {i};")));
+            lines.push(SourceLine::Plain(format!(
+                "let value_{i} = target_keyword + {i};"
+            )));
         }
         editor.feed(100_000, lines);
 
@@ -638,7 +640,10 @@ pub(crate) mod tests {
         assert!(editor.add_next_occurrence()); // 1つ目の単語を選択
         assert_eq!(
             editor.primary(),
-            Sel::range(Pos::new(100_000, col), Pos::new(100_000, col + "target_keyword".len()))
+            Sel::range(
+                Pos::new(100_000, col),
+                Pos::new(100_000, col + "target_keyword".len())
+            )
         );
 
         // さらに Ctrl+D を 3 回押して後続 3 行の "target_keyword" も選択

@@ -511,7 +511,8 @@ impl Text {
             }
             if let Some((min, max)) = self.resident_span.get() {
                 let delta = to.line - from.line;
-                self.resident_span.set(Some((min.min(from.line), max.saturating_sub(delta))));
+                self.resident_span
+                    .set(Some((min.min(from.line), max.saturating_sub(delta))));
             }
             return from;
         }
@@ -527,7 +528,8 @@ impl Text {
         }
         if let Some((min, max)) = self.resident_span.get() {
             let delta = to.line - from.line;
-            self.resident_span.set(Some((min.min(from.line), max.saturating_sub(delta))));
+            self.resident_span
+                .set(Some((min.min(from.line), max.saturating_sub(delta))));
         }
         from
     }
@@ -562,7 +564,8 @@ impl Text {
                 self.total_chars.set(Some(c + added_chars));
             }
             if let Some((min, max)) = self.resident_span.get() {
-                self.resident_span.set(Some((min.min(at.line), max.max(at.line + 1))));
+                self.resident_span
+                    .set(Some((min.min(at.line), max.max(at.line + 1))));
             }
             return Pos::new(at.line, col);
         }
@@ -583,7 +586,10 @@ impl Text {
         }
         if let Some((min, max)) = self.resident_span.get() {
             let shift = what_len.saturating_sub(1);
-            self.resident_span.set(Some((min.min(at.line), (max + shift).max(at.line + what_len))));
+            self.resident_span.set(Some((
+                min.min(at.line),
+                (max + shift).max(at.line + what_len),
+            )));
         }
         end
     }

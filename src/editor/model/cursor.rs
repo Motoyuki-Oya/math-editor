@@ -124,11 +124,13 @@ pub fn find_after(text: &Text, needle: &[Node], from: Pos, taken: &[Pos]) -> Opt
         return None;
     }
     let total_lines = text.line_count();
-    let passes = if from == Pos::default() {
-        vec![0..total_lines]
+    let mut passes = Vec::with_capacity(2);
+    if from == Pos::default() {
+        passes.push(0..total_lines);
     } else {
-        vec![from.line..total_lines, 0..from.line + 1]
-    };
+        passes.push(from.line..total_lines);
+        passes.push(0..from.line + 1);
+    }
     for (pass_idx, range) in passes.into_iter().enumerate() {
         for line in range {
             if text.is_absent(line) {

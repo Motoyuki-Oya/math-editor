@@ -1654,6 +1654,11 @@ mod tests {
                 &|| false,
             )
             .unwrap();
+        println!(
+            "single native job ({} hits): {:?}",
+            searched.hits.len(),
+            start.elapsed()
+        );
         let start = std::time::Instant::now();
         let estimate = doc
             .estimate_matches(&regex::Regex::new("fox").unwrap())
@@ -1675,7 +1680,7 @@ mod tests {
             for i in 0..10 {
                 use std::io::Write;
                 if i > 0 {
-                    write!(writer, "\n").unwrap();
+                    writeln!(writer).unwrap();
                 }
                 write!(writer, "{big_line}").unwrap();
             }
@@ -1706,7 +1711,7 @@ mod tests {
             for i in 0..100_000 {
                 use std::io::Write;
                 if i > 0 {
-                    write!(writer, "\n").unwrap();
+                    writeln!(writer).unwrap();
                 }
                 write!(writer, "line {i} with some content").unwrap();
             }
@@ -1719,9 +1724,22 @@ mod tests {
         assert_eq!(doc.line_count(), 100_000);
         // 先頭、中間、末尾の行を正確にseek読みできるか
         let middle = doc.read(50_000, 3).unwrap();
-        assert_eq!(middle, vec!["line 50000 with some content", "line 50001 with some content", "line 50002 with some content"]);
+        assert_eq!(
+            middle,
+            vec![
+                "line 50000 with some content",
+                "line 50001 with some content",
+                "line 50002 with some content"
+            ]
+        );
         let tail = doc.read(99_998, 2).unwrap();
-        assert_eq!(tail, vec!["line 99998 with some content", "line 99999 with some content"]);
+        assert_eq!(
+            tail,
+            vec![
+                "line 99998 with some content",
+                "line 99999 with some content"
+            ]
+        );
         std::fs::remove_file(path).ok();
     }
 }
