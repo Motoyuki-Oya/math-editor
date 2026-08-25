@@ -137,8 +137,9 @@ pub fn on_dblclick(session: &Rc<RefCell<Session>>, event: MouseEvent) {
     };
     {
         let borrowed = session.borrow();
-        borrowed.editor.borrow_mut().set_caret(pos);
-        borrowed.editor.borrow_mut().add_next_occurrence();
+        let mut editor = borrowed.editor.borrow_mut();
+        editor.set_caret(pos);
+        editor.add_next_occurrence();
     }
     redraw(session);
 }

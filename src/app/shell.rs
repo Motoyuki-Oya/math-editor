@@ -423,6 +423,20 @@ impl Shell {
             // わざと捨てた。
             drafts::forget(tab);
             tab.release_document();
+            let old_doc_id = tab.id.get_untracked();
+            // 他のペインで同じドキュメントが表示されていなければ Document Model も解放する。
+            let other_showing = shell.panes.with_untracked(|panes| {
+                panes.iter().any(|p| {
+                    p.key != pane.key
+                        && p.tabs.with_untracked(|tabs| {
+                            tabs.iter()
+                                .any(|t| t.id.get_untracked() == old_doc_id)
+                        })
+                })
+            });
+            if !other_showing {
+                editor::release_doc(old_doc_id);
+            }
             let current = pane.current.get_untracked();
             if pane.tabs.with_untracked(Vec::len) == 1 {
                 // 最後のタブは空のままなので、常にドキュメントが存在します。下書きに関しては、新しいタブになります。
@@ -586,8 +600,9 @@ impl Shell {
         going.park();
         // タブが最初に移動します。タブが移動するまでは、タブの元のペインがタブを所有します。
         let moved = going.tabs.get_untracked();
-        staying.tabs.update(|tabs| tabs.extend(moved));
-        for tab in going.tabs.get_untracked() {
+        // staying に既にあるタブと重複しない going のドキュメントだけ解放する。
+        // 判定を extend の前にしないと、moved が staying に含まれて常に true になる。
+        for tab in &moved {
             let doc_id = tab.id.get_untracked();
             let in_staying = staying
                 .tabs
@@ -596,6 +611,7 @@ impl Shell {
                 editor::release_doc(doc_id);
             }
         }
+        staying.tabs.update(|tabs| tabs.extend(moved));
         self.panes.update(|panes| {
             panes.remove(index);
         });
