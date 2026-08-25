@@ -626,6 +626,11 @@ fn read_drafts(app: tauri::AppHandle) -> Vec<Draft> {
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
+            if let Ok(meta) = entry.metadata() {
+                if meta.len() > 10 * 1024 * 1024 {
+                    return None;
+                }
+            }
             let id = path.file_stem()?.to_string_lossy().into_owned();
             let file = std::fs::read_to_string(&path).ok()?;
             let (first, contents) = file.split_once('\n').unwrap_or(("", file.as_str()));
