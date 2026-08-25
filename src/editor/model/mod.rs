@@ -133,6 +133,10 @@ impl Editor {
         self.text.evict_far(keep, &pinned);
     }
 
+    pub fn forget_range(&mut self, range: std::ops::Range<usize>) {
+        self.text.forget_range(range);
+    }
+
     /// 届いた行を `from` から順に入れます。既にある行はそのまま。
     pub fn feed(&mut self, from: usize, lines: Vec<crate::structure::text::SourceLine>) {
         for (offset, line) in lines.into_iter().enumerate() {

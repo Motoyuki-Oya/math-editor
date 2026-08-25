@@ -251,6 +251,34 @@ impl Shell {
         })
     }
 
+    /// バックグラウンド走査の確定行数を、タブが移動・並べ替え済みでも
+    /// 文書ハンドルから現在のペインまたは駐車中Editorへ届ける。
+    pub(super) fn document_scanned(&self, handle: u64, count: usize) -> bool {
+        let panes = self.panes.get_untracked();
+        for pane in panes {
+            let current = pane.current.get_untracked();
+            let tabs = pane.tabs.get_untracked();
+            for (index, tab) in tabs.into_iter().enumerate() {
+                if tab.doc.get_untracked() != Some(handle) {
+                    continue;
+                }
+                if index == current {
+                    editor::set_line_count(pane.editor_pane(), count);
+                } else {
+                    tab.parked.update_value(|parked| {
+                        if let Some(parked) = parked {
+                            parked.set_line_count(count);
+                        }
+                    });
+                }
+                self.status.set("行数を確定しました".into());
+                self.refresh();
+                return true;
+            }
+        }
+        false
+    }
+
     /// 届いた行をタブの文書へ入れます。タブが画面上ならそのペインへ、
     /// 駐車中ならその文書へ。
     pub(super) fn feed(&self, tab: Tab, from: usize, lines: &[String]) {
@@ -629,12 +657,10 @@ impl Shell {
                     shell.mark_clean();
                     // 行数はバックグラウンドで走査中。確定したら手元へ合わせる。
                     let handle = doc.handle;
-                    let editor_pane = pane.editor_pane();
                     spawn_local(async move {
                         match ipc::finish_document(handle).await {
                             Ok(count) => {
-                                editor::set_line_count(editor_pane, count);
-                                shell.refresh();
+                                shell.document_scanned(handle, count);
                             }
                             Err(error) => shell.status.set(error),
                         }

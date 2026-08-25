@@ -270,7 +270,11 @@ pub fn App() -> impl IntoView {
                 <span>{move || if shell.tab().dirty.get() { "未保存" } else { "保存済み" }}</span>
                 <span>{move || {
                     let (characters, lines) = shell.stats.get();
-                    format!("{characters} 文字 / {lines} 行")
+                    if lines == 0 {
+                        format!("{characters} 文字 / 行数確認中")
+                    } else {
+                        format!("{characters} 文字 / {lines} 行")
+                    }
                 }}</span>
                 <span class="status-message">{move || shell.status.get()}</span>
             </div>

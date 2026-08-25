@@ -313,6 +313,17 @@ impl Text {
         }
     }
 
+    /// EOF基準の仮ウィンドウなど、届き直す範囲を未着へ戻す。
+    pub fn forget_range(&mut self, range: std::ops::Range<usize>) {
+        let absent = Rc::new(Line::Absent);
+        for slot in self.lines.iter_mut().take(range.end).skip(range.start) {
+            if !matches!(slot.as_ref(), Line::Absent) {
+                *slot = absent.clone();
+                self.absent += 1;
+            }
+        }
+    }
+
     /// 文書の本体が巻き戻ったのに合わせる: `from` から先の手元の行を捨てて
     /// 届き直しを待ち、行数を合わせる。これは編集ではないので控えには残らない。
     pub fn reset_from(&mut self, from: usize, line_count: usize) {
@@ -669,6 +680,16 @@ mod tests {
         // 戻った行はまた届き直せる。
         text.fill_line(0, SourceLine::Plain("again".into()));
         assert_eq!(text.raw_line(0), Some("again"));
+    }
+
+    #[test]
+    fn forgetting_a_provisional_window_allows_it_to_be_filled_again() {
+        let mut text = Text::pending(3);
+        text.fill_line(1, SourceLine::Plain("tail".into()));
+        text.forget_range(1..2);
+        assert!(text.is_absent(1));
+        text.fill_line(1, SourceLine::Plain("remapped".into()));
+        assert_eq!(text.raw_line(1), Some("remapped"));
     }
 
     #[test]

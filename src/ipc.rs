@@ -155,6 +155,16 @@ pub async fn read_lines(handle: u64, from: usize, count: usize) -> Result<Vec<St
     serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
 }
 
+pub async fn read_tail(handle: u64, count: usize) -> Result<Vec<String>, String> {
+    #[derive(Serialize)]
+    struct Args {
+        handle: u64,
+        count: usize,
+    }
+    let value = call("read_tail", Args { handle, count }).await?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
+}
+
 pub async fn close_document(handle: u64) {
     #[derive(Serialize)]
     struct HandleArg {
