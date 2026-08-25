@@ -8,13 +8,17 @@ use web_sys::InputEvent;
 use super::clipboard::{self, Clip};
 use super::model::Did;
 use super::search::{self, Place, SearchOptions};
-use super::session::{changed, edit_sessions, focus, redraw, session, Session};
+use super::session::{changed, edit_sessions, focus, redraw, session, tail_locked, Session};
 use super::trigger;
 use crate::structure::ast::Node;
 
 pub fn on_input(session: &Rc<RefCell<Session>>, event: InputEvent) {
     let textarea = session.borrow().textarea.clone();
     let text = textarea.value();
+    if tail_locked(session) {
+        textarea.set_value("");
+        return;
+    }
     if session.borrow().composing {
         // まだ作成中。 `compositionupdate` は完了するまで描画します。
         update_composition(session, &text);
@@ -40,6 +44,10 @@ pub fn commit_composition(session: &Rc<RefCell<Session>>, event_text: &str) {
     let text = composition_text(event_text, textarea.value());
     textarea.set_value("");
     session.borrow_mut().preedit.clear();
+    if tail_locked(session) {
+        redraw(session);
+        return;
+    }
     if !text.is_empty() {
         insert_text(session, &text);
     } else {

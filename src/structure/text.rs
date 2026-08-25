@@ -6,7 +6,7 @@
 //! [`Text`] の複製（元に戻す履歴のスナップショット）は行を共有して、変更された
 //! 行だけが書き込み時に複製される。
 
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell};
 use std::rc::Rc;
 
 use super::ast::{Node, NodeKind, Row};
@@ -154,6 +154,10 @@ pub struct Text {
     changes: Vec<LineChange>,
     /// まだ届いていない行の数。残っているかを行を数えずに答えるための控え。
     absent: usize,
+    /// 手元にある文字数のキャッシュ（O(1) stats用）。
+    total_chars: Cell<Option<usize>>,
+    /// 常駐行（Absentでない行）が存在する行番号の最小・最大範囲 [min, max)。
+    resident_span: Cell<Option<(usize, usize)>>,
 }
 
 /// 行の中身が同じなら同じ文書。入れ替えの控えは持ち方の話で、意味ではない。
@@ -169,6 +173,8 @@ impl Default for Text {
             lines: vec![Rc::new(Line::Rows(Row::new()))],
             changes: Vec::new(),
             absent: 0,
+            total_chars: Cell::new(Some(0)),
+            resident_span: Cell::new(Some((0, 1))),
         }
     }
 }
@@ -186,18 +192,31 @@ impl Text {
         if lines.is_empty() {
             return Self::default();
         }
+        let mut total = 0;
+        let line_objs: Vec<Rc<Line>> = lines
+            .into_iter()
+            .map(|line| {
+                let (l, len) = match line {
+                    SourceLine::Plain(source) => {
+                        let len = source.chars().count();
+                        (Line::raw(source), len)
+                    }
+                    SourceLine::Parsed(row) => {
+                        let len = row.len();
+                        (Line::Rows(row), len)
+                    }
+                };
+                total += len;
+                Rc::new(l)
+            })
+            .collect();
+        let len = line_objs.len();
         Self {
-            lines: lines
-                .into_iter()
-                .map(|line| {
-                    Rc::new(match line {
-                        SourceLine::Plain(source) => Line::raw(source),
-                        SourceLine::Parsed(row) => Line::Rows(row),
-                    })
-                })
-                .collect(),
+            lines: line_objs,
             changes: Vec::new(),
             absent: 0,
+            total_chars: Cell::new(Some(total)),
+            resident_span: Cell::new(Some((0, len))),
         }
     }
 
@@ -279,6 +298,8 @@ impl Text {
             lines: vec![absent; line_count],
             changes: Vec::new(),
             absent: line_count,
+            total_chars: Cell::new(Some(0)),
+            resident_span: Cell::new(None),
         }
     }
 
@@ -286,20 +307,43 @@ impl Text {
     /// 本体から届き直す。まだ送っていない編集を含む行と `pinned`（選択や
     /// キャレットの行）は捨てない。これは編集ではないので控えには残らない。
     pub fn evict_far(&mut self, keep: std::ops::Range<usize>, pinned: &[usize]) {
+        let Some((span_start, span_end)) = self.resident_span.get() else {
+            return;
+        };
         let absent = Rc::new(Line::Absent);
-        for (i, slot) in self.lines.iter_mut().enumerate() {
+        let mut evicted_chars = 0;
+        let search_start = span_start;
+        let search_end = span_end.min(self.lines.len());
+        let mut new_min = usize::MAX;
+        let mut new_max = 0;
+
+        for i in search_start..search_end {
+            let slot = &mut self.lines[i];
+            if matches!(slot.as_ref(), Line::Absent) {
+                continue;
+            }
             if keep.contains(&i)
                 || pinned.contains(&i)
-                || matches!(slot.as_ref(), Line::Absent)
                 || self
                     .changes
                     .iter()
                     .any(|c| i >= c.from && i < c.from + c.inserted)
             {
+                new_min = new_min.min(i);
+                new_max = new_max.max(i + 1);
                 continue;
             }
+            evicted_chars += slot.len();
             *slot = absent.clone();
             self.absent += 1;
+        }
+        self.resident_span.set(if new_min < new_max {
+            Some((new_min, new_max))
+        } else {
+            None
+        });
+        if let Some(c) = self.total_chars.get() {
+            self.total_chars.set(Some(c.saturating_sub(evicted_chars)));
         }
     }
 
@@ -310,6 +354,17 @@ impl Text {
             let added = target - self.lines.len();
             self.lines.resize(target, Rc::new(Line::Absent));
             self.absent += added;
+        }
+    }
+
+    /// EOF基準の仮ウィンドウなど、届き直す範囲を未着へ戻す。
+    pub fn forget_range(&mut self, range: std::ops::Range<usize>) {
+        let absent = Rc::new(Line::Absent);
+        for slot in self.lines.iter_mut().take(range.end).skip(range.start) {
+            if !matches!(slot.as_ref(), Line::Absent) {
+                *slot = absent.clone();
+                self.absent += 1;
+            }
         }
     }
 
@@ -325,6 +380,14 @@ impl Text {
             .iter()
             .filter(|line| matches!(line.as_ref(), Line::Absent))
             .count();
+        self.total_chars.set(None);
+        if let Some((min, max)) = self.resident_span.get() {
+            if from <= min {
+                self.resident_span.set(None);
+            } else {
+                self.resident_span.set(Some((min, max.min(from))));
+            }
+        }
     }
 
     /// まだ届いていない行へ中身を入れる。既に届いた行はそのまま。
@@ -335,11 +398,23 @@ impl Text {
         if !matches!(slot.as_ref(), Line::Absent) {
             return;
         }
+        let added = match &source {
+            SourceLine::Plain(source) => source.chars().count(),
+            SourceLine::Parsed(row) => row.len(),
+        };
         *slot = Rc::new(match source {
             SourceLine::Plain(source) => Line::raw(source),
             SourceLine::Parsed(row) => Line::Rows(row),
         });
         self.absent -= 1;
+        if let Some(c) = self.total_chars.get() {
+            self.total_chars.set(Some(c + added));
+        }
+        let span = self.resident_span.get();
+        self.resident_span.set(Some(match span {
+            Some((min, max)) => (min.min(line), max.max(line + 1)),
+            None => (line, line + 1),
+        }));
     }
 
     /// `from` 以降で最初のまだ届いていない行。読み込みの続きがどこかを答える。
@@ -369,6 +444,7 @@ impl Text {
         }
         self.record(line, 1, 1);
         self.count_filled(line);
+        self.total_chars.set(None);
         Some(Rc::make_mut(&mut self.lines[line]).row_mut())
     }
 
@@ -415,11 +491,29 @@ impl Text {
         if from == to {
             return from;
         }
+        let removed_chars = if from.line == to.line {
+            to.col.saturating_sub(from.col)
+        } else {
+            let mut chars = self.line_len(from.line).saturating_sub(from.col);
+            for line in from.line + 1..to.line {
+                chars += self.line_len(line);
+            }
+            chars += to.col.min(self.line_len(to.line));
+            chars
+        };
         // 行を丸ごと消すときは、境界の行に触らない。大きいファイルの行の
         // 出し入れが、素の行を展開せずに済むように。
         if from.col == 0 && to.col == 0 {
             self.record(from.line, to.line - from.line, 0);
             self.drain_counting(from.line, to.line);
+            if let Some(c) = self.total_chars.get() {
+                self.total_chars.set(Some(c.saturating_sub(removed_chars)));
+            }
+            if let Some((min, max)) = self.resident_span.get() {
+                let delta = to.line - from.line;
+                self.resident_span
+                    .set(Some((min.min(from.line), max.saturating_sub(delta))));
+            }
             return from;
         }
         self.record(from.line, to.line - from.line + 1, 1);
@@ -429,6 +523,14 @@ impl Text {
         first.truncate(from.col);
         first.extend(tail);
         self.drain_counting(from.line + 1, to.line + 1);
+        if let Some(c) = self.total_chars.get() {
+            self.total_chars.set(Some(c.saturating_sub(removed_chars)));
+        }
+        if let Some((min, max)) = self.resident_span.get() {
+            let delta = to.line - from.line;
+            self.resident_span
+                .set(Some((min.min(from.line), max.saturating_sub(delta))));
+        }
         from
     }
 
@@ -447,6 +549,8 @@ impl Text {
         if what.is_empty() {
             return at;
         }
+        let what_len = what.len();
+        let added_chars: usize = what.iter().map(Row::len).sum();
         self.record(at.line, 1, what.len());
         self.count_filled(at.line);
         let first_line = Rc::make_mut(&mut self.lines[at.line]).row_mut();
@@ -456,6 +560,13 @@ impl Text {
             let col = at.col + only.len();
             first_line.extend(only);
             first_line.extend(tail);
+            if let Some(c) = self.total_chars.get() {
+                self.total_chars.set(Some(c + added_chars));
+            }
+            if let Some((min, max)) = self.resident_span.get() {
+                self.resident_span
+                    .set(Some((min.min(at.line), max.max(at.line + 1))));
+            }
             return Pos::new(at.line, col);
         }
         let last = what.pop().expect("more than one line");
@@ -470,14 +581,26 @@ impl Text {
             self.lines
                 .insert(at.line + 1 + offset, Rc::new(Line::Rows(line)));
         }
+        if let Some(c) = self.total_chars.get() {
+            self.total_chars.set(Some(c + added_chars));
+        }
+        if let Some((min, max)) = self.resident_span.get() {
+            let shift = what_len.saturating_sub(1);
+            self.resident_span.set(Some((
+                min.min(at.line),
+                (max + shift).max(at.line + what_len),
+            )));
+        }
         end
     }
 
     pub fn stats(&self) -> (usize, usize) {
-        (
-            self.lines.iter().map(|line| line.len()).sum(),
-            self.line_count(),
-        )
+        let count = self.total_chars.get().unwrap_or_else(|| {
+            let sum: usize = self.lines.iter().map(|line| line.len()).sum();
+            self.total_chars.set(Some(sum));
+            sum
+        });
+        (count, self.line_count())
     }
 }
 
@@ -672,6 +795,16 @@ mod tests {
     }
 
     #[test]
+    fn forgetting_a_provisional_window_allows_it_to_be_filled_again() {
+        let mut text = Text::pending(3);
+        text.fill_line(1, SourceLine::Plain("tail".into()));
+        text.forget_range(1..2);
+        assert!(text.is_absent(1));
+        text.fill_line(1, SourceLine::Plain("remapped".into()));
+        assert_eq!(text.raw_line(1), Some("remapped"));
+    }
+
+    #[test]
     fn the_absent_count_follows_fills_edits_and_removals() {
         let mut text = Text::pending(4);
         assert_eq!(text.absent_lines(), 4);
@@ -704,5 +837,49 @@ mod tests {
         assert_eq!(text.line_count(), 2);
         assert_eq!(text.line(0), nodes_of("abX")[0].as_slice());
         assert_eq!(text.line(1), nodes_of("Ycd")[0].as_slice());
+    }
+
+    #[test]
+    fn stats_tracks_character_count_and_line_count_accurately() {
+        let mut text = raw_text(&["hello", "world"]);
+        assert_eq!(text.stats(), (10, 2));
+
+        text.insert(Pos::new(0, 5), nodes_of("!"));
+        assert_eq!(text.stats(), (11, 2));
+
+        text.insert(Pos::new(1, 5), nodes_of("\nfoo"));
+        assert_eq!(text.stats(), (14, 3));
+
+        text.remove(Pos::new(0, 0), Pos::new(0, 1));
+        assert_eq!(text.stats(), (13, 3));
+
+        text.remove(Pos::new(1, 0), Pos::new(2, 0));
+        assert_eq!(text.stats(), (8, 2));
+
+        let mut pending = Text::pending(100);
+        assert_eq!(pending.stats(), (0, 100));
+        pending.fill_line(0, SourceLine::Plain("abc".into()));
+        assert_eq!(pending.stats(), (3, 100));
+    }
+
+    #[test]
+    fn eviction_on_large_sparse_document_only_touches_resident_range() {
+        let mut text = Text::pending(1_000_000);
+        assert_eq!(text.stats(), (0, 1_000_000));
+        assert_eq!(text.resident_span.get(), None);
+
+        // 500,000 行目付近だけ届く
+        for i in 500_000..500_050 {
+            text.fill_line(i, SourceLine::Plain(format!("line {i}")));
+        }
+        assert_eq!(text.resident_span.get(), Some((500_000, 500_050)));
+
+        // 500_010..500_030 のみを keep して evict
+        text.evict_far(500_010..500_030, &[]);
+        assert_eq!(text.resident_span.get(), Some((500_010, 500_030)));
+
+        assert!(text.is_absent(500_000));
+        assert!(!text.is_absent(500_020));
+        assert!(text.is_absent(500_040));
     }
 }

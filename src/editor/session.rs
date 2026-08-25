@@ -35,6 +35,8 @@ pub struct Session {
     pub counting: bool,
     /// 走査完了を待っている Ctrl+End（値は shift）。確定したら跳ぶ。
     pub jump_end: Option<bool>,
+    /// 行数未確定中にEOFから読んだ末尾行。仮位置と再配置用の元文字列。
+    pending_tail: Option<(usize, Vec<String>)>,
 }
 
 /// ドキュメントが変更されたペインで呼び出されます。呼び出し中に再び変更が起きてもよいよう、台帳の借用の外で呼べる共有の参照で持ちます。
@@ -97,6 +99,7 @@ pub fn init(root: &HtmlElement) -> Option<usize> {
         preview_found: Vec::new(),
         counting: false,
         jump_end: None,
+        pending_tail: None,
     }));
     input::install(&session);
     PANES.with(|panes| panes.borrow_mut().push(session.clone()));
@@ -214,6 +217,33 @@ pub fn set_on_missing(callback: OnMissing) {
     ON_MISSING.with(|slot| *slot.borrow_mut() = Some(callback));
 }
 
+/// 行数未確定中のCtrl+Endが、EOF基準の末尾読みをアプリへ頼む入口。
+type OnTail = Rc<dyn Fn(usize)>;
+
+thread_local! {
+    static ON_TAIL: RefCell<Option<OnTail>> = const { RefCell::new(None) };
+}
+
+pub fn set_on_tail(callback: OnTail) {
+    ON_TAIL.with(|slot| *slot.borrow_mut() = Some(callback));
+}
+
+pub(super) fn request_tail(pane: usize) {
+    let callback = ON_TAIL.with(|slot| slot.borrow().clone());
+    if let Some(callback) = callback {
+        callback(pane);
+    }
+}
+
+pub(super) fn tail_locked(session: &Rc<RefCell<Session>>) -> bool {
+    let borrowed = session.borrow();
+    borrowed.counting
+        && borrowed.pending_tail.as_ref().is_some_and(|(from, lines)| {
+            let line = borrowed.editor.primary().head.line;
+            line >= *from && line < *from + lines.len()
+        })
+}
+
 /// まだ届いていない行を含む選択のコピーを、文書の本体を知るアプリへ頼みます。
 type OnFarCopy = Rc<dyn Fn(usize, super::commands::FarCopy)>;
 
@@ -293,6 +323,7 @@ fn redraw_preview_overlay(session: &Rc<RefCell<Session>>) {
             carets: &carets,
             focused: borrowed.focused,
             linked: borrowed.linked,
+            show_numbers: !borrowed.counting,
         },
     );
 }
@@ -362,6 +393,7 @@ pub fn redraw(session: &Rc<RefCell<Session>>) {
                 carets: &carets,
                 focused: session.focused,
                 linked: session.linked,
+                show_numbers: !session.counting,
             },
         );
         if let Some(rect) = session.view.reveal(&caret) {
@@ -406,6 +438,7 @@ pub fn scrolled(session: &Rc<RefCell<Session>>) {
                 carets: &carets,
                 focused: session.focused,
                 linked: session.linked,
+                show_numbers: !session.counting,
             },
         );
     }
@@ -463,9 +496,20 @@ pub fn focus() {
 /// 脇に置かれた文書 1 つ分。別のタブが表示されている間、ここに保ちます。
 pub struct Parked {
     editor: Editor,
+    counting: bool,
+    jump_end: Option<bool>,
+    pending_tail: Option<(usize, Vec<String>)>,
 }
 
 impl Parked {
+    /// 走査完了後の確定行数を、画面外の文書にも反映する。
+    pub fn set_line_count(&mut self, count: usize) {
+        let pending_tail = self.pending_tail.take();
+        let jump_end = self.jump_end.take();
+        apply_line_count(&mut self.editor, pending_tail, jump_end, count);
+        self.counting = false;
+    }
+
     /// 画面の外にある文書にも、届いた行は同じように入ります。
     pub fn feed(&mut self, from: usize, lines: &[String]) {
         self.editor.feed(
@@ -483,8 +527,14 @@ impl Parked {
 /// ペインのドキュメントを取り出して、別のペインがその場所に移動できるようにします。
 pub fn park(pane: usize) -> Option<Parked> {
     let session = pane_session(pane)?;
-    let editor = std::mem::take(&mut session.borrow_mut().editor);
-    Some(Parked { editor })
+    let mut borrowed = session.borrow_mut();
+    let parked = Parked {
+        editor: std::mem::take(&mut borrowed.editor),
+        counting: std::mem::take(&mut borrowed.counting),
+        jump_end: borrowed.jump_end.take(),
+        pending_tail: borrowed.pending_tail.take(),
+    };
+    Some(parked)
 }
 
 /// 「ペイン」に保留されているドキュメント、または空のドキュメントを表示します。
@@ -495,7 +545,17 @@ pub fn restore(pane: usize, parked: Option<Parked>) {
     {
         let mut borrowed = session.borrow_mut();
         borrowed.preedit.clear();
-        borrowed.editor = parked.map(|parked| parked.editor).unwrap_or_default();
+        if let Some(parked) = parked {
+            borrowed.editor = parked.editor;
+            borrowed.counting = parked.counting;
+            borrowed.jump_end = parked.jump_end;
+            borrowed.pending_tail = parked.pending_tail;
+        } else {
+            borrowed.editor = Editor::default();
+            borrowed.counting = false;
+            borrowed.jump_end = None;
+            borrowed.pending_tail = None;
+        }
     }
     changed(&session);
 }
@@ -520,23 +580,72 @@ pub fn load_pending(line_count: usize) {
         borrowed.editor.load_pending(line_count);
         borrowed.counting = true;
         borrowed.jump_end = None;
+        borrowed.pending_tail = None;
     }
     changed(&session);
 }
 
-/// 走査で確定した行数をペインの文書へ合わせます。保留していた Ctrl+End が
-/// あればここで跳びます。
+/// 行数未確定でも、EOFから届いた末尾ウィンドウを仮の末尾へ表示する。
+pub fn show_tail(pane: usize, lines: &[String]) {
+    let Some(session) = pane_session(pane) else {
+        return;
+    };
+    {
+        let mut borrowed = session.borrow_mut();
+        let count = borrowed.editor.text().line_count();
+        let from = count.saturating_sub(lines.len());
+        borrowed.editor.forget_range(from..count);
+        borrowed.editor.feed(
+            from,
+            lines.iter().map(|line| document::read_line(line)).collect(),
+        );
+        let last = count.saturating_sub(1);
+        let col = borrowed.editor.text().line_len(last);
+        borrowed
+            .editor
+            .set_caret(crate::structure::text::Pos::new(last, col));
+        borrowed.pending_tail = borrowed.counting.then(|| (from, lines.to_vec()));
+    }
+    redraw(&session);
+}
+
+fn apply_line_count(
+    editor: &mut Editor,
+    pending_tail: Option<(usize, Vec<String>)>,
+    jump_end: Option<bool>,
+    count: usize,
+) {
+    if let Some((from, lines)) = &pending_tail {
+        editor.forget_range(*from..*from + lines.len());
+    }
+    editor.resize_pending(count);
+    if let Some((_, lines)) = pending_tail {
+        let from = count.saturating_sub(lines.len());
+        editor.forget_range(from..count);
+        editor.feed(
+            from,
+            lines.iter().map(|line| document::read_line(line)).collect(),
+        );
+        let last = count.saturating_sub(1);
+        let col = editor.text().line_len(last);
+        editor.set_caret(crate::structure::text::Pos::new(last, col));
+    } else if let Some(shift) = jump_end {
+        editor.move_document_edge(true, shift);
+    }
+}
+
+/// 走査で確定した行数をペインの文書へ合わせます。仮表示した末尾は、
+/// 確定した絶対行番号へ付け替えます。
 pub fn set_line_count(pane: usize, count: usize) {
     let Some(session) = pane_session(pane) else {
         return;
     };
     {
         let mut borrowed = session.borrow_mut();
-        borrowed.editor.resize_pending(count);
+        let pending_tail = borrowed.pending_tail.take();
+        let jump_end = borrowed.jump_end.take();
+        apply_line_count(&mut borrowed.editor, pending_tail, jump_end, count);
         borrowed.counting = false;
-        if let Some(shift) = borrowed.jump_end.take() {
-            borrowed.editor.move_document_edge(true, shift);
-        }
     }
     redraw(&session);
 }
@@ -658,7 +767,11 @@ pub fn apply_restored(pane: usize, state: &str, touched_from: usize, line_count:
 
 pub fn stats() -> (usize, usize) {
     session()
-        .map(|session| session.borrow().editor.text().stats())
+        .map(|session| {
+            let borrowed = session.borrow();
+            let (characters, lines) = borrowed.editor.text().stats();
+            (characters, if borrowed.counting { 0 } else { lines })
+        })
         .unwrap_or((0, 1))
 }
 

@@ -57,6 +57,8 @@ pub struct Overlay<'a> {
     pub carets: &'a [Caret<'a>],
     pub focused: bool,
     pub linked: bool,
+    /// 行数確定前は仮の行番号を表示しない。
+    pub show_numbers: bool,
 }
 
 #[derive(Default)]
@@ -184,7 +186,7 @@ impl View {
         } else {
             self.content.class_list().add_1("mn-nowrap").ok();
         }
-        self.fit_numbers(text.line_count());
+        self.fit_numbers(text.line_count(), state.show_numbers);
         // IME が作成しているテキストは、どの行にあってもキャレットに属します。行を描画するコンポーネントがそれをそこに配置します。
         let (path, index) = caret.place();
         let preedit = caret.composing.map(|text| Preedit {
@@ -207,7 +209,7 @@ impl View {
         };
         let finish = |window: &Range<usize>| {
             self.align_columns(text, window);
-            self.rebuild_numbers(window, state.modified);
+            self.rebuild_numbers(window, state.modified, state.show_numbers);
             if let Some(doc) = self.overlay.owner_document() {
                 self.draw_overlay(&doc, state);
                 self.draw_ruler(&doc, text.line_count(), state);
@@ -218,9 +220,9 @@ impl View {
     }
 
     /// 行番号の幅を、この文書の一番大きい番号に合わせます。番号の幅は文字の測りごとなので、設定は番号を出すかどうかだけを言います。
-    fn fit_numbers(&self, count: usize) {
+    fn fit_numbers(&self, count: usize, show: bool) {
         let style = self.root.style();
-        if !crate::settings::line_numbers() {
+        if !show || !crate::settings::line_numbers() {
             style.remove_property("--setting-gutter").ok();
             self.gutter.set_inner_html("");
             return;
@@ -230,9 +232,9 @@ impl View {
         style.set_property("--setting-gutter", &width).ok();
     }
 
-    fn rebuild_numbers(&self, window: &Range<usize>, modified: &[usize]) {
+    fn rebuild_numbers(&self, window: &Range<usize>, modified: &[usize], show: bool) {
         self.gutter.set_inner_html("");
-        if !crate::settings::line_numbers() {
+        if !show || !crate::settings::line_numbers() {
             return;
         }
         let Some(doc) = self.gutter.owner_document() else {
