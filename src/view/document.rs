@@ -332,10 +332,14 @@ impl View {
         // IME の作成中だけキャレットを隠す。非アクティブなペインは、
         // Alt+クリックで同じ入力グループに入ったときだけ表示する。
         let show_carets = (focused || linked) && caret.composing.is_none();
+        let drawn = self.viewport.drawn();
         for (index, nested) in carets.iter().enumerate() {
             let Some(cursor) = nested.inside else {
                 continue;
             };
+            if !drawn.contains(&nested.at.line) {
+                continue;
+            }
             if !cursor.is_caret() {
                 let (path, _) = nested.place();
                 for rect in
@@ -353,11 +357,13 @@ impl View {
         }
         for (index, sel) in sels.iter().enumerate() {
             if !sel.is_caret() {
-                for rect in self.selection_rects(*sel) {
-                    self.shade(doc, rect, &origin);
+                if sel.end().line >= drawn.start && sel.start().line < drawn.end {
+                    for rect in self.selection_rects(*sel) {
+                        self.shade(doc, rect, &origin);
+                    }
                 }
             }
-            if !show_carets {
+            if !show_carets || !drawn.contains(&sel.head.line) {
                 continue;
             }
             if let Some(rect) = self.caret_rect(sel.head) {
