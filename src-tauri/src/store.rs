@@ -700,9 +700,12 @@ impl Document {
 
     pub fn read(&mut self, from: usize, count: usize) -> Result<Vec<String>, String> {
         let mut lines = Vec::new();
+        let mut total_bytes = 0usize;
+        const MAX_READ_BYTES: usize = 20 * 1024 * 1024; // 20 MB 安全上限
         self.each_line(from, count, &mut |_, text| {
+            total_bytes += text.len();
             lines.push(text.to_string());
-            true
+            total_bytes < MAX_READ_BYTES
         })?;
         Ok(lines)
     }
