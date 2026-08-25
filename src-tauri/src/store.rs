@@ -1654,15 +1654,74 @@ mod tests {
                 &|| false,
             )
             .unwrap();
-        println!(
-            "single native job ({} hits): {:?}",
-            searched.hits.len(),
-            start.elapsed()
-        );
         let start = std::time::Instant::now();
         let estimate = doc
             .estimate_matches(&regex::Regex::new("fox").unwrap())
             .unwrap();
         println!("estimate ({estimate} matches): {:?}", start.elapsed());
+    }
+
+    /// 巨大な行を含むファイルで MAX_READ_BYTES ガードが正しく働き、
+    /// 1回の read で 20MB を超えずに安全に打ち切られることを検証する。
+    #[test]
+    fn huge_lines_are_capped_at_max_read_bytes() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("planetext-huge-lines-test.txt");
+        // 5MBの行を10行（合計50MB）書き込む
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut writer = std::io::BufWriter::new(file);
+            let big_line = "a".repeat(5 * 1024 * 1024);
+            for i in 0..10 {
+                use std::io::Write;
+                if i > 0 {
+                    write!(writer, "\n").unwrap();
+                }
+                write!(writer, "{big_line}").unwrap();
+            }
+        }
+        let (mut doc, scan) = Document::open(path.to_str().unwrap()).unwrap();
+        if let Some(scan) = scan {
+            scan.run().unwrap();
+        }
+        doc.confirm_scan();
+        assert_eq!(doc.line_count(), 10);
+        // 10行読もうとしても、20MBガードにより最初の4〜5行で打ち切られる
+        let lines = doc.read(0, 10).unwrap();
+        assert!(lines.len() < 10);
+        assert!(lines.len() >= 3);
+        let total_read_bytes: usize = lines.iter().map(|l| l.len()).sum();
+        assert!(total_read_bytes <= 25 * 1024 * 1024);
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 10万行の巨大ファイルを生成して開き、索引付け・途中行 seek 読みが正しく動くことを検証。
+    #[test]
+    fn opening_and_reading_large_many_lines_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("planetext-100k-lines-test.txt");
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut writer = std::io::BufWriter::new(file);
+            for i in 0..100_000 {
+                use std::io::Write;
+                if i > 0 {
+                    write!(writer, "\n").unwrap();
+                }
+                write!(writer, "line {i} with some content").unwrap();
+            }
+        }
+        let (mut doc, scan) = Document::open(path.to_str().unwrap()).unwrap();
+        if let Some(scan) = scan {
+            scan.run().unwrap();
+        }
+        doc.confirm_scan();
+        assert_eq!(doc.line_count(), 100_000);
+        // 先頭、中間、末尾の行を正確にseek読みできるか
+        let middle = doc.read(50_000, 3).unwrap();
+        assert_eq!(middle, vec!["line 50000 with some content", "line 50001 with some content", "line 50002 with some content"]);
+        let tail = doc.read(99_998, 2).unwrap();
+        assert_eq!(tail, vec!["line 99998 with some content", "line 99999 with some content"]);
+        std::fs::remove_file(path).ok();
     }
 }
