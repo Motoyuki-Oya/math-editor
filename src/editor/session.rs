@@ -310,16 +310,22 @@ fn redraw_preview_overlay(session: &Rc<RefCell<Session>>) {
     let caret = caret_of(&borrowed);
     let carets = carets_of(&borrowed);
     let highlights = preview_highlights(&borrowed);
+    let modified = borrowed.editor.modified_lines();
     let sels = borrowed.editor.sels();
-    borrowed.view.redraw_overlay(&Overlay {
-        sels: &sels,
-        highlights: &highlights,
-        primary: &caret,
-        carets: &carets,
-        focused: borrowed.focused,
-        linked: borrowed.linked,
-        show_numbers: !borrowed.counting,
-    });
+    let line_count = borrowed.editor.text().line_count();
+    borrowed.view.redraw_overlay(
+        line_count,
+        &Overlay {
+            sels: &sels,
+            highlights: &highlights,
+            modified: &modified,
+            primary: &caret,
+            carets: &carets,
+            focused: borrowed.focused,
+            linked: borrowed.linked,
+            show_numbers: !borrowed.counting,
+        },
+    );
 }
 
 fn refresh_preview(session: &mut Session) {
@@ -375,12 +381,14 @@ pub fn redraw(session: &Rc<RefCell<Session>>) {
         let caret = caret_of(&session);
         let carets = carets_of(&session);
         let highlights = preview_highlights(&session);
+        let modified = session.editor.modified_lines();
         let sels = session.editor.sels();
         session.view.draw(
             session.editor.text(),
             &Overlay {
                 sels: &sels,
                 highlights: &highlights,
+                modified: &modified,
                 primary: &caret,
                 carets: &carets,
                 focused: session.focused,
@@ -418,12 +426,14 @@ pub fn scrolled(session: &Rc<RefCell<Session>>) {
         let caret = caret_of(&session);
         let carets = carets_of(&session);
         let highlights = preview_highlights(&session);
+        let modified = session.editor.modified_lines();
         let sels = session.editor.sels();
         session.view.repaint(
             session.editor.text(),
             &Overlay {
                 sels: &sels,
                 highlights: &highlights,
+                modified: &modified,
                 primary: &caret,
                 carets: &carets,
                 focused: session.focused,
@@ -769,4 +779,12 @@ pub fn stats() -> (usize, usize) {
 /// 走査を要るかの見分け。
 pub fn fully_resident() -> bool {
     session().is_some_and(|session| session.borrow().editor.text().absent_lines() == 0)
+}
+
+/// 保存などで文書がファイルと一致した際、変更行マーカーをクリアします。
+pub fn clear_modified(pane: usize) {
+    if let Some(session) = pane_session(pane) {
+        session.borrow_mut().editor.clear_modified();
+        redraw(&session);
+    }
 }

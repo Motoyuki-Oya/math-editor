@@ -37,6 +37,7 @@ impl Editor {
             let (from, to, what) = edit(&self.text, self.cursors[i].sel);
             let at = self.text.remove(from, to);
             let end = self.text.insert(at, what);
+            self.mark_lines_modified(from.line, to.line, end.line);
             self.cursors[i] = UnifiedCursor::caret(end);
             for &later in &order[done + 1..] {
                 let sel = self.cursors[later].sel;

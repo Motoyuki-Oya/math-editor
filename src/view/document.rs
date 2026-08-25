@@ -43,6 +43,7 @@ pub struct View {
     document: Element,
     gutter: Element,
     overlay: Element,
+    ruler: Element,
     /// どの行をページに出すかと、窓をどこへ持っていくか。
     viewport: Viewport,
 }
@@ -51,6 +52,7 @@ pub struct View {
 pub struct Overlay<'a> {
     pub sels: &'a [Sel],
     pub highlights: &'a [Highlight],
+    pub modified: &'a [usize],
     pub primary: &'a Caret<'a>,
     pub carets: &'a [Caret<'a>],
     pub focused: bool,
@@ -102,6 +104,8 @@ impl View {
         let thumb_space = element(&doc, "div", "mn-thumb-space")?;
         append(&scrollbar, &thumb_space);
         append(&root, &scrollbar);
+        let ruler = element(&doc, "div", "mn-ruler")?;
+        append(&root, &ruler);
         Some(Self {
             viewport: Viewport::new(
                 root.clone(),
@@ -116,6 +120,7 @@ impl View {
             document,
             gutter,
             overlay,
+            ruler,
         })
     }
 
@@ -155,10 +160,11 @@ impl View {
         self.viewport.invalidate();
     }
 
-    /// 行DOMを作り直さず、検索一致・選択・キャレットの重ねだけを更新する。
-    pub fn redraw_overlay(&self, state: &Overlay<'_>) {
+    /// 行DOMを作り直さず、検索一致・選択・キャレット・ルーラーの重ねだけを更新する。
+    pub fn redraw_overlay(&self, line_count: usize, state: &Overlay<'_>) {
         if let Some(doc) = self.overlay.owner_document() {
             self.draw_overlay(&doc, state);
+            self.draw_ruler(&doc, line_count, state);
         }
     }
 
@@ -203,9 +209,10 @@ impl View {
         };
         let finish = |window: &Range<usize>| {
             self.align_columns(text, window);
-            self.rebuild_numbers(window, state.show_numbers);
+            self.rebuild_numbers(window, state.modified, state.show_numbers);
             if let Some(doc) = self.overlay.owner_document() {
                 self.draw_overlay(&doc, state);
+                self.draw_ruler(&doc, text.line_count(), state);
             }
         };
         self.viewport
@@ -221,11 +228,11 @@ impl View {
             return;
         }
         let digits = count.max(1).to_string().len();
-        let width = format!("calc({digits}ch + 1.4em)");
+        let width = format!("calc({digits}ch + 20px)");
         style.set_property("--setting-gutter", &width).ok();
     }
 
-    fn rebuild_numbers(&self, window: &Range<usize>, show: bool) {
+    fn rebuild_numbers(&self, window: &Range<usize>, modified: &[usize], show: bool) {
         self.gutter.set_inner_html("");
         if !show || !crate::settings::line_numbers() {
             return;
@@ -238,6 +245,23 @@ impl View {
             let Some(holder) = self.line_element(line) else {
                 continue;
             };
+
+            // 変更行の連続した縦ラインを描画
+            if modified.contains(&line) {
+                let holder_rect = holder.get_bounding_client_rect();
+                let line_top = holder_rect.top() - origin;
+                let line_height = holder_rect.height();
+                if let Some(change_bar) = element(&doc, "div", "mn-gutter-change") {
+                    change_bar
+                        .set_attribute(
+                            "style",
+                            &format!("top:{line_top}px;height:{line_height}px;"),
+                        )
+                        .ok();
+                    append(&self.gutter, &change_bar);
+                }
+            }
+
             let Some(rect) = measure::first_base_fragment(&holder) else {
                 continue;
             };
@@ -248,6 +272,50 @@ impl View {
             let top = rect.top + rect.height / 2.0 - origin;
             number.set_attribute("style", &format!("top:{top}px")).ok();
             append(&self.gutter, &number);
+        }
+    }
+
+    /// スクロールバーのトラック上に変更行・検索ヒット位置のマーカー（Overview Ruler）を描画します。
+    fn draw_ruler(&self, doc: &Document, total_lines: usize, state: &Overlay<'_>) {
+        self.ruler.set_inner_html("");
+        if total_lines == 0 {
+            return;
+        }
+        let total = total_lines as f64;
+
+        // 連続する変更行をグループ化して、途切れずにつながるバーとして描画
+        let mut spans: Vec<(usize, usize)> = Vec::new();
+        for &line in state.modified {
+            if let Some(last) = spans.last_mut() {
+                if last.1 + 1 == line {
+                    last.1 = line;
+                    continue;
+                }
+            }
+            spans.push((line, line));
+        }
+
+        for (start, end) in spans {
+            let top_pct = (start as f64) / total * 100.0;
+            let height_pct = ((end - start + 1) as f64) / total * 100.0;
+            if let Some(mark) = element(doc, "div", "mn-ruler-item mn-ruler-modified") {
+                mark.set_attribute(
+                    "style",
+                    &format!("top:{top_pct}%;height:max(3px, {height_pct}%);"),
+                )
+                .ok();
+                append(&self.ruler, &mark);
+            }
+        }
+
+        // 検索一致マーカー (黄/amber)
+        for hl in state.highlights {
+            let top_pct = (hl.line as f64 + 0.5) / total * 100.0;
+            if let Some(mark) = element(doc, "div", "mn-ruler-item mn-ruler-highlight") {
+                mark.set_attribute("style", &format!("top:{top_pct}%;"))
+                    .ok();
+                append(&self.ruler, &mark);
+            }
         }
     }
 
