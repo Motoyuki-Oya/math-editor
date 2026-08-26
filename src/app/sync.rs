@@ -19,9 +19,11 @@ use crate::ipc;
 
 /// 一度に取り寄せる行数。見えている窓と少しの余白が 1 回で届く程度。
 const CHUNK_LINES: usize = 20_000;
+const TAIL_LINES: usize = 200;
 
 enum Task {
     Fetch(Range<usize>),
+    FetchTail,
     Edits(editor::FlushBatch),
     Undo {
         redo: bool,
@@ -49,6 +51,11 @@ thread_local! {
 pub(super) fn install(shell: Shell) {
     SHELL.set(Some(shell));
     editor::set_on_missing(Rc::new(move |pane, range| fetch(shell, pane, range)));
+    editor::set_on_tail(Rc::new(move |pane| {
+        if let Some(tab) = shell.tab_of(pane) {
+            enqueue(tab, Task::FetchTail);
+        }
+    }));
     editor::set_on_far_copy(Rc::new(move |pane, copy| {
         if let Some(tab) = shell.tab_of(pane) {
             // 大きな選択の組み立てとクリップボードへの書き込みは時間がかかる。
@@ -211,6 +218,15 @@ async fn execute(tab: Tab, task: Task) -> bool {
                 enqueue(tab, Task::Fetch(rest));
             }
         }
+        Task::FetchTail => match ipc::read_tail(handle, TAIL_LINES).await {
+            Ok(lines) => {
+                if let Some(pane) = shell.pane_showing(tab) {
+                    editor::show_tail(pane.editor_pane(), &lines);
+                    shell.status.set("末尾を表示しました（行数確認中）".into());
+                }
+            }
+            Err(error) => shell.status.set(error),
+        },
         Task::Edits(batch) => {
             for edit in &batch.edits {
                 if ipc::replace_lines(

@@ -17,6 +17,10 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
     let key = event.key();
     let ctrl = event.ctrl_key() || event.meta_key();
     let shift = event.shift_key();
+    if session::tail_locked(session) && matches!(key.as_str(), "Backspace" | "Delete" | "Enter") {
+        event.prevent_default();
+        return;
+    }
     let linked_edit = if !ctrl {
         match key.as_str() {
             "Backspace" => apply_linked_edit(session, |editor| editor.backspace()),
@@ -34,14 +38,14 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
     if key == "Escape" {
         session::clear_linked();
     }
+    if ctrl && key == "End" && session.borrow().counting {
+        let pane = session.borrow().pane;
+        session::request_tail(pane);
+        event.prevent_default();
+        return;
+    }
     let did = {
-        let mut borrowed = session.borrow_mut();
-        // 行数の走査中は末尾が確定していないので、Ctrl+End は確定してから跳ぶ。
-        if ctrl && key == "End" && borrowed.counting {
-            borrowed.jump_end = Some(shift);
-            event.prevent_default();
-            return;
-        }
+        let borrowed = session.borrow();
         let mut editor = borrowed.editor.borrow_mut();
         let editor = &mut *editor;
         match (ctrl, key.as_str()) {

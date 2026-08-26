@@ -169,6 +169,10 @@ impl Editor {
         self.text.evict_far(keep, &pinned);
     }
 
+    pub fn forget_range(&mut self, range: std::ops::Range<usize>) {
+        self.text.forget_range(range);
+    }
+
     /// 届いた行を `from` から順に入れます。既にある行はそのまま。
     pub fn feed(&mut self, from: usize, lines: Vec<crate::structure::text::SourceLine>) {
         for (offset, line) in lines.into_iter().enumerate() {
@@ -179,15 +183,13 @@ impl Editor {
     /// 選択のいずれかが、まだ届いていない行に触れているか。届く前の行は
     /// 空に見えているだけなので、そこへの編集は中身を黙って壊してしまう。
     pub(super) fn touches_absent(&self) -> bool {
-        // 全部届いた文書では行を見に行かない。キー入力のたびに全行を
-        // 走査すると、大きい文書の入力が重くなる。
+        // 全部届いた文書では行を見に行かない。
         if self.text.absent_lines() == 0 {
             return false;
         }
-        self.cursors.iter().any(|sel| {
-            self.text
-                .first_absent(sel.start().line)
-                .is_some_and(|absent| absent <= sel.end().line)
+        self.cursors.iter().any(|cursor| {
+            let (start, end) = (cursor.start().line, cursor.end().line);
+            (start..=end).any(|line| self.text.is_absent(line))
         })
     }
 }
@@ -599,5 +601,124 @@ pub(crate) mod tests {
         // Clear modified
         editor.clear_modified();
         assert_eq!(editor.modified_lines(), Vec::<usize>::new());
+    }
+
+    /// 100万行の巨大スパース文書で、マルチカーソルを複数行に配置して
+    /// 同時タイピング・改行・削除・変更記録を行うワークフローのシミュレーション。
+    #[test]
+    fn multi_cursor_typing_on_large_sparse_document_simulates_real_workflow() {
+        use crate::structure::text::SourceLine;
+        let mut editor = Editor::default();
+        // 100万行のファイルを開いた状態
+        editor.load_pending(1_000_000);
+        assert_eq!(editor.text().line_count(), 1_000_000);
+        assert_eq!(editor.text().absent_lines(), 1_000_000);
+
+        // 画面に表示される 50,000〜50,030 行を取り寄せる
+        let resident_lines: Vec<SourceLine> = (50_000..=50_030)
+            .map(|i| SourceLine::Plain(format!("fn item_{i}() {{ return {i}; }}")))
+            .collect();
+        editor.feed(50_000, resident_lines);
+        assert_eq!(editor.text().absent_lines(), 1_000_000 - 31);
+
+        // 50,000行目、50,010行目、50,020行目の3箇所にマルチカーソルを配置（末尾）
+        let p1 = Pos::new(50_000, editor.text().line_len(50_000));
+        let p2 = Pos::new(50_010, editor.text().line_len(50_010));
+        let p3 = Pos::new(50_020, editor.text().line_len(50_020));
+        editor.set_sels(vec![Sel::caret(p1), Sel::caret(p2), Sel::caret(p3)]);
+        assert_eq!(editor.cursors().len(), 3);
+
+        // 3箇所で同時に " // done" をタイピング
+        let start_time = std::time::Instant::now();
+        for c in " // done".chars() {
+            editor.insert_text(&c.to_string());
+        }
+        // 1文字ずつのマルチカーソルタイピングが瞬時に完了すること
+        assert!(start_time.elapsed() < std::time::Duration::from_millis(50));
+
+        // 各行の内容を検証
+        assert_eq!(
+            plain_line(&editor, 50_000),
+            "fn item_50000() { return 50000; } // done"
+        );
+        assert_eq!(
+            plain_line(&editor, 50_010),
+            "fn item_50010() { return 50010; } // done"
+        );
+        assert_eq!(
+            plain_line(&editor, 50_020),
+            "fn item_50020() { return 50020; } // done"
+        );
+
+        // 各行で同時に backspace を 3 回実行 ("ne" と 空白が消えて "// do" になる)
+        editor.backspace();
+        editor.backspace();
+        editor.backspace();
+        assert_eq!(
+            plain_line(&editor, 50_000),
+            "fn item_50000() { return 50000; } // d"
+        );
+
+        // 変更行記録（FlushBatch）の取得
+        let flush = editor.take_flush();
+        assert!(flush.is_some());
+        let flush = flush.unwrap();
+        assert!(!flush.changes.is_empty());
+        // 50000, 50010, 50020 の各行が変更行として記録されていること
+        assert!(flush.changes.iter().any(|c| c.from == 50_000));
+        assert!(flush.changes.iter().any(|c| c.from == 50_010));
+        assert!(flush.changes.iter().any(|c| c.from == 50_020));
+
+        // 未着の行（90万行目など）は展開されずにAbsentのままであること
+        assert!(editor.text().is_absent(900_000));
+    }
+
+    /// 巨大ファイル上で Ctrl+D（add_next_occurrence）による単語マッチングと
+    /// マルチカーソル一括置換のシミュレーション。
+    #[test]
+    fn multi_cursor_ctrl_d_and_replace_on_large_document() {
+        use crate::structure::text::SourceLine;
+        let mut editor = Editor::default();
+        editor.load_pending(500_000);
+
+        // 100,000〜100,010 行に同一キーワード "target_keyword" を含む行を配置
+        let mut lines = Vec::new();
+        for i in 0..10 {
+            lines.push(SourceLine::Plain(format!(
+                "let value_{i} = target_keyword + {i};"
+            )));
+        }
+        editor.feed(100_000, lines);
+
+        // 100,000 行目の "target_keyword" の位置にキャレットを置いて Ctrl+D を押す
+        let col = "let value_0 = ".len();
+        editor.set_caret(Pos::new(100_000, col));
+        assert!(editor.add_next_occurrence()); // 1つ目の単語を選択
+        assert_eq!(
+            editor.primary(),
+            Sel::range(
+                Pos::new(100_000, col),
+                Pos::new(100_000, col + "target_keyword".len())
+            )
+        );
+
+        // さらに Ctrl+D を 3 回押して後続 3 行の "target_keyword" も選択
+        assert!(editor.add_next_occurrence());
+        assert!(editor.add_next_occurrence());
+        assert!(editor.add_next_occurrence());
+        assert_eq!(editor.cursors().len(), 4);
+
+        // 4箇所を一括で "NEW_VAL" に置換（タイピング）
+        editor.insert_text("NEW_VAL");
+
+        // 各行が正しく置換されたことを検証
+        assert_eq!(plain_line(&editor, 100_000), "let value_0 = NEW_VAL + 0;");
+        assert_eq!(plain_line(&editor, 100_001), "let value_1 = NEW_VAL + 1;");
+        assert_eq!(plain_line(&editor, 100_002), "let value_2 = NEW_VAL + 2;");
+        assert_eq!(plain_line(&editor, 100_003), "let value_3 = NEW_VAL + 3;");
+    }
+
+    fn plain_line(editor: &Editor, line: usize) -> String {
+        crate::structure::plain::row(&editor.text().line(line).to_vec())
     }
 }
