@@ -41,6 +41,7 @@ impl Place {
         }
     }
 
+    #[allow(dead_code)]
     pub fn end(&self) -> Key {
         match self {
             Place::Text(sel) => (sel.end(), None),

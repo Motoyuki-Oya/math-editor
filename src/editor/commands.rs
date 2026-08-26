@@ -225,10 +225,7 @@ pub fn find_next(query: &str, options: SearchOptions, file_size: Option<usize>) 
     let found = {
         let borrowed = session.borrow();
         let editor = borrowed.editor.borrow();
-        let from = borrowed
-            .search_from
-            .clone()
-            .unwrap_or_else(|| search::key_at(editor.primary().end(), editor.nested_cursor()));
+        let from = search::key_at(editor.primary().end(), editor.nested_cursor());
         search::find_next(editor.text(), query, options, file_size, from)
     };
     let Some(found) = found else {
@@ -246,10 +243,7 @@ pub fn find_next_resident(query: &str, options: SearchOptions, file_size: Option
     let found = {
         let borrowed = session.borrow();
         let editor = borrowed.editor.borrow();
-        let from = borrowed
-            .search_from
-            .clone()
-            .unwrap_or_else(|| search::key_at(editor.primary().end(), editor.nested_cursor()));
+        let from = search::key_at(editor.primary().end(), editor.nested_cursor());
         search::find_next_resident(editor.text(), query, options, file_size, from)
     };
     let Some(found) = found else {
@@ -266,10 +260,7 @@ pub fn find_previous(query: &str, options: SearchOptions, file_size: Option<usiz
     let found = {
         let borrowed = session.borrow();
         let editor = borrowed.editor.borrow();
-        let from = borrowed
-            .search_from
-            .clone()
-            .unwrap_or_else(|| search::key_at(editor.primary().start(), editor.nested_cursor()));
+        let from = search::key_at(editor.primary().start(), editor.nested_cursor());
         search::find_previous(editor.text(), query, options, file_size, from)
     };
     let Some(found) = found else {
@@ -291,10 +282,7 @@ pub fn find_previous_resident(
     let found = {
         let borrowed = session.borrow();
         let editor = borrowed.editor.borrow();
-        let from = borrowed
-            .search_from
-            .clone()
-            .unwrap_or_else(|| search::key_at(editor.primary().start(), editor.nested_cursor()));
+        let from = search::key_at(editor.primary().start(), editor.nested_cursor());
         search::find_previous_resident(editor.text(), query, options, file_size, from)
     };
     let Some(found) = found else {
@@ -306,7 +294,6 @@ pub fn find_previous_resident(
 
 fn apply_found_prev(session: &Rc<RefCell<Session>>, found: search::Found) {
     {
-        session.borrow_mut().search_from = Some(found.place.start());
         let borrowed = session.borrow();
         let mut editor = borrowed.editor.borrow_mut();
         match found.place {
@@ -321,7 +308,6 @@ fn apply_found_prev(session: &Rc<RefCell<Session>>, found: search::Found) {
 
 fn apply_found(session: &Rc<RefCell<Session>>, found: search::Found) {
     {
-        session.borrow_mut().search_from = Some(found.place.end());
         let borrowed = session.borrow();
         let mut editor = borrowed.editor.borrow_mut();
         match found.place {
@@ -393,10 +379,7 @@ pub fn far_search_start() -> Option<(search::Key, usize)> {
     let session = session()?;
     let borrowed = session.borrow();
     let editor = borrowed.editor.borrow();
-    let from = borrowed
-        .search_from
-        .clone()
-        .unwrap_or_else(|| search::key_at(editor.primary().end(), editor.nested_cursor()));
+    let from = search::key_at(editor.primary().end(), editor.nested_cursor());
     Some((from, editor.text().line_count()))
 }
 
