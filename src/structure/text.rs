@@ -554,6 +554,34 @@ impl Text {
         with_line!(self, line, |l| { matches!(l, Line::Absent) })
     }
 
+    /// 手元に存在する（未着でない）連続行範囲のリストを返す。
+    /// スパースな巨大文書で、未着行を何百万行も無駄に走査するのを防ぐ。
+    pub fn resident_line_ranges(&self) -> Vec<std::ops::Range<usize>> {
+        let mut ranges = Vec::new();
+        for (&page_idx, page) in &self.pages {
+            let page_base = page_idx << PAGE_SHIFT;
+            let mut range_start: Option<usize> = None;
+            for offset in 0..PAGE_SIZE {
+                let line = page_base + offset;
+                if line >= self.line_count {
+                    break;
+                }
+                let is_resident = !matches!(page[offset].as_ref(), Line::Absent);
+                if is_resident {
+                    if range_start.is_none() {
+                        range_start = Some(line);
+                    }
+                } else if let Some(start) = range_start.take() {
+                    ranges.push(start..line);
+                }
+            }
+            if let Some(start) = range_start {
+                ranges.push(start..(page_base + PAGE_SIZE).min(self.line_count));
+            }
+        }
+        ranges
+    }
+
     pub fn line_count(&self) -> usize {
         self.line_count
     }

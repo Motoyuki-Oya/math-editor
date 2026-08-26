@@ -218,28 +218,6 @@ pub fn leave_structure(session: &Rc<RefCell<Session>>) {
     session.borrow().editor.borrow_mut().leave_structure();
 }
 
-/// 現在の選択が query の一致であれば、その一致が文書内の何番目（1-indexed）かを返す。
-/// 一致していなければ 0、クエリが空なら None を返す。
-pub fn current_match_index(query: &str, options: SearchOptions) -> Option<usize> {
-    let session = session()?;
-    if query.is_empty() {
-        return None;
-    }
-    let borrowed = session.borrow();
-    let editor = borrowed.editor.borrow();
-    let from = search::key_at(editor.primary().start(), editor.nested_cursor());
-    let matches = search::find_all(editor.text(), query, options, None);
-    if matches.is_empty() {
-        return Some(0);
-    }
-    for (i, m) in matches.iter().enumerate() {
-        if m.place.start() == from {
-            return Some(i + 1);
-        }
-    }
-    Some(0)
-}
-
 pub fn find_next(query: &str, options: SearchOptions, file_size: Option<usize>) -> bool {
     let Some(session) = session() else {
         return false;

@@ -195,7 +195,17 @@ pub fn find_all(
     options: SearchOptions,
     file_size: Option<usize>,
 ) -> Vec<Found> {
-    find_range(text, query, options, file_size, 0..text.line_count())
+    let Some(matcher) = compile(query, options, file_size) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for range in text.resident_line_ranges() {
+        for line in range {
+            line_matches(&matcher, text, line, &mut found);
+        }
+    }
+    found.sort_by_key(|found| found.place.start());
+    found
 }
 
 /// 指定された行の窓だけを検索する。入力中のプレビューは可視行だけを調べ、
@@ -211,8 +221,16 @@ pub fn find_range(
         return Vec::new();
     };
     let mut found = Vec::new();
-    for line in lines.start..lines.end.min(text.line_count()) {
-        line_matches(&matcher, text, line, &mut found);
+    let start = lines.start.min(text.line_count());
+    let end = lines.end.min(text.line_count());
+    for range in text.resident_line_ranges() {
+        let r_start = range.start.max(start);
+        let r_end = range.end.min(end);
+        if r_start < r_end {
+            for line in r_start..r_end {
+                line_matches(&matcher, text, line, &mut found);
+            }
+        }
     }
     found.sort_by_key(|found| found.place.start());
     found
