@@ -1,15 +1,16 @@
 //! 検索パターンの選択と一致処理を提供します。
 
+use memchr::memmem::Finder;
 use regex::Regex;
+use unicode_normalization::UnicodeNormalization;
 
-use super::boyer_moore::BoyerMoore;
 use super::SearchOptions;
 
 /// コンパイル済みの検索パターンです。
 #[derive(Debug)]
 pub(super) enum Matcher {
     Regex(Regex),
-    Literal(BoyerMoore),
+    Literal(Box<LiteralMatcher>),
 }
 
 impl Matcher {
@@ -17,42 +18,138 @@ impl Matcher {
     pub(super) fn matches(&self, run: &str) -> Vec<(usize, usize, Vec<String>)> {
         match self {
             Self::Regex(regex) => regex_matches(regex, run),
-            Self::Literal(boyer_moore) => {
-                // 一致ごとに `run` を数え直すと一致の数だけ走査が増えるため、文字は一度だけ集めます。
-                let chars: Vec<char> = run.chars().collect();
-                boyer_moore
-                    .find(run)
-                    .into_iter()
-                    .map(|(from, to)| (from, to, vec![chars[from..to].iter().collect()]))
-                    .collect()
+            Self::Literal(literal) => literal.matches(run),
+        }
+    }
+}
+
+/// `memchr::memmem` と `unicode-normalization` を使ったクエリ展開方式の高速リテラルマッチャー。
+#[derive(Debug)]
+pub(super) struct LiteralMatcher {
+    variants: Vec<PatternVariant>,
+    regex_ci: Option<Regex>,
+}
+
+#[derive(Debug)]
+struct PatternVariant {
+    finder: Finder<'static>,
+    char_count: usize,
+    byte_len: usize,
+}
+
+impl LiteralMatcher {
+    pub(super) fn new(query: &str, case_sensitive: bool) -> Option<Self> {
+        if query.is_empty() {
+            return None;
+        }
+
+        // クエリから NFC版 と NFD版 を生成
+        let nfc: String = query.nfc().collect();
+        let nfd: String = query.nfd().collect();
+
+        let mut variant_strings = vec![nfc];
+        if !variant_strings.contains(&nfd) {
+            variant_strings.push(nfd);
+        }
+
+        let mut variants = Vec::with_capacity(variant_strings.len());
+        if case_sensitive {
+            for s in &variant_strings {
+                let char_count = s.chars().count();
+                let byte_len = s.len();
+                let leaked_bytes: &'static [u8] =
+                    Box::leak(s.as_bytes().to_vec().into_boxed_slice());
+                variants.push(PatternVariant {
+                    finder: Finder::new(leaked_bytes),
+                    char_count,
+                    byte_len,
+                });
             }
         }
+
+        let regex_ci = if !case_sensitive {
+            let escaped: Vec<String> = variant_strings.iter().map(|s| regex::escape(s)).collect();
+            let pattern = if escaped.len() == 1 {
+                escaped[0].clone()
+            } else {
+                format!("(?:{})", escaped.join("|"))
+            };
+            regex::RegexBuilder::new(&pattern)
+                .case_insensitive(true)
+                .build()
+                .ok()
+        } else {
+            None
+        };
+
+        Some(Self { variants, regex_ci })
+    }
+
+    pub(super) fn matches(&self, run: &str) -> Vec<(usize, usize, Vec<String>)> {
+        if run.is_empty() {
+            return Vec::new();
+        }
+
+        if let Some(re) = &self.regex_ci {
+            return regex_matches(re, run);
+        }
+
+        // 単一パターンの場合（合成文字なし: 最頻パス）
+        if self.variants.len() == 1 {
+            let v = &self.variants[0];
+            let mut found = Vec::new();
+            for byte_pos in v.finder.find_iter(run.as_bytes()) {
+                let from = run[..byte_pos].chars().count();
+                let to = from + v.char_count;
+                let matched_text = run[byte_pos..byte_pos + v.byte_len].to_string();
+                found.push((from, to, vec![matched_text]));
+            }
+            return found;
+        }
+
+        // 複数パターンの場合（NFC / NFD 展開）
+        let mut matches_raw: Vec<(usize, usize, usize)> = Vec::new(); // (byte_pos, byte_len, char_count)
+        for v in &self.variants {
+            for byte_pos in v.finder.find_iter(run.as_bytes()) {
+                matches_raw.push((byte_pos, v.byte_len, v.char_count));
+            }
+        }
+
+        if matches_raw.is_empty() {
+            return Vec::new();
+        }
+
+        // 出現バイト位置順にソートし重複を除去
+        matches_raw.sort_by_key(|(pos, _, _)| *pos);
+        matches_raw.dedup_by_key(|(pos, _, _)| *pos);
+
+        let mut found = Vec::with_capacity(matches_raw.len());
+        for (byte_pos, byte_len, char_count) in matches_raw {
+            let from = run[..byte_pos].chars().count();
+            let to = from + char_count;
+            let matched_text = run[byte_pos..byte_pos + byte_len].to_string();
+            found.push((from, to, vec![matched_text]));
+        }
+
+        found
     }
 }
 
 /// `regex` クレートを使って一致を探します。
 fn regex_matches(regex: &Regex, run: &str) -> Vec<(usize, usize, Vec<String>)> {
     let mut found = Vec::new();
-    let mut byte_starts = Vec::new();
-    let mut end = 0;
-    for (byte, c) in run.char_indices() {
-        byte_starts.push(byte);
-        end = byte + c.len_utf8();
-    }
-    byte_starts.push(end);
-    let byte_to_char = |byte: usize| byte_starts.binary_search(&byte).unwrap_or_else(|pos| pos);
 
     if regex.captures_len() == 1 {
         for m in regex.find_iter(run) {
-            let from = byte_to_char(m.start());
-            let to = byte_to_char(m.end());
+            let from = run[..m.start()].chars().count();
+            let to = from + m.as_str().chars().count();
             found.push((from, to, vec![m.as_str().to_string()]));
         }
     } else {
         for caps in regex.captures_iter(run) {
             let m = caps.get(0).expect("group 0 is always present");
-            let from = byte_to_char(m.start());
-            let to = byte_to_char(m.end());
+            let from = run[..m.start()].chars().count();
+            let to = from + m.as_str().chars().count();
             let groups = (0..caps.len())
                 .map(|i| {
                     caps.get(i)
@@ -66,9 +163,6 @@ fn regex_matches(regex: &Regex, run: &str) -> Vec<(usize, usize, Vec<String>)> {
     found
 }
 
-/// リテラル検索で `regex` クレートに切り替えるファイルサイズの仮の閾値（バイト数）。
-const LITERAL_REGEX_THRESHOLD: usize = 100_000;
-
 fn build_regex(pattern: &str, case_sensitive: bool) -> Option<Regex> {
     regex::RegexBuilder::new(pattern)
         .case_insensitive(!case_sensitive)
@@ -80,295 +174,227 @@ fn build_regex(pattern: &str, case_sensitive: bool) -> Option<Regex> {
 pub(super) fn compile(
     query: &str,
     options: SearchOptions,
-    file_size: Option<usize>,
+    _file_size: Option<usize>,
 ) -> Option<Matcher> {
     if query.is_empty() {
         return None;
     }
-    let large_file = file_size.is_none_or(|size| size > LITERAL_REGEX_THRESHOLD);
-    let use_regex = options.regex || large_file;
-    if use_regex {
-        let pattern = if options.regex {
-            query.to_string()
-        } else {
-            regex::escape(query)
-        };
-        build_regex(&pattern, options.case_sensitive).map(Matcher::Regex)
+    if options.regex {
+        build_regex(query, options.case_sensitive).map(Matcher::Regex)
     } else {
-        BoyerMoore::new(query, options.case_sensitive).map(Matcher::Literal)
+        LiteralMatcher::new(query, options.case_sensitive)
+            .map(Box::new)
+            .map(Matcher::Literal)
     }
-}
-
-#[cfg(test)]
-/// テスト用: JavaScriptCore の RegExp が返す UTF-16 単位を文字インデックスに変換します。
-fn char_starts(text: &str) -> Vec<usize> {
-    let mut units = Vec::with_capacity(text.chars().count() + 1);
-    let mut at = 0;
-    for c in text.chars() {
-        units.push(at);
-        at += c.len_utf16();
-    }
-    units.push(at);
-    units
-}
-
-#[cfg(test)]
-fn char_of(starts: &[usize], unit: usize) -> Option<usize> {
-    starts.iter().position(|start| *start == unit)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const SMALL_FILE: Option<usize> = Some(0);
-
     #[test]
-    fn an_unknown_file_size_falls_back_to_the_regex_crate() {
+    fn compile_creates_appropriate_matcher() {
         let options = SearchOptions::default();
+        // リテラル検索
         assert!(matches!(
             compile("abc", options, None),
-            Some(Matcher::Regex(_))
-        ));
-        assert!(matches!(
-            compile("abc", options, SMALL_FILE),
             Some(Matcher::Literal(_))
         ));
+        // 正規表現検索
+        let re_options = SearchOptions {
+            regex: true,
+            case_sensitive: false,
+        };
         assert!(matches!(
-            compile("abc", options, Some(LITERAL_REGEX_THRESHOLD + 1)),
+            compile("abc.*", re_options, None),
             Some(Matcher::Regex(_))
         ));
     }
 
-    fn compile_regex_crate(query: &str, options: SearchOptions) -> Option<regex::Regex> {
-        if query.is_empty() {
-            return None;
-        }
-        let pattern = if options.regex {
-            query.to_string()
-        } else {
-            regex::escape(query)
-        };
-        build_regex(&pattern, options.case_sensitive)
+    #[test]
+    fn regex_matches_correctly_computes_utf8_char_offsets_and_groups() {
+        let regex = regex::Regex::new(r"fn\s+([a-zA-Z_0-9]+)").unwrap();
+        let text = "こんにちは pub fn foo_123() { // テスト\n fn bar()";
+        let matches = regex_matches(&regex, text);
+        assert_eq!(matches.len(), 2);
+        // 1つ目: "fn foo_123" -> 先頭 "こんにちは pub " は 10 文字
+        assert_eq!(matches[0].0, 10);
+        assert_eq!(matches[0].1, 20);
+        assert_eq!(
+            matches[0].2,
+            vec!["fn foo_123".to_string(), "foo_123".to_string()]
+        );
+        // 2つ目: "fn bar"
+        assert_eq!(matches[1].0, 33);
+        assert_eq!(matches[1].1, 39);
+        assert_eq!(matches[1].2, vec!["fn bar".to_string(), "bar".to_string()]);
     }
 
     #[test]
-    fn character_columns_come_from_utf16_offsets() {
-        let starts = char_starts("あa𝑥b");
-        assert_eq!(starts, vec![0, 1, 2, 4, 5]);
-        assert_eq!(char_of(&starts, 2), Some(2));
+    fn literal_matcher_handles_unicode_combining_characters() {
+        // 1. クエリが NFC「が」(\u{304C})、テキストが NFD「か\u{3099}」
+        let matcher = LiteralMatcher::new("が", true).unwrap();
+        let text = "テスト か\u{3099}んじ"; // "テスト "=4, "か\u{3099}"=2文字(index 4..6), "んじ"=2
+        let matches = matcher.matches(text);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].0, 4);
+        assert_eq!(matches[0].1, 6);
+        assert_eq!(matches[0].2, vec!["か\u{3099}".to_string()]);
+
+        // 2. クエリが NFD「か\u{3099}」、テキストが NFC「が」
+        let matcher = LiteralMatcher::new("か\u{3099}", true).unwrap();
+        let text = "テスト がんじ"; // "テスト "=4, "が"=1文字(index 4..5)
+        let matches = matcher.matches(text);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].0, 4);
+        assert_eq!(matches[0].1, 5);
+        assert_eq!(matches[0].2, vec!["が".to_string()]);
+
+        // 3. ラテン文字アクセント: クエリ「café」(\u{00E9})、テキスト「cafe\u{0301}」
+        let matcher = LiteralMatcher::new("café", true).unwrap();
+        let text = "Welcome to cafe\u{0301}!";
+        let matches = matcher.matches(text);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].0, 11);
+        assert_eq!(matches[0].1, 16); // "cafe\u{0301}" は 5 文字 (c,a,f,e,\u{0301})
+        assert_eq!(matches[0].2, vec!["cafe\u{0301}".to_string()]);
+
+        // 4. 大文字小文字無視と合成文字の組み合わせ
+        let matcher = LiteralMatcher::new("CAFÉ", false).unwrap();
+        let text = "Welcome to cafe\u{0301}!";
+        let matches = matcher.matches(text);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].0, 11);
+        assert_eq!(matches[0].1, 16);
+        assert_eq!(matches[0].2, vec!["cafe\u{0301}".to_string()]);
     }
 
     #[test]
-    fn boyer_moore_vs_regex_crate() {
+    fn benchmark_text_normalization_vs_query_expansion() {
         use std::time::Instant;
 
-        let cases = [
-            ("abc".repeat(10_000) + "findme", "findme"),
-            ("findme".to_string() + &"abc".repeat(10_000), "findme"),
-            ("abc".repeat(10_000), "xyz"),
-            ("ab".repeat(10_000), "ab"),
-        ];
-        let options = SearchOptions {
-            regex: false,
-            case_sensitive: true,
-        };
-        let rounds = 100;
-
-        for (text, query) in cases {
-            let Some(matcher) = compile(query, options, SMALL_FILE) else {
-                panic!("literal pattern should compile");
-            };
-            let Some(re) = compile_regex_crate(query, options) else {
-                panic!("regex crate pattern should compile");
-            };
-
-            let t0 = Instant::now();
-            let mut bm = Vec::new();
-            for _ in 0..rounds {
-                bm = matcher.matches(&text);
+        // 100,000行のデータセット（NFD分解文字列・NFC合成文字列が混在）
+        let mut lines = Vec::with_capacity(100_000);
+        for i in 0..100_000 {
+            if i % 1000 == 0 {
+                // NFD 結合文字行
+                lines.push(format!(
+                    "pub fn か\u{3099}関数_{i}() -> Result<cafe\u{0301}, Error> {{ }}"
+                ));
+            } else if i % 100 == 0 {
+                // NFC 合成文字行
+                lines.push(format!(
+                    "// 日本語コメント: が関数 を呼び出しています（行: {i}）"
+                ));
+            } else {
+                lines.push(format!(
+                    "let x_{i} = i * 42 + compute_something_else(12345);"
+                ));
             }
-            let dt_bm = t0.elapsed();
-
-            let t1 = Instant::now();
-            let mut re_matches = Vec::new();
-            for _ in 0..rounds {
-                re_matches = regex_matches(&re, &text);
-            }
-            let dt_re = t1.elapsed();
-
-            assert_eq!(bm, re_matches);
-            println!(
-                "query={query:?} text_len={} Boyer-Moore: {dt_bm:?}, regex crate: {dt_re:?}",
-                text.len()
-            );
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    mod webkitgtk_regexp {
-        use super::*;
-        use javascriptcore::{Context, ContextExt, Value, ValueExt};
-
-        #[derive(Debug, serde::Deserialize)]
-        struct JscMatch {
-            index: usize,
-            groups: Vec<String>,
         }
 
-        fn jsc_regexp_matches(
-            ctx: &Context,
-            pattern: &str,
-            text: &str,
-            case_insensitive: bool,
-        ) -> Option<Vec<(usize, usize, Vec<String>)>> {
-            ctx.set_value("P", &Value::new_string(ctx, Some(pattern)));
-            let flags = if case_insensitive { "gi" } else { "g" };
-            ctx.set_value("F", &Value::new_string(ctx, Some(flags)));
-            ctx.set_value("T", &Value::new_string(ctx, Some(text)));
+        let query = "が関数";
 
-            let script = r#"
-                var re = new RegExp(P, F);
-                var text = T;
-                var out = [];
-                var match;
-                var limit = 0;
-                while ((match = re.exec(text)) !== null) {
-                    var groups = [];
-                    for (var i = 0; i < match.length; i++) {
-                        groups.push(match[i] === undefined ? "" : match[i]);
+        // ==========================================
+        // 方式1: テキスト側正規化方式（前回の実装を再現）
+        use unicode_normalization::{is_nfc_quick, IsNormalized};
+
+        fn is_comb(c: char) -> bool {
+            matches!(c, '\u{0300}'..='\u{036F}' | '\u{3099}' | '\u{309A}')
+        }
+        fn norm_with_ranges(run: &str) -> (String, Vec<(usize, usize)>) {
+            let mut norm_text = String::new();
+            let mut ranges = Vec::new();
+            let orig: Vec<char> = run.chars().collect();
+            let n = orig.len();
+            let mut i = 0;
+            while i < n {
+                let start = i;
+                i += 1;
+                while i < n && is_comb(orig[i]) {
+                    i += 1;
+                }
+                let cluster: String = orig[start..i].iter().collect();
+                for nc in cluster.nfc() {
+                    norm_text.push(nc);
+                    ranges.push((start, i));
+                }
+            }
+            (norm_text, ranges)
+        }
+
+        let query_nfc: String = query.nfc().collect();
+        let query_char_count = query_nfc.chars().count();
+        let finder = Finder::new(query_nfc.as_bytes());
+
+        let t0 = Instant::now();
+        let mut count1 = 0;
+        for line in &lines {
+            if is_nfc_quick(line.chars()) == IsNormalized::Yes {
+                for byte_pos in finder.find_iter(line.as_bytes()) {
+                    let from = line[..byte_pos].chars().count();
+                    let to = from + query_char_count;
+                    let _ = (from, to);
+                    count1 += 1;
+                }
+            } else {
+                let (norm_text, ranges) = norm_with_ranges(line);
+                for byte_pos in finder.find_iter(norm_text.as_bytes()) {
+                    let norm_from = norm_text[..byte_pos].chars().count();
+                    let norm_to = norm_from + query_char_count;
+                    if norm_from < ranges.len() && norm_to <= ranges.len() {
+                        let from = ranges[norm_from].0;
+                        let to = ranges[norm_to - 1].1;
+                        let _ = (from, to);
+                        count1 += 1;
                     }
-                    out.push({ index: match.index, groups: groups });
-                    if (match[0].length === 0) {
-                        var lead = text.charCodeAt(match.index);
-                        if ((lead & 0xFC00) === 0xD800 && match.index + 1 < text.length) {
-                            re.lastIndex = match.index + 2;
-                        } else {
-                            re.lastIndex = match.index + 1;
-                        }
-                    }
-                    if (++limit > 100000) break;
                 }
-                JSON.stringify(out);
-            "#;
-
-            let value = ctx.evaluate(script).or_else(|| {
-                let msg = ctx
-                    .exception()
-                    .map(|e| e.to_string())
-                    .unwrap_or_else(|| "JSC evaluation failed".to_string());
-                eprintln!("JSC evaluate error: {msg}");
-                None
-            })?;
-            let json = value.to_str().to_string();
-            let matches: Vec<JscMatch> = serde_json::from_str(&json).ok()?;
-            let units = char_starts(text);
-            let mut found = Vec::new();
-            for m in matches {
-                let whole = m.groups.first().cloned().unwrap_or_default();
-                let end = m.index + whole.encode_utf16().count();
-                let from = char_of(&units, m.index)?;
-                let to = char_of(&units, end)?;
-                found.push((from, to, m.groups));
-            }
-            Some(found)
-        }
-
-        #[test]
-        fn webkitgtk_regexp_vs_regex_crate() {
-            use std::time::Instant;
-
-            let ctx = Context::new();
-            let rounds = 10;
-            let cases: [(&str, &str, SearchOptions); 6] = [
-                (
-                    "findme",
-                    &("abc".repeat(2_000) + "findme"),
-                    SearchOptions {
-                        regex: false,
-                        case_sensitive: true,
-                    },
-                ),
-                (
-                    "findme",
-                    &("findme".to_string() + &"abc".repeat(2_000)),
-                    SearchOptions {
-                        regex: false,
-                        case_sensitive: true,
-                    },
-                ),
-                (
-                    "xyz",
-                    &"abc".repeat(2_000),
-                    SearchOptions {
-                        regex: false,
-                        case_sensitive: true,
-                    },
-                ),
-                (
-                    "ab",
-                    &"ab".repeat(1_000),
-                    SearchOptions {
-                        regex: false,
-                        case_sensitive: true,
-                    },
-                ),
-                // 正規表現モードでも比較
-                (
-                    "a.c",
-                    &"abc".repeat(1_000),
-                    SearchOptions {
-                        regex: true,
-                        case_sensitive: true,
-                    },
-                ),
-                (
-                    "a+",
-                    &"a".repeat(5_000),
-                    SearchOptions {
-                        regex: true,
-                        case_sensitive: true,
-                    },
-                ),
-            ];
-
-            for (query, text, options) in cases {
-                let pattern = if options.regex {
-                    query.to_string()
-                } else {
-                    regex::escape(query)
-                };
-
-                let Some(re) = compile_regex_crate(query, options) else {
-                    panic!("regex crate should compile for {query:?}");
-                };
-
-                let t0 = Instant::now();
-                let mut js_results = Vec::new();
-                for _ in 0..rounds {
-                    js_results = jsc_regexp_matches(&ctx, &pattern, text, !options.case_sensitive)
-                        .expect("JSC RegExp should run");
-                }
-                let dt_js = t0.elapsed();
-
-                let t1 = Instant::now();
-                let mut re_results = Vec::new();
-                for _ in 0..rounds {
-                    re_results = regex_matches(&re, text);
-                }
-                let dt_re = t1.elapsed();
-
-                assert_eq!(
-                    js_results, re_results,
-                    "JSC RegExp and regex crate differ for {query:?}"
-                );
-                println!(
-                    "query={query:?} regex={} text_len={} \
-                     JSC RegExp: {dt_js:?}, regex crate: {dt_re:?}",
-                    options.regex,
-                    text.len()
-                );
             }
         }
+        let dt_text_norm = t0.elapsed();
+
+        // ==========================================
+        // 方式2: クエリ側展開方式（今回の実装）
+        // ==========================================
+        let matcher = LiteralMatcher::new(query, true).unwrap();
+
+        let t1 = Instant::now();
+        let mut count2 = 0;
+        for line in &lines {
+            let m = matcher.matches(line);
+            count2 += m.len();
+        }
+        let dt_query_exp = t1.elapsed();
+
+        println!("\n=== Benchmark: Text Normalization vs Query Expansion (100,000 lines) ===");
+        println!(
+            "1. Text Normalization: {:?} (matches={count1})",
+            dt_text_norm
+        );
+        println!(
+            "2. Query Expansion:    {:?} (matches={count2})",
+            dt_query_exp
+        );
+        assert_eq!(count1, count2);
+
+        // 連続バッファ直接走査（100,000行）
+        let full_text: String = lines.join("\n");
+        let bytes = full_text.as_bytes();
+        let t2 = Instant::now();
+        let mut buffer_count = 0;
+        for v in &matcher.variants {
+            for byte_pos in v.finder.find_iter(bytes) {
+                buffer_count += 1;
+                let _ = byte_pos;
+            }
+        }
+        let dt_buffer = t2.elapsed();
+        let gb_per_sec = (bytes.len() as f64 / 1_000_000_000.0) / dt_buffer.as_secs_f64();
+        println!(
+            "3. Query Expansion on Whole Buffer ({:.2} MB):\n   Time: {:?}\n   Throughput: {:.2} GB/s (matches={buffer_count})",
+            bytes.len() as f64 / (1024.0 * 1024.0),
+            dt_buffer,
+            gb_per_sec
+        );
     }
 }

@@ -38,7 +38,6 @@ pub(super) struct Tab {
     /// このタブの文書の本体を指す、ネイティブ側ストアの取っ手。
     /// 新しいタブでは作成が非同期に届くまで `None`。
     pub(super) doc: RwSignal<Option<u64>>,
-    pub(super) parked: StoredValue<Option<editor::Parked>, LocalStorage>,
 }
 
 impl Tab {
@@ -49,7 +48,6 @@ impl Tab {
             dirty: RwSignal::new(false),
             large: RwSignal::new(false),
             doc: RwSignal::new(None),
-            parked: StoredValue::new_local(None),
         }
     }
 
@@ -128,11 +126,7 @@ impl Pane {
 
     /// 表示されているドキュメントを画面から外し、タブを付けたままにします。
     /// 下書きは文書の本体から書かれるので、画面から外れても書けます。
-    pub(super) fn park(&self) {
-        let pane = self.editor_pane();
-        let tab = self.tab_untracked();
-        tab.parked.set_value(editor::park(pane));
-    }
+    pub(super) fn park(&self) {}
 }
 
 #[derive(Clone, Copy)]
@@ -265,11 +259,10 @@ impl Shell {
                 if index == current {
                     editor::set_line_count(pane.editor_pane(), count);
                 } else {
-                    tab.parked.update_value(|parked| {
-                        if let Some(parked) = parked {
-                            parked.set_line_count(count);
-                        }
-                    });
+                    let doc_id = tab.id.get_untracked();
+                    editor::get_or_create_doc(doc_id)
+                        .borrow_mut()
+                        .resize_pending(count);
                 }
                 self.status.set("行数を確定しました".into());
                 self.refresh();
@@ -282,16 +275,18 @@ impl Shell {
     /// 届いた行をタブの文書へ入れます。タブが画面上ならそのペインへ、
     /// 駐車中ならその文書へ。
     pub(super) fn feed(&self, tab: Tab, from: usize, lines: &[String]) {
-        if tab.parked.with_value(Option::is_some) {
-            tab.parked.update_value(|parked| {
-                if let Some(parked) = parked {
-                    parked.feed(from, lines);
-                }
-            });
-            return;
-        }
         if let Some(pane) = self.pane_showing(tab) {
             editor::feed_pane(pane.editor_pane(), from, lines);
+        } else {
+            let doc_id = tab.id.get_untracked();
+            let doc = editor::get_or_create_doc(doc_id);
+            doc.borrow_mut().feed(
+                from,
+                lines
+                    .iter()
+                    .map(|line| crate::format::document::read_line(line))
+                    .collect(),
+            );
         }
     }
 
@@ -303,17 +298,11 @@ impl Shell {
         touched_from: usize,
         line_count: usize,
     ) {
-        if tab.parked.with_value(Option::is_some) {
-            tab.parked.update_value(|parked| {
-                if let Some(parked) = parked {
-                    parked.apply_restored(state, touched_from, line_count);
-                }
-            });
-            return;
-        }
-        if let Some(pane) = self.pane_showing(tab) {
-            editor::apply_restored(pane.editor_pane(), state, touched_from, line_count);
-        }
+        let doc_id = tab.id.get_untracked();
+        let doc = editor::get_or_create_doc(doc_id);
+        doc.borrow_mut()
+            .apply_restored(state, touched_from, line_count);
+        editor::redraw_doc(doc_id, None);
     }
 
     pub(super) fn pane_showing(&self, tab: Tab) -> Option<Pane> {
@@ -417,9 +406,7 @@ impl Shell {
     /// タブのドキュメントを `pane` の画面に置き、未保存のマークを保持します。
     pub(super) fn show(&self, pane: Pane, tab: Tab) {
         let dirty = tab.dirty.get_untracked();
-        let parked = tab.parked.try_update_value(Option::take).flatten();
-        // 文書を描画することは変更としてカウントされるため、マークは元に戻されます。また、それとともに下書きも設定され、その描画も作成してはなりません。
-        editor::restore(pane.editor_pane(), parked);
+        editor::bind_doc(pane.editor_pane(), tab.id.get_untracked());
         tab.dirty.set(dirty);
         if !dirty {
             drafts::forget(tab);
@@ -463,6 +450,19 @@ impl Shell {
             // わざと捨てた。
             drafts::forget(tab);
             tab.release_document();
+            let old_doc_id = tab.id.get_untracked();
+            // 他のペインで同じドキュメントが表示されていなければ Document Model も解放する。
+            let other_showing = shell.panes.with_untracked(|panes| {
+                panes.iter().any(|p| {
+                    p.key != pane.key
+                        && p.tabs.with_untracked(|tabs| {
+                            tabs.iter().any(|t| t.id.get_untracked() == old_doc_id)
+                        })
+                })
+            });
+            if !other_showing {
+                editor::release_doc(old_doc_id);
+            }
             let current = pane.current.get_untracked();
             if pane.tabs.with_untracked(Vec::len) == 1 {
                 // 最後のタブは空のままなので、常にドキュメントが存在します。下書きに関しては、新しいタブになります。
@@ -470,7 +470,7 @@ impl Shell {
                 tab.path.set(None);
                 tab.large.set(false);
                 tab.assign_document();
-                editor::restore(pane.editor_pane(), None);
+                editor::bind_doc(pane.editor_pane(), tab.id.get_untracked());
                 tab.dirty.set(false);
                 shell.sync_dirty();
                 shell.refresh();
@@ -626,6 +626,17 @@ impl Shell {
         going.park();
         // タブが最初に移動します。タブが移動するまでは、タブの元のペインがタブを所有します。
         let moved = going.tabs.get_untracked();
+        // staying に既にあるタブと重複しない going のドキュメントだけ解放する。
+        // 判定を extend の前にしないと、moved が staying に含まれて常に true になる。
+        for tab in &moved {
+            let doc_id = tab.id.get_untracked();
+            let in_staying = staying
+                .tabs
+                .with_untracked(|tabs| tabs.iter().any(|t| t.id.get_untracked() == doc_id));
+            if !in_staying {
+                editor::release_doc(doc_id);
+            }
+        }
         staying.tabs.update(|tabs| tabs.extend(moved));
         self.panes.update(|panes| {
             panes.remove(index);
