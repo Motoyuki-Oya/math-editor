@@ -39,6 +39,21 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
         }
     };
 
+    let retreat_match = move || {
+        let cur = current_match.get_untracked();
+        let total = estimated_count.get_untracked().unwrap_or(0);
+        let prev = if cur <= 1 {
+            if total > 0 {
+                total
+            } else {
+                1
+            }
+        } else {
+            cur - 1
+        };
+        current_match.set(prev);
+    };
+
     // バーは開いた後のみ画面上に表示されるため、フィールドが存在するとすぐに、カーソルは要求されたフィールドに置かれます。
     Effect::new(move |_| {
         let field = match shell.find_focus.get() {
@@ -82,15 +97,33 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                                 let shell = shell;
                                 let query = query.get_untracked();
                                 let options = options();
-                                advance_match();
-                                spawn_local(async move {
-                                    let size = file_size_for(shell).await;
-                                    super::sync::find(shell, query, options, size);
-                                });
+                                if ev.shift_key() {
+                                    retreat_match();
+                                    spawn_local(async move {
+                                        let size = file_size_for(shell).await;
+                                        super::sync::find_previous(shell, query, options, size);
+                                    });
+                                } else {
+                                    advance_match();
+                                    spawn_local(async move {
+                                        let size = file_size_for(shell).await;
+                                        super::sync::find(shell, query, options, size);
+                                    });
+                                }
                             }
                         }
                     />
-                    <button class="tool" on:click=move |_| {
+                    <button class="tool" title="前を検索 (Shift+Enter)" on:click=move |_| {
+                        let shell = shell;
+                        let query = query.get_untracked();
+                        let options = options();
+                        retreat_match();
+                        spawn_local(async move {
+                            let size = file_size_for(shell).await;
+                            super::sync::find_previous(shell, query, options, size);
+                        });
+                    }>"前を検索"</button>
+                    <button class="tool" title="次を検索 (Enter)" on:click=move |_| {
                         let shell = shell;
                         let query = query.get_untracked();
                         let options = options();

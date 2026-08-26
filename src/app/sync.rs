@@ -149,6 +149,19 @@ pub(super) fn find(
     );
 }
 
+/// 前を検索。手元に届いている行にあればその場で即座にジャンプ、そうでなければ全体から。
+pub(super) fn find_previous(
+    _shell: Shell,
+    query: String,
+    options: editor::SearchOptions,
+    file_size: Option<usize>,
+) {
+    if editor::find_previous_resident(&query, options, file_size) {
+        return;
+    }
+    editor::find_previous(&query, options, file_size);
+}
+
 fn cancel_running_search(tab: Tab) {
     let id = tab.id.get_untracked();
     if !BUSY.with(|busy| busy.borrow().contains(&id)) {

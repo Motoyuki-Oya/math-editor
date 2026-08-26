@@ -259,6 +259,66 @@ pub fn find_next_resident(query: &str, options: SearchOptions, file_size: Option
     true
 }
 
+pub fn find_previous(query: &str, options: SearchOptions, file_size: Option<usize>) -> bool {
+    let Some(session) = session() else {
+        return false;
+    };
+    let found = {
+        let borrowed = session.borrow();
+        let editor = borrowed.editor.borrow();
+        let from = borrowed
+            .search_from
+            .clone()
+            .unwrap_or_else(|| search::key_at(editor.primary().start(), editor.nested_cursor()));
+        search::find_previous(editor.text(), query, options, file_size, from)
+    };
+    let Some(found) = found else {
+        return false;
+    };
+    apply_found_prev(&session, found);
+    true
+}
+
+/// 手元に届いている行の中だけで前の一致を探し、あればジャンプする。
+pub fn find_previous_resident(
+    query: &str,
+    options: SearchOptions,
+    file_size: Option<usize>,
+) -> bool {
+    let Some(session) = session() else {
+        return false;
+    };
+    let found = {
+        let borrowed = session.borrow();
+        let editor = borrowed.editor.borrow();
+        let from = borrowed
+            .search_from
+            .clone()
+            .unwrap_or_else(|| search::key_at(editor.primary().start(), editor.nested_cursor()));
+        search::find_previous_resident(editor.text(), query, options, file_size, from)
+    };
+    let Some(found) = found else {
+        return false;
+    };
+    apply_found_prev(&session, found);
+    true
+}
+
+fn apply_found_prev(session: &Rc<RefCell<Session>>, found: search::Found) {
+    {
+        session.borrow_mut().search_from = Some(found.place.start());
+        let borrowed = session.borrow();
+        let mut editor = borrowed.editor.borrow_mut();
+        match found.place {
+            Place::Text(sel) => editor.set_sels(vec![sel]),
+            Place::Inside { at, cursor } => {
+                editor.select_nested(at, cursor);
+            }
+        }
+    }
+    redraw(session);
+}
+
 fn apply_found(session: &Rc<RefCell<Session>>, found: search::Found) {
     {
         session.borrow_mut().search_from = Some(found.place.end());

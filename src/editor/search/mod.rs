@@ -121,6 +121,73 @@ pub fn find_next_resident(
     None
 }
 
+pub fn find_previous(
+    text: &Text,
+    query: &str,
+    options: SearchOptions,
+    file_size: Option<usize>,
+    from: Key,
+) -> Option<Found> {
+    let matcher = compile(query, options, file_size)?;
+    let line_count = text.line_count();
+    if line_count == 0 {
+        return None;
+    }
+    let start_line = from.0.line.min(line_count.saturating_sub(1));
+
+    // start_line から 0 に向かって逆順走査し、from より前の最後の一致を探す
+    for line in (0..=start_line).rev() {
+        let mut found = Vec::new();
+        line_matches(&matcher, text, line, &mut found);
+        found.sort_by_key(|f| f.place.start());
+        if let Some(hit) = found.into_iter().rev().find(|f| f.place.start() < from) {
+            return Some(hit);
+        }
+    }
+
+    // 先頭までに見つからなければ末尾から start_line より後ろを逆順ラップアラウンド走査
+    for line in (start_line + 1..line_count).rev() {
+        let mut found = Vec::new();
+        line_matches(&matcher, text, line, &mut found);
+        found.sort_by_key(|f| f.place.start());
+        if let Some(hit) = found.into_iter().next_back() {
+            return Some(hit);
+        }
+    }
+
+    None
+}
+
+/// 手元に届いている連続行の中で後方（上方向）探索を行う。未着行（Absent）にぶつかったら打ち切る。
+pub fn find_previous_resident(
+    text: &Text,
+    query: &str,
+    options: SearchOptions,
+    file_size: Option<usize>,
+    from: Key,
+) -> Option<Found> {
+    let matcher = compile(query, options, file_size)?;
+    let line_count = text.line_count();
+    if line_count == 0 {
+        return None;
+    }
+    let start_line = from.0.line.min(line_count.saturating_sub(1));
+
+    for line in (0..=start_line).rev() {
+        if text.is_absent(line) {
+            break;
+        }
+        let mut found = Vec::new();
+        line_matches(&matcher, text, line, &mut found);
+        found.sort_by_key(|f| f.place.start());
+        if let Some(hit) = found.into_iter().rev().find(|f| f.place.start() < from) {
+            return Some(hit);
+        }
+    }
+
+    None
+}
+
 pub fn find_all(
     text: &Text,
     query: &str,
