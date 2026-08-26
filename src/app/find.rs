@@ -17,7 +17,7 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
     let replacement = RwSignal::new(String::new());
     let regex = RwSignal::new(false);
     let case_sensitive = RwSignal::new(false);
-    let match_pos = RwSignal::new((0usize, 0usize));
+    let visible_count = RwSignal::new(0usize);
     let estimated_count = RwSignal::new(None::<usize>);
     let estimate_generation = RwSignal::new(0u64);
     let options = move || editor::SearchOptions {
@@ -53,7 +53,7 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                                 shell,
                                 value,
                                 options(),
-                                match_pos,
+                                visible_count,
                                 estimated_count,
                                 estimate_generation,
                             );
@@ -65,9 +65,7 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                                 let options = options();
                                 spawn_local(async move {
                                     let size = file_size_for(shell).await;
-                                    if let Some(pos) = super::sync::find(shell, query, options, size) {
-                                        match_pos.set(pos);
-                                    }
+                                    super::sync::find(shell, query, options, size);
                                 });
                             }
                         }
@@ -78,30 +76,17 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                         let options = options();
                         spawn_local(async move {
                             let size = file_size_for(shell).await;
-                            if let Some(pos) = super::sync::find(shell, query, options, size) {
-                                match_pos.set(pos);
-                            }
+                            super::sync::find(shell, query, options, size);
                         });
                     }>"次を検索"</button>
-                    <span class="find-count">{move || {
-                        let q = query.get();
-                        if q.is_empty() {
-                            return "0 / 0 件".to_string();
-                        }
-                        let (current, total) = match_pos.get();
-                        if total > 0 {
-                            format!("{current} / {total} 件")
-                        } else if let Some(estimated) = estimated_count.get() {
-                            if estimated == 0 {
-                                "0 / 0 件".to_string()
-                            } else if current > 0 {
-                                format!("{current} / 約{estimated} 件")
-                            } else {
-                                format!("0 / 約{estimated} 件")
-                            }
-                        } else {
-                            format!("{current} / 推定中…")
-                        }
+                    <span class="find-count">{move || match estimated_count.get() {
+                        Some(estimated) => format!(
+                            "表示 {} 件 / 全体 約{} 件",
+                            visible_count.get(),
+                            estimated,
+                        ),
+                        None if query.get().is_empty() => "表示 0 件".to_string(),
+                        None => format!("表示 {} 件 / 推定中…", visible_count.get()),
                     }}</span>
                     <input
                         class="find-input"
@@ -139,7 +124,7 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                                     shell,
                                     query.get_untracked(),
                                     options(),
-                                    match_pos,
+                                    visible_count,
                                     estimated_count,
                                     estimate_generation,
                                 );
@@ -157,7 +142,7 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                                     shell,
                                     query.get_untracked(),
                                     options(),
-                                    match_pos,
+                                    visible_count,
                                     estimated_count,
                                     estimate_generation,
                                 );
@@ -177,12 +162,11 @@ fn update_preview(
     shell: Shell,
     query: String,
     options: editor::SearchOptions,
-    match_pos: RwSignal<(usize, usize)>,
+    visible_count: RwSignal<usize>,
     estimated_count: RwSignal<Option<usize>>,
     generation: RwSignal<u64>,
 ) {
-    let pos = editor::preview_search(&query, options);
-    match_pos.set(pos);
+    visible_count.set(editor::preview_search(&query, options));
     estimated_count.set(None);
     let current = generation.get_untracked() + 1;
     generation.set(current);

@@ -67,11 +67,31 @@ pub fn find_next(
     file_size: Option<usize>,
     from: Key,
 ) -> Option<Found> {
-    let all = find_all(text, query, options, file_size);
-    all.iter()
-        .find(|found| found.place.start() >= from)
-        .or_else(|| all.first())
-        .cloned()
+    let matcher = compile(query, options, file_size)?;
+    let line_count = text.line_count();
+    let start_line = from.0.line.min(line_count);
+
+    // from 行から文書末尾に向かって 1 行ずつ走査し、最初の 1 件で即座に返る
+    for line in start_line..line_count {
+        let mut found = Vec::new();
+        line_matches(&matcher, text, line, &mut found);
+        found.sort_by_key(|f| f.place.start());
+        if let Some(hit) = found.into_iter().find(|f| f.place.start() >= from) {
+            return Some(hit);
+        }
+    }
+
+    // 末尾までに見つからなければ先頭から from 行の前までラップアラウンド走査
+    for line in 0..start_line {
+        let mut found = Vec::new();
+        line_matches(&matcher, text, line, &mut found);
+        found.sort_by_key(|f| f.place.start());
+        if let Some(hit) = found.into_iter().next() {
+            return Some(hit);
+        }
+    }
+
+    None
 }
 
 pub fn find_all(
