@@ -33,26 +33,18 @@ impl Matcher {
 /// `regex` クレートを使って一致を探します。
 fn regex_matches(regex: &Regex, run: &str) -> Vec<(usize, usize, Vec<String>)> {
     let mut found = Vec::new();
-    let mut byte_starts = Vec::new();
-    let mut end = 0;
-    for (byte, c) in run.char_indices() {
-        byte_starts.push(byte);
-        end = byte + c.len_utf8();
-    }
-    byte_starts.push(end);
-    let byte_to_char = |byte: usize| byte_starts.binary_search(&byte).unwrap_or_else(|pos| pos);
 
     if regex.captures_len() == 1 {
         for m in regex.find_iter(run) {
-            let from = byte_to_char(m.start());
-            let to = byte_to_char(m.end());
+            let from = run[..m.start()].chars().count();
+            let to = from + m.as_str().chars().count();
             found.push((from, to, vec![m.as_str().to_string()]));
         }
     } else {
         for caps in regex.captures_iter(run) {
             let m = caps.get(0).expect("group 0 is always present");
-            let from = byte_to_char(m.start());
-            let to = byte_to_char(m.end());
+            let from = run[..m.start()].chars().count();
+            let to = from + m.as_str().chars().count();
             let groups = (0..caps.len())
                 .map(|i| {
                     caps.get(i)
@@ -370,5 +362,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn regex_matches_correctly_computes_utf8_char_offsets_and_groups() {
+        let regex = regex::Regex::new(r"fn\s+([a-zA-Z_0-9]+)").unwrap();
+        let text = "こんにちは pub fn foo_123() { // テスト\n fn bar()";
+        let matches = regex_matches(&regex, text);
+        assert_eq!(matches.len(), 2);
+        // 1つ目: "fn foo_123" -> 先頭 "こんにちは pub " は 10 文字
+        assert_eq!(matches[0].0, 10);
+        assert_eq!(matches[0].1, 20);
+        assert_eq!(
+            matches[0].2,
+            vec!["fn foo_123".to_string(), "foo_123".to_string()]
+        );
+        // 2つ目: "fn bar"
+        assert_eq!(matches[1].0, 33);
+        assert_eq!(matches[1].1, 39);
+        assert_eq!(matches[1].2, vec!["fn bar".to_string(), "bar".to_string()]);
     }
 }

@@ -429,8 +429,7 @@ impl Shell {
                 panes.iter().any(|p| {
                     p.key != pane.key
                         && p.tabs.with_untracked(|tabs| {
-                            tabs.iter()
-                                .any(|t| t.id.get_untracked() == old_doc_id)
+                            tabs.iter().any(|t| t.id.get_untracked() == old_doc_id)
                         })
                 })
             });
