@@ -29,35 +29,65 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
         editor::clear_search_preview();
     });
 
-    let sync_current_match = move || {
-        let q = query.get_untracked();
-        let total = estimated_count.get_untracked().unwrap_or(0);
-        let num = editor::current_match_number(&q, options(), total);
-        current_match.set(num);
-    };
+    let last_matched_pos = RwSignal::new(None::<(usize, usize)>);
 
     let advance_match = move || {
-        let cur = current_match.get_untracked();
+        let q = query.get_untracked();
         let total = estimated_count.get_untracked().unwrap_or(0);
-        let next = if cur == 0 { 1 } else { cur + 1 };
-        if total > 0 && next > total {
-            current_match.set(1);
+        let cur_cursor = editor::current_cursor_pos();
+        let was_at_last_match =
+            last_matched_pos.get_untracked() == cur_cursor && cur_cursor.is_some();
+
+        let next = if was_at_last_match {
+            let cur = current_match.get_untracked();
+            if cur == 0 {
+                1
+            } else {
+                cur + 1
+            }
         } else {
-            current_match.set(next);
-        }
+            // キャレットの移動があったので、現在位置から何番目かを計算し直す
+            let num = editor::current_match_number(&q, options());
+            if num == 0 {
+                1
+            } else {
+                num + 1
+            }
+        };
+        let final_num = if total > 0 && next > total { 1 } else { next };
+        current_match.set(final_num);
     };
 
     let retreat_match = move || {
-        let cur = current_match.get_untracked();
+        let q = query.get_untracked();
         let total = estimated_count.get_untracked().unwrap_or(0);
-        let prev = if cur <= 1 {
-            if total > 0 {
-                total
+        let cur_cursor = editor::current_cursor_pos();
+        let was_at_last_match =
+            last_matched_pos.get_untracked() == cur_cursor && cur_cursor.is_some();
+
+        let prev = if was_at_last_match {
+            let cur = current_match.get_untracked();
+            if cur <= 1 {
+                if total > 0 {
+                    total
+                } else {
+                    1
+                }
             } else {
-                1
+                cur - 1
             }
         } else {
-            cur - 1
+            // キャレットの移動があったので、現在位置から何番目かを計算し直す
+            let num = editor::current_match_number(&q, options());
+            if num <= 1 {
+                if total > 0 {
+                    total
+                } else {
+                    1
+                }
+            } else {
+                num - 1
+            }
         };
         current_match.set(prev);
     };
@@ -83,11 +113,16 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                         node_ref=query_field
                         placeholder="検索"
                         prop:value=move || query.get()
-                        on:focus=move |_| sync_current_match()
+                        on:focus=move |_| {
+                            let q = query.get_untracked();
+                            current_match.set(editor::current_match_number(&q, options()));
+                            last_matched_pos.set(editor::current_cursor_pos());
+                        }
                         on:input=move |ev| {
                             let value = event_target_value(&ev);
                             query.set(value.clone());
                             current_match.set(0);
+                            last_matched_pos.set(None);
                             update_preview(
                                 shell,
                                 value,
@@ -107,14 +142,14 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                                     spawn_local(async move {
                                         let size = file_size_for(shell).await;
                                         super::sync::find_previous(shell, query, options, size);
-                                        sync_current_match();
+                                        last_matched_pos.set(editor::current_cursor_pos());
                                     });
                                 } else {
                                     advance_match();
                                     spawn_local(async move {
                                         let size = file_size_for(shell).await;
                                         super::sync::find(shell, query, options, size);
-                                        sync_current_match();
+                                        last_matched_pos.set(editor::current_cursor_pos());
                                     });
                                 }
                             }
@@ -128,7 +163,7 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                         spawn_local(async move {
                             let size = file_size_for(shell).await;
                             super::sync::find_previous(shell, query, options, size);
-                            sync_current_match();
+                            last_matched_pos.set(editor::current_cursor_pos());
                         });
                     }>"前を検索"</button>
                     <button class="tool" title="次を検索 (Enter)" on:click=move |_| {
@@ -139,7 +174,7 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                         spawn_local(async move {
                             let size = file_size_for(shell).await;
                             super::sync::find(shell, query, options, size);
-                            sync_current_match();
+                            last_matched_pos.set(editor::current_cursor_pos());
                         });
                     }>"次を検索"</button>
                     <span class="find-count">{move || {
@@ -171,7 +206,7 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                                 spawn_local(async move {
                                     let size = file_size_for(shell).await;
                                     editor::replace_and_find_next(&query, &replacement, options, size);
-                                    sync_current_match();
+                                    last_matched_pos.set(editor::current_cursor_pos());
                                 });
                             }
                         }
@@ -185,7 +220,7 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                         spawn_local(async move {
                             let size = file_size_for(shell).await;
                             editor::replace_and_find_next(&query, &replacement, options, size);
-                            sync_current_match();
+                            last_matched_pos.set(editor::current_cursor_pos());
                         });
                     }>"置換して次へ"</button>
                     <button class="tool" on:click=move |_| {

@@ -218,9 +218,18 @@ pub fn leave_structure(session: &Rc<RefCell<Session>>) {
     session.borrow().editor.borrow_mut().leave_structure();
 }
 
+/// 現在のキャレット（または選択開始）の行・列位置を返す。
+pub fn current_cursor_pos() -> Option<(usize, usize)> {
+    let session = session()?;
+    let borrowed = session.borrow();
+    let editor = borrowed.editor.borrow();
+    let p = editor.primary().start();
+    Some((p.line, p.col))
+}
+
 /// 現在の選択またはキャレット位置が全体の中で何件目のマッチか（1-indexed）を計算する。
-pub fn current_match_number(query: &str, options: SearchOptions, total_count: usize) -> usize {
-    if total_count == 0 || query.is_empty() {
+pub fn current_match_number(query: &str, options: SearchOptions) -> usize {
+    if query.is_empty() {
         return 0;
     }
     let Some(session) = session() else {
@@ -231,7 +240,7 @@ pub fn current_match_number(query: &str, options: SearchOptions, total_count: us
     let text = editor.text();
     let cur_pos = editor.primary().start();
     let cur_key = search::key_at(cur_pos, editor.nested_cursor());
-    search::count_matches_up_to(text, query, options, total_count, cur_key)
+    search::count_matches_up_to(text, query, options, cur_key)
 }
 
 pub fn find_next(query: &str, options: SearchOptions, file_size: Option<usize>) -> bool {
