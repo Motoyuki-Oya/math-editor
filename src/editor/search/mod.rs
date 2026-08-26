@@ -10,7 +10,6 @@
 use crate::structure::ast::{Cursor, Node, NodeKind, Row};
 use crate::structure::text::{as_char, Pos, Sel, Text};
 
-mod boyer_moore;
 mod matcher;
 
 use matcher::{compile, Matcher};
