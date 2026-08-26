@@ -255,6 +255,48 @@ pub fn find_in_line(
         .find(|found| after.is_none_or(|after| found.place.start() >= *after))
 }
 
+/// 指定されたキー位置（行・列）までの手元の一致数を数える。
+/// 全行が常駐している通常ファイルでは正確な累積件数を返し、
+/// 巨大文書（未着行あり）では行番号の比率から O(1) で推計する。
+pub fn count_matches_up_to(
+    text: &Text,
+    query: &str,
+    options: SearchOptions,
+    total_count: usize,
+    up_to: Key,
+) -> usize {
+    if total_count == 0 || query.is_empty() {
+        return 0;
+    }
+    // 1. 手元に全行がある場合 (未着行なし) は、0..up_to までの正確なマッチ数を数える
+    if text.absent_lines() == 0 {
+        let Some(matcher) = compile(query, options, None) else {
+            return 0;
+        };
+        let mut count = 0;
+        let target_line = up_to.0.line.min(text.line_count().saturating_sub(1));
+        for line in 0..target_line {
+            let mut found = Vec::new();
+            line_matches(&matcher, text, line, &mut found);
+            count += found.len();
+        }
+        let mut found = Vec::new();
+        line_matches(&matcher, text, target_line, &mut found);
+        for f in found {
+            if f.place.start() <= up_to {
+                count += 1;
+            }
+        }
+        return count.max(1).min(total_count);
+    }
+
+    // 2. 巨大ファイル（未着行あり）: 行番号の進行度から O(1) で推計
+    let total_lines = text.line_count().max(1);
+    let progress = (up_to.0.line as f64) / (total_lines as f64);
+    let estimated = ((progress * (total_count as f64)).round() as usize).max(1);
+    estimated.min(total_count)
+}
+
 /// 1 つの文書行の一致すべて: 素の文字の並びと、行に立つ構造の中身。
 fn line_matches(matcher: &Matcher, text: &Text, line: usize, found: &mut Vec<Found>) {
     if text.is_absent(line) {
