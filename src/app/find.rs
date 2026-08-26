@@ -47,7 +47,7 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
             }
         } else {
             // キャレットの移動があったので、現在位置から何番目かを計算し直す
-            let num = editor::current_match_number(&q, options());
+            let num = editor::current_match_number(&q, options(), total);
             if num == 0 {
                 1
             } else {
@@ -78,7 +78,7 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
             }
         } else {
             // キャレットの移動があったので、現在位置から何番目かを計算し直す
-            let num = editor::current_match_number(&q, options());
+            let num = editor::current_match_number(&q, options(), total);
             if num <= 1 {
                 if total > 0 {
                     total
@@ -115,7 +115,8 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                         prop:value=move || query.get()
                         on:focus=move |_| {
                             let q = query.get_untracked();
-                            current_match.set(editor::current_match_number(&q, options()));
+                            let total = estimated_count.get_untracked().unwrap_or(0);
+                            current_match.set(editor::current_match_number(&q, options(), total));
                             last_matched_pos.set(editor::current_cursor_pos());
                         }
                         on:input=move |ev| {
