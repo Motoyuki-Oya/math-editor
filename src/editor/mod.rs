@@ -18,6 +18,6 @@ pub use search::SearchOptions;
 pub use session::{
     bind_doc, clear_modified, clear_search_preview, close_pane, feed_pane, focus_pane,
     fully_resident, get_or_create_doc, init, load, load_pending, preview_search, redraw_all,
-    redraw_doc, release_doc, set_line_count, set_on_change, set_on_far_copy, set_on_missing, stats,
-    take_flush, FlushBatch,
+    redraw_doc, release_doc, set_line_count, set_on_change, set_on_far_copy, set_on_missing,
+    set_on_tail, show_tail, stats, take_flush, FlushBatch,
 };

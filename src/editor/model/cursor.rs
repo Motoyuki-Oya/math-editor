@@ -120,15 +120,37 @@ pub fn word_at(text: &Text, at: Pos) -> Option<Sel> {
 
 /// 既に選択した場所をスキップして、 `from` からアイテムを探します。
 pub fn find_after(text: &Text, needle: &[Node], from: Pos, taken: &[Pos]) -> Option<Sel> {
-    let mut at = from;
-    for _ in 0..text.line_count() + 1 {
-        for line in at.line..text.line_count() {
+    if needle.is_empty() {
+        return None;
+    }
+    let total_lines = text.line_count();
+    let mut passes = Vec::with_capacity(2);
+    if from == Pos::default() {
+        passes.push(0..total_lines);
+    } else {
+        passes.push(from.line..total_lines);
+        passes.push(0..from.line + 1);
+    }
+    for (pass_idx, range) in passes.into_iter().enumerate() {
+        for line in range {
+            if text.is_absent(line) {
+                continue;
+            }
             let items = text.line(line);
-            let start_col = if line == at.line { at.col } else { 0 };
-            for col in start_col..=items.len().saturating_sub(needle.len()) {
-                if items.len() < needle.len() {
-                    break;
-                }
+            if items.len() < needle.len() {
+                continue;
+            }
+            let start_col = if pass_idx == 0 && line == from.line {
+                from.col
+            } else {
+                0
+            };
+            let end_col_limit = if pass_idx == 1 && line == from.line {
+                from.col.min(items.len().saturating_sub(needle.len()))
+            } else {
+                items.len().saturating_sub(needle.len())
+            };
+            for col in start_col..=end_col_limit {
                 if &items[col..col + needle.len()] == needle
                     && !taken.contains(&Pos::new(line, col))
                 {
@@ -139,10 +161,6 @@ pub fn find_after(text: &Text, needle: &[Node], from: Pos, taken: &[Pos]) -> Opt
                 }
             }
         }
-        if at == Pos::default() {
-            return None;
-        }
-        at = Pos::default();
     }
     None
 }
