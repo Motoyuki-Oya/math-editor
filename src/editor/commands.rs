@@ -272,8 +272,60 @@ fn apply_found(session: &Rc<RefCell<Session>>, found: search::Found) {
             }
         }
     }
-    focus();
     redraw(session);
+}
+
+/// 現在の一致があればそれを置換し、直後に次の一致へ進む。
+pub fn replace_and_find_next(
+    query: &str,
+    replacement: &str,
+    options: SearchOptions,
+    file_size: Option<usize>,
+) -> bool {
+    let Some(session) = session() else {
+        return false;
+    };
+    if query.is_empty() {
+        return false;
+    }
+    let replaced = {
+        let borrowed = session.borrow();
+        let editor = borrowed.editor.borrow();
+        let from = search::key_at(editor.primary().start(), editor.nested_cursor());
+        if let Some(found) = search::find_in_line(
+            editor.text(),
+            from.0.line,
+            query,
+            options,
+            file_size,
+            Some(&from),
+        ) {
+            if found.place.start() == from {
+                drop(editor);
+                let text = search::expand(&found.groups, replacement, options);
+                let mut editor = borrowed.editor.borrow_mut();
+                editor.one_step(|editor| match &found.place {
+                    Place::Text(sel) => editor.replace_range_with(
+                        sel.start(),
+                        sel.end(),
+                        search::replacement_nodes(&text),
+                    ),
+                    Place::Inside { at, cursor } => {
+                        editor.replace_nested(*at, cursor.clone(), &text);
+                    }
+                });
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    };
+    if replaced {
+        changed(&session);
+    }
+    find_next(query, options, file_size)
 }
 
 /// 文書の本体の走査で検索を続けるための出発点: 検索キーと行数。

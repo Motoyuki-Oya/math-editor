@@ -77,7 +77,8 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                             );
                         }
                         on:keydown=move |ev: KeyboardEvent| {
-                            if ev.key() == "Enter" {
+                            if ev.key() == "Enter" && !ev.is_composing() {
+                                ev.prevent_default();
                                 let shell = shell;
                                 let query = query.get_untracked();
                                 let options = options();
@@ -107,7 +108,7 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                         let cur = current_match.get();
                         match estimated_count.get() {
                             Some(0) => "0 / 0 件".to_string(),
-                            Some(estimated) => format!("{cur} / 約{estimated} 件"),
+                            Some(estimated) => format!("{cur} / {estimated} 件"),
                             None => format!("{cur} / 推定中…"),
                         }
                     }}</span>
@@ -117,7 +118,32 @@ pub fn FindBar(shell: Shell) -> impl IntoView {
                         placeholder="置換後"
                         prop:value=move || replacement.get()
                         on:input=move |ev| replacement.set(event_target_value(&ev))
+                        on:keydown=move |ev: KeyboardEvent| {
+                            if ev.key() == "Enter" && !ev.is_composing() {
+                                ev.prevent_default();
+                                let shell = shell;
+                                let query = query.get_untracked();
+                                let replacement = replacement.get_untracked();
+                                let options = options();
+                                advance_match();
+                                spawn_local(async move {
+                                    let size = file_size_for(shell).await;
+                                    editor::replace_and_find_next(&query, &replacement, options, size);
+                                });
+                            }
+                        }
                     />
+                    <button class="tool" on:click=move |_| {
+                        let shell = shell;
+                        let query = query.get_untracked();
+                        let replacement = replacement.get_untracked();
+                        let options = options();
+                        advance_match();
+                        spawn_local(async move {
+                            let size = file_size_for(shell).await;
+                            editor::replace_and_find_next(&query, &replacement, options, size);
+                        });
+                    }>"置換して次へ"</button>
                     <button class="tool" on:click=move |_| {
                         let shell = shell;
                         let query = query.get_untracked();
