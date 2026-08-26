@@ -218,24 +218,63 @@ pub fn leave_structure(session: &Rc<RefCell<Session>>) {
     session.borrow().editor.borrow_mut().leave_structure();
 }
 
-pub fn find_next(query: &str, options: SearchOptions, file_size: Option<usize>) -> bool {
-    let Some(session) = session() else {
-        return false;
-    };
-    let found = {
-        let borrowed = session.borrow();
-        let editor = borrowed.editor.borrow();
-        let from = borrowed
-            .search_from
-            .clone()
-            .unwrap_or_else(|| search::key_at(editor.primary().end(), editor.nested_cursor()));
-        search::find_next(editor.text(), query, options, file_size, from)
-    };
-    let Some(found) = found else {
-        return false;
-    };
-    apply_found(&session, found);
-    true
+pub fn find_next(
+    query: &str,
+    options: SearchOptions,
+    file_size: Option<usize>,
+) -> Option<(usize, usize)> {
+    let session = session()?;
+    let is_full = session.borrow().editor.borrow().text().absent_lines() == 0;
+    if is_full {
+        let (found, cur, total) = {
+            let mut borrowed = session.borrow_mut();
+            let editor_rc = borrowed.editor.clone();
+            if borrowed.search_matches.is_empty() {
+                let matches = {
+                    let editor = editor_rc.borrow();
+                    search::find_all(editor.text(), query, options, file_size)
+                };
+                borrowed.search_matches = matches;
+                borrowed.search_index = 0;
+            }
+            if borrowed.search_matches.is_empty() {
+                return None;
+            }
+            let total = borrowed.search_matches.len();
+            let cur_key = {
+                let editor = editor_rc.borrow();
+                search::key_at(editor.primary().start(), editor.nested_cursor())
+            };
+            let next_idx =
+                if borrowed.search_matches[borrowed.search_index].place.start() == cur_key {
+                    (borrowed.search_index + 1) % total
+                } else {
+                    borrowed
+                        .search_matches
+                        .iter()
+                        .position(|m| m.place.start() > cur_key)
+                        .unwrap_or(0)
+                };
+            borrowed.search_index = next_idx;
+            let found = borrowed.search_matches[next_idx].clone();
+            (found, next_idx + 1, total)
+        };
+        apply_found(&session, found);
+        Some((cur, total))
+    } else {
+        let found = {
+            let borrowed = session.borrow();
+            let editor = borrowed.editor.borrow();
+            let from = borrowed
+                .search_from
+                .clone()
+                .unwrap_or_else(|| search::key_at(editor.primary().end(), editor.nested_cursor()));
+            search::find_next(editor.text(), query, options, file_size, from)
+        };
+        let found = found?;
+        apply_found(&session, found);
+        Some((1, 0))
+    }
 }
 
 fn apply_found(session: &Rc<RefCell<Session>>, found: search::Found) {

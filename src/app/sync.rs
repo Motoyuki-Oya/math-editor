@@ -128,10 +128,9 @@ pub(super) fn find(
     query: String,
     options: editor::SearchOptions,
     file_size: Option<usize>,
-) {
+) -> Option<(usize, usize)> {
     if editor::fully_resident() {
-        editor::find_next(&query, options, file_size);
-        return;
+        return editor::find_next(&query, options, file_size);
     }
     let tab = shell.tab_untracked();
     cancel_running_search(tab);
@@ -144,6 +143,7 @@ pub(super) fn find(
             file_size,
         },
     );
+    None
 }
 
 fn cancel_running_search(tab: Tab) {

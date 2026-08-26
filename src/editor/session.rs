@@ -36,6 +36,10 @@ pub struct Session {
     preview_options: search::SearchOptions,
     preview_file_size: Option<usize>,
     preview_found: Vec<search::Found>,
+    /// 検索の一致一覧（手元にある場合の一括キャッシュ）。
+    pub search_matches: Vec<search::Found>,
+    /// 現在アクティブな一致のインデックス。
+    pub search_index: usize,
     /// 行数の走査がまだ終わっていないか。終わるまで Ctrl+End は保留する。
     pub counting: bool,
     /// 走査完了を待っている Ctrl+End（値は shift）。確定したら跳ぶ。
@@ -140,6 +144,8 @@ pub fn init(root: &HtmlElement) -> Option<usize> {
         preview_options: search::SearchOptions::default(),
         preview_file_size: None,
         preview_found: Vec::new(),
+        search_matches: Vec::new(),
+        search_index: 0,
         counting: false,
         jump_end: None,
         pending_tail: None,
@@ -325,18 +331,55 @@ fn request_missing(session: &Rc<RefCell<Session>>) {
     }
 }
 
-/// 検索欄の入力を可視範囲へ反映する。選択やキャレットは変更しない。
-pub fn preview_search(query: &str, options: search::SearchOptions) -> usize {
-    let Some(session) = session() else { return 0 };
-    {
+/// 検索欄の入力を可視範囲へ反映し、(現在の一致番号, 総一致件数) を返す。
+pub fn preview_search(query: &str, options: search::SearchOptions) -> (usize, usize) {
+    let Some(session) = session() else {
+        return (0, 0);
+    };
+    let (cur, total) = {
         let mut borrowed = session.borrow_mut();
         borrowed.preview_query = query.to_string();
         borrowed.preview_options = options;
         refresh_preview(&mut borrowed);
-    }
+        let editor_rc = borrowed.editor.clone();
+        if query.is_empty() {
+            borrowed.search_matches.clear();
+            borrowed.search_index = 0;
+            (0, 0)
+        } else {
+            let is_full = editor_rc.borrow().text().absent_lines() == 0;
+            if is_full {
+                let matches = {
+                    let editor = editor_rc.borrow();
+                    search::find_all(editor.text(), query, options, borrowed.preview_file_size)
+                };
+                let total = matches.len();
+                if total == 0 {
+                    borrowed.search_matches = matches;
+                    borrowed.search_index = 0;
+                    (0, 0)
+                } else {
+                    let cur_key = {
+                        let editor = editor_rc.borrow();
+                        search::key_at(editor.primary().start(), editor.nested_cursor())
+                    };
+                    let idx = matches
+                        .iter()
+                        .position(|m| m.place.start() >= cur_key)
+                        .unwrap_or(0);
+                    borrowed.search_matches = matches;
+                    borrowed.search_index = idx;
+                    (idx + 1, total)
+                }
+            } else {
+                borrowed.search_matches.clear();
+                borrowed.search_index = 0;
+                (0, 0)
+            }
+        }
+    };
     redraw_preview_overlay(&session);
-    let count = session.borrow().preview_found.len();
-    count
+    (cur, total)
 }
 
 pub fn clear_search_preview() {
@@ -345,6 +388,8 @@ pub fn clear_search_preview() {
         let mut borrowed = session.borrow_mut();
         borrowed.preview_query.clear();
         borrowed.preview_found.clear();
+        borrowed.search_matches.clear();
+        borrowed.search_index = 0;
     }
     redraw_preview_overlay(&session);
 }
@@ -413,7 +458,12 @@ fn preview_highlights(session: &Session) -> Vec<crate::view::document::Highlight
 pub fn changed(session: &Rc<RefCell<Session>>) {
     let doc_id = session.borrow().doc_id;
     let pane = session.borrow().pane;
-    session.borrow_mut().search_from = None;
+    {
+        let mut borrowed = session.borrow_mut();
+        borrowed.search_from = None;
+        borrowed.search_matches.clear();
+        borrowed.search_index = 0;
+    }
 
     // 同じ doc_id を表示しているすべてのセッション（View）を再描画
     redraw_doc(doc_id, Some(pane));
