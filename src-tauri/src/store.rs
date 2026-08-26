@@ -1072,7 +1072,9 @@ impl Document {
         if sampled == 0 {
             return Ok(0);
         }
-        Ok(((hits as u128 * self.count as u128 + sampled as u128 / 2) / sampled as u128) as usize)
+        // 切り上げ丸めは全行ヒット時に count+1 を返してしまうので、切り捨てで推定する。
+        let estimate = (hits as u128 * self.count as u128 / sampled as u128) as usize;
+        Ok(estimate.min(self.count))
     }
 
     /// `from..=to` の行のうち `needle` を含むもの。

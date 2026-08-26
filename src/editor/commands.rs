@@ -227,9 +227,10 @@ pub fn current_cursor_pos() -> Option<(usize, usize)> {
     Some((p.line, p.col))
 }
 
-/// 現在の選択またはキャレット位置が全体の中で何件目のマッチか（1-indexed）を計算する。
-pub fn current_match_number(query: &str, options: SearchOptions, total_count: usize) -> usize {
-    if total_count == 0 || query.is_empty() {
+/// 現在のキャレット位置が全体の中で何件目のマッチか（1-indexed）を返す。
+/// 巨大ファイル（未着行あり）では行位置の比率から推定する。
+pub fn current_match_number(query: &str, options: SearchOptions, total: usize) -> usize {
+    if total == 0 || query.is_empty() {
         return 0;
     }
     let Some(session) = session() else {
@@ -239,19 +240,17 @@ pub fn current_match_number(query: &str, options: SearchOptions, total_count: us
     let editor = borrowed.editor.borrow();
     let text = editor.text();
     let cur_pos = editor.primary().start();
-    let cur_key = search::key_at(cur_pos, editor.nested_cursor());
 
-    // 1. 手元に全行がある場合 (未着行なしの通常ファイル) は、0..cur_pos までの正確なマッチ数を手元で数える
     if text.absent_lines() == 0 {
-        let count = search::count_matches_up_to(text, query, options, cur_key);
-        return count.max(1).min(total_count);
+        // 全行が手元にある通常ファイル: 正確に数える
+        let key = search::key_at(cur_pos, editor.nested_cursor());
+        search::count_matches_up_to(text, query, options, key).clamp(1, total)
+    } else {
+        // 巨大ファイル: 行位置の進行度 × 総件数で推定
+        let last_line = text.line_count().saturating_sub(1).max(1);
+        let ratio = cur_pos.line as f64 / last_line as f64;
+        (ratio * total as f64).round().clamp(1.0, total as f64) as usize
     }
-
-    // 2. 巨大ファイル (未着行あり): 行番号の進行度（現在行 / 総行数）× 総推定件数
-    let total_lines = text.line_count().max(1);
-    let progress = (cur_pos.line as f64) / (total_lines.saturating_sub(1).max(1) as f64);
-    let estimated = (progress * (total_count as f64)).round() as usize;
-    estimated.max(1).min(total_count)
 }
 
 pub fn find_next(query: &str, options: SearchOptions, file_size: Option<usize>) -> bool {
