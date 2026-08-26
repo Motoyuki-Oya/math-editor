@@ -877,8 +877,8 @@ impl Document {
         cancelled: &dyn Fn() -> bool,
     ) -> Result<SearchCandidates, String> {
         // 1回の読みを大きくしてseek・確保を減らしつつ、キャンセル確認は
-        // 100万行ごとに行う（800MBの実測では1ページ数百ms）。
-        const PAGE_LINES: usize = 1_000_000;
+        let mut page_lines = 10_000;
+        const MAX_PAGE_LINES: usize = 1_000_000;
         let SearchSpec {
             pattern,
             literal,
@@ -898,7 +898,7 @@ impl Document {
                     cancelled: true,
                 });
             }
-            let page_end = (at + PAGE_LINES).min(end);
+            let page_end = (at + page_lines).min(end);
             let (mut hits, _) = if let Some(query) = literal {
                 self.scan_literal(query, case_sensitive, marker, at, page_end - at, usize::MAX)?
             } else {
@@ -919,6 +919,7 @@ impl Document {
                 });
             }
             at = page_end;
+            page_lines = (page_lines * 4).min(MAX_PAGE_LINES);
         }
         Ok(SearchCandidates {
             hits: Vec::new(),

@@ -238,6 +238,27 @@ pub fn find_next(query: &str, options: SearchOptions, file_size: Option<usize>) 
     true
 }
 
+/// 手元に届いている行の中だけで次の一致を探し、あればジャンプする。
+pub fn find_next_resident(query: &str, options: SearchOptions, file_size: Option<usize>) -> bool {
+    let Some(session) = session() else {
+        return false;
+    };
+    let found = {
+        let borrowed = session.borrow();
+        let editor = borrowed.editor.borrow();
+        let from = borrowed
+            .search_from
+            .clone()
+            .unwrap_or_else(|| search::key_at(editor.primary().end(), editor.nested_cursor()));
+        search::find_next_resident(editor.text(), query, options, file_size, from)
+    };
+    let Some(found) = found else {
+        return false;
+    };
+    apply_found(&session, found);
+    true
+}
+
 fn apply_found(session: &Rc<RefCell<Session>>, found: search::Found) {
     {
         session.borrow_mut().search_from = Some(found.place.end());

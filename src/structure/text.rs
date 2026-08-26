@@ -438,6 +438,15 @@ impl Text {
         self.lines.get(line).map(|l| l.nodes()).unwrap_or(&[])
     }
 
+    /// 行が素のテキスト（未展開）の場合に、展開せずに直接文字列スライスを返す。
+    /// 検索などで展開コスト・アロケーションをゼロにする。
+    pub fn line_str(&self, line: usize) -> Option<&str> {
+        match self.lines.get(line)?.as_ref() {
+            Line::Raw { source, .. } => Some(source.as_str()),
+            _ => None,
+        }
+    }
+
     pub fn line_mut(&mut self, line: usize) -> Option<&mut Row> {
         if line >= self.lines.len() {
             return None;

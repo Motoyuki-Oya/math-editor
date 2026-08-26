@@ -11,8 +11,8 @@ mod session;
 mod trigger;
 
 pub use commands::{
-    annotate, apply_far_match, far_search_start, find_far_in_line, find_next, insert_node,
-    replace_all, select_all, FarCopy,
+    annotate, apply_far_match, far_search_start, find_far_in_line, find_next, find_next_resident,
+    insert_node, replace_all, select_all, FarCopy,
 };
 pub use search::SearchOptions;
 pub use session::{

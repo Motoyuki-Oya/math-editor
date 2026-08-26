@@ -94,6 +94,33 @@ pub fn find_next(
     None
 }
 
+/// 手元に届いている連続行の中で前方探索を行う。未着行（Absent）にぶつかったら打ち切る。
+pub fn find_next_resident(
+    text: &Text,
+    query: &str,
+    options: SearchOptions,
+    file_size: Option<usize>,
+    from: Key,
+) -> Option<Found> {
+    let matcher = compile(query, options, file_size)?;
+    let line_count = text.line_count();
+    let start_line = from.0.line.min(line_count);
+
+    for line in start_line..line_count {
+        if text.is_absent(line) {
+            break;
+        }
+        let mut found = Vec::new();
+        line_matches(&matcher, text, line, &mut found);
+        found.sort_by_key(|f| f.place.start());
+        if let Some(hit) = found.into_iter().find(|f| f.place.start() >= from) {
+            return Some(hit);
+        }
+    }
+
+    None
+}
+
 pub fn find_all(
     text: &Text,
     query: &str,
@@ -144,6 +171,18 @@ pub fn find_in_line(
 
 /// 1 つの文書行の一致すべて: 素の文字の並びと、行に立つ構造の中身。
 fn line_matches(matcher: &Matcher, text: &Text, line: usize, found: &mut Vec<Found>) {
+    if text.is_absent(line) {
+        return;
+    }
+    if let Some(source) = text.line_str(line) {
+        for (from, to, groups) in matcher.matches(source) {
+            found.push(Found {
+                place: Place::Text(Sel::range(Pos::new(line, from), Pos::new(line, to))),
+                groups,
+            });
+        }
+        return;
+    }
     let items = text.line(line);
     for (start, run) in runs(items) {
         for (from, to, groups) in matcher.matches(&run) {
