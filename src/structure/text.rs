@@ -7,9 +7,42 @@
 //! 行だけが書き込み時に複製される。
 
 use std::cell::{Cell, OnceCell};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use super::ast::{Node, NodeKind, Row};
+
+pub const PAGE_SHIFT: usize = 10; // 1024 = 2^10
+pub const PAGE_SIZE: usize = 1 << PAGE_SHIFT;
+pub const PAGE_MASK: usize = PAGE_SIZE - 1;
+
+type Page = Box<[Rc<Line>; PAGE_SIZE]>;
+
+fn new_absent_page() -> Page {
+    let absent = Rc::new(Line::Absent);
+    Box::new(std::array::from_fn(|_| absent.clone()))
+}
+
+/// 行番号から (ページ番号, ページ内オフセット) をビット演算で瞬時に分解するマクロ
+macro_rules! page_and_offset {
+    ($line:expr) => {
+        (($line) >> PAGE_SHIFT, ($line) & PAGE_MASK)
+    };
+}
+
+/// ページが存在すればその行参照を、存在しなければ Absent を渡して処理するマクロ
+macro_rules! with_line {
+    ($self:expr, $line:expr, |$l:ident| $body:block) => {{
+        let (page_idx, offset) = page_and_offset!($line);
+        if let Some(page) = $self.pages.get(&page_idx) {
+            let $l = page[offset].as_ref();
+            $body
+        } else {
+            let $l = &Line::Absent;
+            $body
+        }
+    }};
+}
 
 /// A position between top-level nodes. `col` counts nodes, not bytes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -149,7 +182,8 @@ pub struct LineChange {
 /// Document lines. A document always has at least one line.
 #[derive(Clone, Debug, Eq)]
 pub struct Text {
-    lines: Vec<Rc<Line>>,
+    line_count: usize,
+    pages: BTreeMap<usize, Page>,
     /// まだ回収されていない行の入れ替え。互いに重ならず、今の行番号の昇順。
     changes: Vec<LineChange>,
     /// まだ届いていない行の数。残っているかを行を数えずに答えるための控え。
@@ -163,14 +197,27 @@ pub struct Text {
 /// 行の中身が同じなら同じ文書。入れ替えの控えは持ち方の話で、意味ではない。
 impl PartialEq for Text {
     fn eq(&self, other: &Text) -> bool {
-        self.lines == other.lines
+        if self.line_count != other.line_count {
+            return false;
+        }
+        for i in 0..self.line_count {
+            if self.line(i) != other.line(i) {
+                return false;
+            }
+        }
+        true
     }
 }
 
 impl Default for Text {
     fn default() -> Self {
+        let mut pages = BTreeMap::new();
+        let mut page = new_absent_page();
+        page[0] = Rc::new(Line::Rows(Row::new()));
+        pages.insert(0, page);
         Self {
-            lines: vec![Rc::new(Line::Rows(Row::new()))],
+            line_count: 1,
+            pages,
             changes: Vec::new(),
             absent: 0,
             total_chars: Cell::new(Some(0)),
@@ -192,31 +239,34 @@ impl Text {
         if lines.is_empty() {
             return Self::default();
         }
+        let line_count = lines.len();
         let mut total = 0;
-        let line_objs: Vec<Rc<Line>> = lines
-            .into_iter()
-            .map(|line| {
+        let mut pages = BTreeMap::new();
+        for (chunk_idx, chunk) in lines.chunks(PAGE_SIZE).enumerate() {
+            let mut page = new_absent_page();
+            for (offset, line) in chunk.iter().enumerate() {
                 let (l, len) = match line {
                     SourceLine::Plain(source) => {
                         let len = source.chars().count();
-                        (Line::raw(source), len)
+                        (Line::raw(source.clone()), len)
                     }
                     SourceLine::Parsed(row) => {
                         let len = row.len();
-                        (Line::Rows(row), len)
+                        (Line::Rows(row.clone()), len)
                     }
                 };
                 total += len;
-                Rc::new(l)
-            })
-            .collect();
-        let len = line_objs.len();
+                page[offset] = Rc::new(l);
+            }
+            pages.insert(chunk_idx, page);
+        }
         Self {
-            lines: line_objs,
+            line_count,
+            pages,
             changes: Vec::new(),
             absent: 0,
             total_chars: Cell::new(Some(total)),
-            resident_span: Cell::new(Some((0, len))),
+            resident_span: Cell::new(Some((0, line_count))),
         }
     }
 
@@ -237,7 +287,7 @@ impl Text {
         self.changes = vec![LineChange {
             from: 0,
             removed: 1,
-            inserted: self.lines.len(),
+            inserted: self.line_count,
         }];
     }
 
@@ -260,9 +310,6 @@ impl Text {
                 overlapping.push(span);
             }
         }
-        // 重なった入れ替えと今回の入れ替えを覆う窓。窓の中で以前の入れ替えが
-        // 入れた行以外は元の文書の行なので、まとめて removed に数える
-        // （触っていない行も混ざるが、同じ内容を送り直すだけで害はない）。
         let start = overlapping.first().map_or(from, |span| span.from.min(from));
         let end = overlapping.last().map_or(from + removed, |span| {
             (span.from + span.inserted).max(from + removed)
@@ -283,19 +330,23 @@ impl Text {
     /// まだ素の文字列のまま持っている行。保存形式の層がそのまま書き戻すための
     /// 早道で、編集された行は `None` になる。
     pub fn raw_line(&self, line: usize) -> Option<&str> {
-        match self.lines.get(line).map(Rc::as_ref) {
-            Some(Line::Raw { source, .. }) => Some(source),
-            _ => None,
+        if line >= self.line_count {
+            return None;
         }
+        with_line!(self, line, |l| {
+            match l {
+                Line::Raw { source, .. } => Some(source.as_str()),
+                _ => None,
+            }
+        })
     }
 
     /// 行数だけが分かっている文書。行の中身は [`Text::fill_line`] で後から届く。
     pub fn pending(line_count: usize) -> Self {
         let line_count = line_count.max(1);
-        // 未着行は中身を持たないので、同じ 1 つの Rc を全行で共有する。
-        let absent = Rc::new(Line::Absent);
         Self {
-            lines: vec![absent; line_count],
+            line_count,
+            pages: BTreeMap::new(),
             changes: Vec::new(),
             absent: line_count,
             total_chars: Cell::new(Some(0)),
@@ -313,30 +364,61 @@ impl Text {
         let absent = Rc::new(Line::Absent);
         let mut evicted_chars = 0;
         let search_start = span_start;
-        let search_end = span_end.min(self.lines.len());
+        let search_end = span_end.min(self.line_count);
         let mut new_min = usize::MAX;
         let mut new_max = 0;
 
-        for i in search_start..search_end {
-            let slot = &mut self.lines[i];
-            if matches!(slot.as_ref(), Line::Absent) {
+        let start_page = search_start >> PAGE_SHIFT;
+        let end_page = if search_end == 0 {
+            0
+        } else {
+            (search_end - 1) >> PAGE_SHIFT
+        };
+
+        let mut empty_pages = Vec::new();
+
+        for page_idx in start_page..=end_page {
+            let Some(page) = self.pages.get_mut(&page_idx) else {
                 continue;
+            };
+            let page_base = page_idx << PAGE_SHIFT;
+            let mut page_has_resident = false;
+
+            for offset in 0..PAGE_SIZE {
+                let line = page_base + offset;
+                if line >= self.line_count {
+                    break;
+                }
+                let slot = &mut page[offset];
+                if matches!(slot.as_ref(), Line::Absent) {
+                    continue;
+                }
+                if keep.contains(&line)
+                    || pinned.contains(&line)
+                    || self
+                        .changes
+                        .iter()
+                        .any(|c| line >= c.from && line < c.from + c.inserted)
+                {
+                    new_min = new_min.min(line);
+                    new_max = new_max.max(line + 1);
+                    page_has_resident = true;
+                    continue;
+                }
+                evicted_chars += slot.len();
+                *slot = absent.clone();
+                self.absent += 1;
             }
-            if keep.contains(&i)
-                || pinned.contains(&i)
-                || self
-                    .changes
-                    .iter()
-                    .any(|c| i >= c.from && i < c.from + c.inserted)
-            {
-                new_min = new_min.min(i);
-                new_max = new_max.max(i + 1);
-                continue;
+
+            if !page_has_resident {
+                empty_pages.push(page_idx);
             }
-            evicted_chars += slot.len();
-            *slot = absent.clone();
-            self.absent += 1;
         }
+
+        for page_idx in empty_pages {
+            self.pages.remove(&page_idx);
+        }
+
         self.resident_span.set(if new_min < new_max {
             Some((new_min, new_max))
         } else {
@@ -350,9 +432,9 @@ impl Text {
     /// 走査で確定した行数へ合わせる。伸びる分は未着行として足す。
     pub fn resize_pending(&mut self, line_count: usize) {
         let target = line_count.max(1);
-        if target > self.lines.len() {
-            let added = target - self.lines.len();
-            self.lines.resize(target, Rc::new(Line::Absent));
+        if target > self.line_count {
+            let added = target - self.line_count;
+            self.line_count = target;
             self.absent += added;
         }
     }
@@ -360,10 +442,27 @@ impl Text {
     /// EOF基準の仮ウィンドウなど、届き直す範囲を未着へ戻す。
     pub fn forget_range(&mut self, range: std::ops::Range<usize>) {
         let absent = Rc::new(Line::Absent);
-        for slot in self.lines.iter_mut().take(range.end).skip(range.start) {
-            if !matches!(slot.as_ref(), Line::Absent) {
-                *slot = absent.clone();
-                self.absent += 1;
+        let start = range.start.min(self.line_count);
+        let end = range.end.min(self.line_count);
+        if start >= end {
+            return;
+        }
+        let start_page = start >> PAGE_SHIFT;
+        let end_page = (end - 1) >> PAGE_SHIFT;
+
+        for page_idx in start_page..=end_page {
+            if let Some(page) = self.pages.get_mut(&page_idx) {
+                let page_base = page_idx << PAGE_SHIFT;
+                for offset in 0..PAGE_SIZE {
+                    let line = page_base + offset;
+                    if line >= start && line < end {
+                        let slot = &mut page[offset];
+                        if !matches!(slot.as_ref(), Line::Absent) {
+                            *slot = absent.clone();
+                            self.absent += 1;
+                        }
+                    }
+                }
             }
         }
     }
@@ -372,14 +471,36 @@ impl Text {
     /// 届き直しを待ち、行数を合わせる。これは編集ではないので控えには残らない。
     pub fn reset_from(&mut self, from: usize, line_count: usize) {
         let line_count = line_count.max(1);
-        self.lines.truncate(from.min(line_count));
-        self.lines.resize(line_count, Rc::new(Line::Absent));
+        let from_page = from >> PAGE_SHIFT;
+        let keys_to_remove: Vec<usize> = self
+            .pages
+            .keys()
+            .copied()
+            .filter(|&p| p > from_page)
+            .collect();
+        for k in keys_to_remove {
+            self.pages.remove(&k);
+        }
+        if let Some(page) = self.pages.get_mut(&from_page) {
+            let from_offset = from & PAGE_MASK;
+            let absent = Rc::new(Line::Absent);
+            for offset in from_offset..PAGE_SIZE {
+                page[offset] = absent.clone();
+            }
+        }
+        self.line_count = line_count;
         self.changes.clear();
-        self.absent = self
-            .lines
-            .iter()
-            .filter(|line| matches!(line.as_ref(), Line::Absent))
-            .count();
+        let mut resident_count = 0;
+        for (&page_idx, page) in &self.pages {
+            let page_base = page_idx << PAGE_SHIFT;
+            for offset in 0..PAGE_SIZE {
+                let line = page_base + offset;
+                if line < self.line_count && !matches!(page[offset].as_ref(), Line::Absent) {
+                    resident_count += 1;
+                }
+            }
+        }
+        self.absent = self.line_count.saturating_sub(resident_count);
         self.total_chars.set(None);
         if let Some((min, max)) = self.resident_span.get() {
             if from <= min {
@@ -392,21 +513,23 @@ impl Text {
 
     /// まだ届いていない行へ中身を入れる。既に届いた行はそのまま。
     pub fn fill_line(&mut self, line: usize, source: SourceLine) {
-        let Some(slot) = self.lines.get_mut(line) else {
+        if line >= self.line_count {
             return;
-        };
-        if !matches!(slot.as_ref(), Line::Absent) {
+        }
+        let (page_idx, offset) = page_and_offset!(line);
+        let page = self.pages.entry(page_idx).or_insert_with(new_absent_page);
+        if !matches!(page[offset].as_ref(), Line::Absent) {
             return;
         }
         let added = match &source {
             SourceLine::Plain(source) => source.chars().count(),
             SourceLine::Parsed(row) => row.len(),
         };
-        *slot = Rc::new(match source {
+        page[offset] = Rc::new(match source {
             SourceLine::Plain(source) => Line::raw(source),
             SourceLine::Parsed(row) => Line::Rows(row),
         });
-        self.absent -= 1;
+        self.absent = self.absent.saturating_sub(1);
         if let Some(c) = self.total_chars.get() {
             self.total_chars.set(Some(c + added));
         }
@@ -419,53 +542,67 @@ impl Text {
 
     /// `from` 以降で最初のまだ届いていない行。読み込みの続きがどこかを答える。
     pub fn first_absent(&self, from: usize) -> Option<usize> {
-        (from..self.lines.len()).find(|&i| matches!(self.lines[i].as_ref(), Line::Absent))
+        (from..self.line_count).find(|&line| self.is_absent(line))
     }
 
     /// この行がまだ届いていないか。行ごとに尋ねる側はこちらを使う。
     /// `first_absent` を行ごとに呼ぶと、取得済みの連なりの長さの二乗で歩く。
     pub fn is_absent(&self, line: usize) -> bool {
-        self.lines
-            .get(line)
-            .is_some_and(|l| matches!(l.as_ref(), Line::Absent))
+        if line >= self.line_count {
+            return false;
+        }
+        with_line!(self, line, |l| { matches!(l, Line::Absent) })
     }
 
     pub fn line_count(&self) -> usize {
-        self.lines.len()
+        self.line_count
     }
 
     pub fn line(&self, line: usize) -> &[Node] {
-        self.lines.get(line).map(|l| l.nodes()).unwrap_or(&[])
+        if line >= self.line_count {
+            return &[];
+        }
+        with_line!(self, line, |l| { l.nodes() })
     }
 
     /// 行が素のテキスト（未展開）の場合に、展開せずに直接文字列スライスを返す。
     /// 検索などで展開コスト・アロケーションをゼロにする。
     pub fn line_str(&self, line: usize) -> Option<&str> {
-        match self.lines.get(line)?.as_ref() {
-            Line::Raw { source, .. } => Some(source.as_str()),
-            _ => None,
+        if line >= self.line_count {
+            return None;
         }
+        with_line!(self, line, |l| {
+            match l {
+                Line::Raw { source, .. } => Some(source.as_str()),
+                _ => None,
+            }
+        })
     }
 
     pub fn line_mut(&mut self, line: usize) -> Option<&mut Row> {
-        if line >= self.lines.len() {
+        if line >= self.line_count {
             return None;
         }
         self.record(line, 1, 1);
         self.count_filled(line);
         self.total_chars.set(None);
-        Some(Rc::make_mut(&mut self.lines[line]).row_mut())
+        let (page_idx, offset) = page_and_offset!(line);
+        let page = self.pages.entry(page_idx).or_insert_with(new_absent_page);
+        Some(Rc::make_mut(&mut page[offset]).row_mut())
     }
 
     /// 行が編集で [`Row`] に変わるとき、まだ届いていなかった行なら数え直す。
     fn count_filled(&mut self, line: usize) {
-        if matches!(self.lines[line].as_ref(), Line::Absent) {
-            self.absent -= 1;
+        if self.is_absent(line) {
+            self.absent = self.absent.saturating_sub(1);
         }
     }
 
     pub fn line_len(&self, line: usize) -> usize {
-        self.lines.get(line).map(|l| l.len()).unwrap_or(0)
+        if line >= self.line_count {
+            return 0;
+        }
+        with_line!(self, line, |l| { l.len() })
     }
 
     pub fn node_at(&self, at: Pos) -> Option<&Node> {
@@ -473,12 +610,12 @@ impl Text {
     }
 
     pub fn end(&self) -> Pos {
-        let line = self.line_count() - 1;
+        let line = self.line_count.saturating_sub(1);
         Pos::new(line, self.line_len(line))
     }
 
     pub fn clamp(&self, at: Pos) -> Pos {
-        let line = at.line.min(self.line_count() - 1);
+        let line = at.line.min(self.line_count.saturating_sub(1));
         Pos::new(line, at.col.min(self.line_len(line)))
     }
 
@@ -493,6 +630,75 @@ impl Text {
         }
         out.push(self.line(to.line)[..to.col].to_vec());
         out
+    }
+
+    fn get_line_rc(&self, line: usize) -> Rc<Line> {
+        let (page_idx, offset) = page_and_offset!(line);
+        self.pages
+            .get(&page_idx)
+            .map(|p| p[offset].clone())
+            .unwrap_or_else(|| Rc::new(Line::Absent))
+    }
+
+    fn set_line_rc(&mut self, line: usize, rc: Rc<Line>) {
+        let (page_idx, offset) = page_and_offset!(line);
+        let page = self.pages.entry(page_idx).or_insert_with(new_absent_page);
+        page[offset] = rc;
+    }
+
+    fn insert_lines_at(&mut self, at: usize, lines: Vec<Rc<Line>>) {
+        if lines.is_empty() {
+            return;
+        }
+        let count = lines.len();
+        for i in (at..self.line_count).rev() {
+            let prev = self.get_line_rc(i);
+            self.set_line_rc(i + count, prev);
+        }
+        for (offset, line) in lines.into_iter().enumerate() {
+            self.set_line_rc(at + offset, line);
+        }
+        self.line_count += count;
+    }
+
+    fn remove_lines_range(&mut self, from: usize, to: usize) {
+        if from >= to || from >= self.line_count {
+            return;
+        }
+        let to = to.min(self.line_count);
+        let count = to - from;
+        let mut absent_removed = 0;
+        for i in from..to {
+            if self.is_absent(i) {
+                absent_removed += 1;
+            }
+        }
+        self.absent = self.absent.saturating_sub(absent_removed);
+
+        for i in from..self.line_count.saturating_sub(count) {
+            let next = self.get_line_rc(i + count);
+            self.set_line_rc(i, next);
+        }
+        let absent = Rc::new(Line::Absent);
+        for i in self.line_count.saturating_sub(count)..self.line_count {
+            self.set_line_rc(i, absent.clone());
+        }
+        self.line_count = self.line_count.saturating_sub(count);
+        // 使われなくなった末尾ページをクリーンアップ
+        let last_page = if self.line_count == 0 {
+            0
+        } else {
+            (self.line_count - 1) >> PAGE_SHIFT
+        };
+        let keys_to_remove: Vec<usize> = self
+            .pages
+            .keys()
+            .copied()
+            .filter(|&p| p > last_page)
+            .collect();
+        for k in keys_to_remove {
+            self.pages.remove(&k);
+        }
     }
 
     pub fn remove(&mut self, from: Pos, to: Pos) -> Pos {
@@ -510,11 +716,9 @@ impl Text {
             chars += to.col.min(self.line_len(to.line));
             chars
         };
-        // 行を丸ごと消すときは、境界の行に触らない。大きいファイルの行の
-        // 出し入れが、素の行を展開せずに済むように。
         if from.col == 0 && to.col == 0 {
             self.record(from.line, to.line - from.line, 0);
-            self.drain_counting(from.line, to.line);
+            self.remove_lines_range(from.line, to.line);
             if let Some(c) = self.total_chars.get() {
                 self.total_chars.set(Some(c.saturating_sub(removed_chars)));
             }
@@ -528,10 +732,12 @@ impl Text {
         self.record(from.line, to.line - from.line + 1, 1);
         let tail = self.line(to.line)[to.col..].to_vec();
         self.count_filled(from.line);
-        let first = Rc::make_mut(&mut self.lines[from.line]).row_mut();
+        let (page_idx, offset) = page_and_offset!(from.line);
+        let page = self.pages.entry(page_idx).or_insert_with(new_absent_page);
+        let first = Rc::make_mut(&mut page[offset]).row_mut();
         first.truncate(from.col);
         first.extend(tail);
-        self.drain_counting(from.line + 1, to.line + 1);
+        self.remove_lines_range(from.line + 1, to.line + 1);
         if let Some(c) = self.total_chars.get() {
             self.total_chars.set(Some(c.saturating_sub(removed_chars)));
         }
@@ -543,16 +749,6 @@ impl Text {
         from
     }
 
-    /// 行を取り除きつつ、届いていなかった行の数を合わせる。
-    fn drain_counting(&mut self, from: usize, to: usize) {
-        let absent = self
-            .lines
-            .drain(from..to)
-            .filter(|line| matches!(line.as_ref(), Line::Absent))
-            .count();
-        self.absent -= absent;
-    }
-
     pub fn insert(&mut self, at: Pos, mut what: Vec<Row>) -> Pos {
         let at = self.clamp(at);
         if what.is_empty() {
@@ -562,7 +758,9 @@ impl Text {
         let added_chars: usize = what.iter().map(Row::len).sum();
         self.record(at.line, 1, what.len());
         self.count_filled(at.line);
-        let first_line = Rc::make_mut(&mut self.lines[at.line]).row_mut();
+        let (page_idx, offset) = page_and_offset!(at.line);
+        let page = self.pages.entry(page_idx).or_insert_with(new_absent_page);
+        let first_line = Rc::make_mut(&mut page[offset]).row_mut();
         let tail: Row = first_line.split_off(at.col);
         if what.len() == 1 {
             let only = what.remove(0);
@@ -586,10 +784,8 @@ impl Text {
         let mut last_line = last;
         last_line.extend(tail);
         rest.push(last_line);
-        for (offset, line) in rest.into_iter().enumerate() {
-            self.lines
-                .insert(at.line + 1 + offset, Rc::new(Line::Rows(line)));
-        }
+        let new_lines: Vec<Rc<Line>> = rest.into_iter().map(|r| Rc::new(Line::Rows(r))).collect();
+        self.insert_lines_at(at.line + 1, new_lines);
         if let Some(c) = self.total_chars.get() {
             self.total_chars.set(Some(c + added_chars));
         }
@@ -605,7 +801,16 @@ impl Text {
 
     pub fn stats(&self) -> (usize, usize) {
         let count = self.total_chars.get().unwrap_or_else(|| {
-            let sum: usize = self.lines.iter().map(|line| line.len()).sum();
+            let mut sum: usize = 0;
+            for (&page_idx, page) in &self.pages {
+                let page_base = page_idx << PAGE_SHIFT;
+                for offset in 0..PAGE_SIZE {
+                    let line = page_base + offset;
+                    if line < self.line_count {
+                        sum += page[offset].len();
+                    }
+                }
+            }
             self.total_chars.set(Some(sum));
             sum
         });
@@ -890,5 +1095,60 @@ mod tests {
         assert!(text.is_absent(500_000));
         assert!(!text.is_absent(500_020));
         assert!(text.is_absent(500_040));
+    }
+
+    #[test]
+    fn benchmark_sparse_paging_one_hundred_million_lines() {
+        use std::time::Instant;
+
+        // 1. 1億行の pending 作成時間測定
+        let t0 = Instant::now();
+        let mut text = Text::pending(100_000_000);
+        let creation_time = t0.elapsed();
+
+        assert_eq!(text.line_count(), 100_000_000);
+        assert_eq!(text.absent_lines(), 100_000_000);
+        assert_eq!(text.pages.len(), 0); // 1ページもメモリに確保していない！
+
+        // 2. 1億行中の一部の行にロード（窓: ちょうど 1 ページ分 = 1024 行）
+        let base_line = 48828 * PAGE_SIZE;
+        let t1 = Instant::now();
+        for i in base_line..base_line + PAGE_SIZE {
+            text.fill_line(i, SourceLine::Plain("let x = 42;".into()));
+        }
+        let feed_time = t1.elapsed();
+
+        assert_eq!(text.pages.len(), 1); // ちょうど 1 ページ (1024 行) だけ確保！
+
+        // 3. ランダムアクセス速度測定
+        let t2 = Instant::now();
+        let mut total_len = 0;
+        for i in base_line..base_line + PAGE_SIZE {
+            total_len += text.line_len(i);
+        }
+        let access_time = t2.elapsed();
+
+        assert_eq!(total_len, 1024 * 11);
+
+        // 4. ページ単位の evict_far 解放速度測定
+        let t3 = Instant::now();
+        text.evict_far(0..10, &[]);
+        let evict_time = t3.elapsed();
+
+        assert_eq!(text.pages.len(), 0); // 完全に解放されて 0 ページに！
+
+        println!(
+            "\n=== 1024 Paging Sparse Text Benchmark (100,000,000 Lines) ===\n\
+             - 1億行の pending 作成時間: {:?}\n\
+             - 1024行の fill_line 時間: {:?}\n\
+             - 1024行の ランダムアクセス時間: {:?} ({:.2} ns/op)\n\
+             - 1024行の evict_far 解放時間: {:?}\n\
+             - 1億行時のメモリページ数: 初期 0 ページ、解放後 0 ページ\n",
+            creation_time,
+            feed_time,
+            access_time,
+            access_time.as_nanos() as f64 / 1024.0,
+            evict_time
+        );
     }
 }
