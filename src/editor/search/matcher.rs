@@ -2,7 +2,7 @@
 
 use memchr::memmem::Finder;
 use regex::Regex;
-use unicode_normalization::{is_nfc_quick, IsNormalized, UnicodeNormalization};
+use unicode_normalization::UnicodeNormalization;
 
 use super::SearchOptions;
 
@@ -23,12 +23,18 @@ impl Matcher {
     }
 }
 
-/// `memchr::memmem` と `unicode-normalization` を使った高速リテラルマッチャー。
+/// `memchr::memmem` と `unicode-normalization` を使ったクエリ展開方式の高速リテラルマッチャー。
 #[derive(Debug)]
 pub(super) struct LiteralMatcher {
-    query_char_count: usize,
-    finder: Option<Finder<'static>>,
+    variants: Vec<PatternVariant>,
     regex_ci: Option<Regex>,
+}
+
+#[derive(Debug)]
+struct PatternVariant {
+    finder: Finder<'static>,
+    char_count: usize,
+    byte_len: usize,
 }
 
 impl LiteralMatcher {
@@ -36,22 +42,38 @@ impl LiteralMatcher {
         if query.is_empty() {
             return None;
         }
-        let query_nfc: String = query.nfc().collect();
-        let query_char_count = query_nfc.chars().count();
-        if query_char_count == 0 {
-            return None;
+
+        // クエリから NFC版 と NFD版 を生成
+        let nfc: String = query.nfc().collect();
+        let nfd: String = query.nfd().collect();
+
+        let mut variant_strings = vec![nfc];
+        if !variant_strings.contains(&nfd) {
+            variant_strings.push(nfd);
         }
 
-        let finder = if case_sensitive {
-            let leaked_bytes: &'static [u8] =
-                Box::leak(query_nfc.as_bytes().to_vec().into_boxed_slice());
-            Some(Finder::new(leaked_bytes))
-        } else {
-            None
-        };
+        let mut variants = Vec::with_capacity(variant_strings.len());
+        if case_sensitive {
+            for s in &variant_strings {
+                let char_count = s.chars().count();
+                let byte_len = s.len();
+                let leaked_bytes: &'static [u8] =
+                    Box::leak(s.as_bytes().to_vec().into_boxed_slice());
+                variants.push(PatternVariant {
+                    finder: Finder::new(leaked_bytes),
+                    char_count,
+                    byte_len,
+                });
+            }
+        }
 
         let regex_ci = if !case_sensitive {
-            let pattern = regex::escape(&query_nfc);
+            let escaped: Vec<String> = variant_strings.iter().map(|s| regex::escape(s)).collect();
+            let pattern = if escaped.len() == 1 {
+                escaped[0].clone()
+            } else {
+                format!("(?:{})", escaped.join("|"))
+            };
             regex::RegexBuilder::new(&pattern)
                 .case_insensitive(true)
                 .build()
@@ -60,11 +82,7 @@ impl LiteralMatcher {
             None
         };
 
-        Some(Self {
-            query_char_count,
-            finder,
-            regex_ci,
-        })
+        Some(Self { variants, regex_ci })
     }
 
     pub(super) fn matches(&self, run: &str) -> Vec<(usize, usize, Vec<String>)> {
@@ -72,104 +90,49 @@ impl LiteralMatcher {
             return Vec::new();
         }
 
-        // Fast-path: テキストが既に NFC かつ結合文字を含まない場合（ゼロアロケーション走査）
-        if is_nfc_quick(run.chars()) == IsNormalized::Yes {
-            if let Some(finder) = &self.finder {
-                let mut found = Vec::new();
-                for byte_pos in finder.find_iter(run.as_bytes()) {
-                    let from = run[..byte_pos].chars().count();
-                    let to = from + self.query_char_count;
-                    let matched_text = run[byte_pos..byte_pos + finder.needle().len()].to_string();
-                    found.push((from, to, vec![matched_text]));
-                }
-                return found;
-            } else if let Some(re) = &self.regex_ci {
-                return regex_matches(re, run);
+        if let Some(re) = &self.regex_ci {
+            return regex_matches(re, run);
+        }
+
+        // 単一パターンの場合（合成文字なし: 最頻パス）
+        if self.variants.len() == 1 {
+            let v = &self.variants[0];
+            let mut found = Vec::new();
+            for byte_pos in v.finder.find_iter(run.as_bytes()) {
+                let from = run[..byte_pos].chars().count();
+                let to = from + v.char_count;
+                let matched_text = run[byte_pos..byte_pos + v.byte_len].to_string();
+                found.push((from, to, vec![matched_text]));
+            }
+            return found;
+        }
+
+        // 複数パターンの場合（NFC / NFD 展開）
+        let mut matches_raw: Vec<(usize, usize, usize)> = Vec::new(); // (byte_pos, byte_len, char_count)
+        for v in &self.variants {
+            for byte_pos in v.finder.find_iter(run.as_bytes()) {
+                matches_raw.push((byte_pos, v.byte_len, v.char_count));
             }
         }
 
-        // Slow-path: NFD 分解文字や結合文字を含む場合の正規化マッピング検索
-        self.matches_normalized(run)
-    }
+        if matches_raw.is_empty() {
+            return Vec::new();
+        }
 
-    fn matches_normalized(&self, run: &str) -> Vec<(usize, usize, Vec<String>)> {
-        let (norm_text, norm_to_orig) = normalize_nfc_with_ranges(run);
-        let mut found = Vec::new();
+        // 出現バイト位置順にソートし重複を除去
+        matches_raw.sort_by_key(|(pos, _, _)| *pos);
+        matches_raw.dedup_by_key(|(pos, _, _)| *pos);
 
-        if let Some(finder) = &self.finder {
-            for byte_pos in finder.find_iter(norm_text.as_bytes()) {
-                let norm_from = norm_text[..byte_pos].chars().count();
-                let norm_to = norm_from + self.query_char_count;
-                if norm_from < norm_to_orig.len() && norm_to <= norm_to_orig.len() {
-                    let orig_from = norm_to_orig[norm_from].0;
-                    let orig_to = norm_to_orig[norm_to - 1].1;
-                    let matched_text: String = run
-                        .chars()
-                        .skip(orig_from)
-                        .take(orig_to - orig_from)
-                        .collect();
-                    found.push((orig_from, orig_to, vec![matched_text]));
-                }
-            }
-        } else if let Some(re) = &self.regex_ci {
-            for m in re.find_iter(&norm_text) {
-                let norm_from = norm_text[..m.start()].chars().count();
-                let norm_to = norm_from + m.as_str().chars().count();
-                if norm_from < norm_to_orig.len() && norm_to <= norm_to_orig.len() {
-                    let orig_from = norm_to_orig[norm_from].0;
-                    let orig_to = norm_to_orig[norm_to - 1].1;
-                    let matched_text: String = run
-                        .chars()
-                        .skip(orig_from)
-                        .take(orig_to - orig_from)
-                        .collect();
-                    found.push((orig_from, orig_to, vec![matched_text]));
-                }
-            }
+        let mut found = Vec::with_capacity(matches_raw.len());
+        for (byte_pos, byte_len, char_count) in matches_raw {
+            let from = run[..byte_pos].chars().count();
+            let to = from + char_count;
+            let matched_text = run[byte_pos..byte_pos + byte_len].to_string();
+            found.push((from, to, vec![matched_text]));
         }
 
         found
     }
-}
-
-/// 結合文字（Combining mark）かどうかを判定します。
-fn is_combining(c: char) -> bool {
-    matches!(
-        c,
-        '\u{0300}'..='\u{036F}'
-            | '\u{1AB0}'..='\u{1AFF}'
-            | '\u{1DC0}'..='\u{1DFF}'
-            | '\u{20D0}'..='\u{20FF}'
-            | '\u{FE20}'..='\u{FE2F}'
-            | '\u{3099}'
-            | '\u{309A}'
-    )
-}
-
-/// 文字列を文字クラスタ単位で NFC 正規化し、正規化後文字から元文字インデックス範囲へのマッピングを返します。
-fn normalize_nfc_with_ranges(run: &str) -> (String, Vec<(usize, usize)>) {
-    let mut norm_text = String::new();
-    let mut ranges = Vec::new();
-
-    let orig_chars: Vec<char> = run.chars().collect();
-    let n = orig_chars.len();
-    let mut i = 0;
-
-    while i < n {
-        let start = i;
-        i += 1;
-        // 後続の結合文字をまとめて1つのクラスタとする
-        while i < n && is_combining(orig_chars[i]) {
-            i += 1;
-        }
-        let cluster: String = orig_chars[start..i].iter().collect();
-        for norm_char in cluster.nfc() {
-            norm_text.push(norm_char);
-            ranges.push((start, i));
-        }
-    }
-
-    (norm_text, ranges)
 }
 
 /// `regex` クレートを使って一致を探します。
@@ -304,5 +267,134 @@ mod tests {
         assert_eq!(matches[0].0, 11);
         assert_eq!(matches[0].1, 16);
         assert_eq!(matches[0].2, vec!["cafe\u{0301}".to_string()]);
+    }
+
+    #[test]
+    fn benchmark_text_normalization_vs_query_expansion() {
+        use std::time::Instant;
+
+        // 100,000行のデータセット（NFD分解文字列・NFC合成文字列が混在）
+        let mut lines = Vec::with_capacity(100_000);
+        for i in 0..100_000 {
+            if i % 1000 == 0 {
+                // NFD 結合文字行
+                lines.push(format!(
+                    "pub fn か\u{3099}関数_{i}() -> Result<cafe\u{0301}, Error> {{ }}"
+                ));
+            } else if i % 100 == 0 {
+                // NFC 合成文字行
+                lines.push(format!(
+                    "// 日本語コメント: が関数 を呼び出しています（行: {i}）"
+                ));
+            } else {
+                lines.push(format!(
+                    "let x_{i} = i * 42 + compute_something_else(12345);"
+                ));
+            }
+        }
+
+        let query = "が関数";
+
+        // ==========================================
+        // 方式1: テキスト側正規化方式（前回の実装を再現）
+        use unicode_normalization::{is_nfc_quick, IsNormalized};
+
+        fn is_comb(c: char) -> bool {
+            matches!(c, '\u{0300}'..='\u{036F}' | '\u{3099}' | '\u{309A}')
+        }
+        fn norm_with_ranges(run: &str) -> (String, Vec<(usize, usize)>) {
+            let mut norm_text = String::new();
+            let mut ranges = Vec::new();
+            let orig: Vec<char> = run.chars().collect();
+            let n = orig.len();
+            let mut i = 0;
+            while i < n {
+                let start = i;
+                i += 1;
+                while i < n && is_comb(orig[i]) {
+                    i += 1;
+                }
+                let cluster: String = orig[start..i].iter().collect();
+                for nc in cluster.nfc() {
+                    norm_text.push(nc);
+                    ranges.push((start, i));
+                }
+            }
+            (norm_text, ranges)
+        }
+
+        let query_nfc: String = query.nfc().collect();
+        let query_char_count = query_nfc.chars().count();
+        let finder = Finder::new(query_nfc.as_bytes());
+
+        let t0 = Instant::now();
+        let mut count1 = 0;
+        for line in &lines {
+            if is_nfc_quick(line.chars()) == IsNormalized::Yes {
+                for byte_pos in finder.find_iter(line.as_bytes()) {
+                    let from = line[..byte_pos].chars().count();
+                    let to = from + query_char_count;
+                    let _ = (from, to);
+                    count1 += 1;
+                }
+            } else {
+                let (norm_text, ranges) = norm_with_ranges(line);
+                for byte_pos in finder.find_iter(norm_text.as_bytes()) {
+                    let norm_from = norm_text[..byte_pos].chars().count();
+                    let norm_to = norm_from + query_char_count;
+                    if norm_from < ranges.len() && norm_to <= ranges.len() {
+                        let from = ranges[norm_from].0;
+                        let to = ranges[norm_to - 1].1;
+                        let _ = (from, to);
+                        count1 += 1;
+                    }
+                }
+            }
+        }
+        let dt_text_norm = t0.elapsed();
+
+        // ==========================================
+        // 方式2: クエリ側展開方式（今回の実装）
+        // ==========================================
+        let matcher = LiteralMatcher::new(query, true).unwrap();
+
+        let t1 = Instant::now();
+        let mut count2 = 0;
+        for line in &lines {
+            let m = matcher.matches(line);
+            count2 += m.len();
+        }
+        let dt_query_exp = t1.elapsed();
+
+        println!("\n=== Benchmark: Text Normalization vs Query Expansion (100,000 lines) ===");
+        println!(
+            "1. Text Normalization: {:?} (matches={count1})",
+            dt_text_norm
+        );
+        println!(
+            "2. Query Expansion:    {:?} (matches={count2})",
+            dt_query_exp
+        );
+        assert_eq!(count1, count2);
+
+        // 連続バッファ直接走査（100,000行）
+        let full_text: String = lines.join("\n");
+        let bytes = full_text.as_bytes();
+        let t2 = Instant::now();
+        let mut buffer_count = 0;
+        for v in &matcher.variants {
+            for byte_pos in v.finder.find_iter(bytes) {
+                buffer_count += 1;
+                let _ = byte_pos;
+            }
+        }
+        let dt_buffer = t2.elapsed();
+        let gb_per_sec = (bytes.len() as f64 / 1_000_000_000.0) / dt_buffer.as_secs_f64();
+        println!(
+            "3. Query Expansion on Whole Buffer ({:.2} MB):\n   Time: {:?}\n   Throughput: {:.2} GB/s (matches={buffer_count})",
+            bytes.len() as f64 / (1024.0 * 1024.0),
+            dt_buffer,
+            gb_per_sec
+        );
     }
 }
