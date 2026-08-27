@@ -195,7 +195,17 @@ pub fn find_all(
     options: SearchOptions,
     file_size: Option<usize>,
 ) -> Vec<Found> {
-    find_range(text, query, options, file_size, 0..text.line_count())
+    let Some(matcher) = compile(query, options, file_size) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for range in text.resident_line_ranges() {
+        for line in range {
+            line_matches(&matcher, text, line, &mut found);
+        }
+    }
+    found.sort_by_key(|found| found.place.start());
+    found
 }
 
 /// 指定された行の窓だけを検索する。入力中のプレビューは可視行だけを調べ、
@@ -211,8 +221,16 @@ pub fn find_range(
         return Vec::new();
     };
     let mut found = Vec::new();
-    for line in lines.start..lines.end.min(text.line_count()) {
-        line_matches(&matcher, text, line, &mut found);
+    let start = lines.start.min(text.line_count());
+    let end = lines.end.min(text.line_count());
+    for range in text.resident_line_ranges() {
+        let r_start = range.start.max(start);
+        let r_end = range.end.min(end);
+        if r_start < r_end {
+            for line in r_start..r_end {
+                line_matches(&matcher, text, line, &mut found);
+            }
+        }
     }
     found.sort_by_key(|found| found.place.start());
     found
@@ -235,6 +253,38 @@ pub fn find_in_line(
     found
         .into_iter()
         .find(|found| after.is_none_or(|after| found.place.start() >= *after))
+}
+
+/// 指定されたキー位置（行・列）までの手元の一致数を数える。
+pub fn count_matches_up_to(text: &Text, query: &str, options: SearchOptions, up_to: Key) -> usize {
+    if query.is_empty() {
+        return 0;
+    }
+    let Some(matcher) = compile(query, options, None) else {
+        return 0;
+    };
+    let mut count = 0;
+    let target_line = up_to.0.line.min(text.line_count().saturating_sub(1));
+    for range in text.resident_line_ranges() {
+        let r_end = range.end.min(target_line);
+        if range.start < r_end {
+            for line in range.start..r_end {
+                let mut found = Vec::new();
+                line_matches(&matcher, text, line, &mut found);
+                count += found.len();
+            }
+        }
+        if range.start <= target_line && target_line < range.end {
+            let mut found = Vec::new();
+            line_matches(&matcher, text, target_line, &mut found);
+            for f in found {
+                if f.place.start() <= up_to {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
 }
 
 /// 1 つの文書行の一致すべて: 素の文字の並びと、行に立つ構造の中身。

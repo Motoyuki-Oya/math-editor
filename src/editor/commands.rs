@@ -218,26 +218,39 @@ pub fn leave_structure(session: &Rc<RefCell<Session>>) {
     session.borrow().editor.borrow_mut().leave_structure();
 }
 
-/// 現在の選択が query の一致であれば、その一致が文書内の何番目（1-indexed）かを返す。
-/// 一致していなければ 0、クエリが空なら None を返す。
-pub fn current_match_index(query: &str, options: SearchOptions) -> Option<usize> {
+/// 現在のキャレット（または選択開始）の行・列位置を返す。
+pub fn current_cursor_pos() -> Option<(usize, usize)> {
     let session = session()?;
-    if query.is_empty() {
-        return None;
-    }
     let borrowed = session.borrow();
     let editor = borrowed.editor.borrow();
-    let from = search::key_at(editor.primary().start(), editor.nested_cursor());
-    let matches = search::find_all(editor.text(), query, options, None);
-    if matches.is_empty() {
-        return Some(0);
+    let p = editor.primary().start();
+    Some((p.line, p.col))
+}
+
+/// 現在のキャレット位置が全体の中で何件目のマッチか（1-indexed）を返す。
+/// 巨大ファイル（未着行あり）では行位置の比率から推定する。
+pub fn current_match_number(query: &str, options: SearchOptions, total: usize) -> usize {
+    if total == 0 || query.is_empty() {
+        return 0;
     }
-    for (i, m) in matches.iter().enumerate() {
-        if m.place.start() == from {
-            return Some(i + 1);
-        }
+    let Some(session) = session() else {
+        return 0;
+    };
+    let borrowed = session.borrow();
+    let editor = borrowed.editor.borrow();
+    let text = editor.text();
+    let cur_pos = editor.primary().start();
+
+    if text.absent_lines() == 0 {
+        // 全行が手元にある通常ファイル: 正確に数える
+        let key = search::key_at(cur_pos, editor.nested_cursor());
+        search::count_matches_up_to(text, query, options, key).clamp(1, total)
+    } else {
+        // 巨大ファイル: 行位置の進行度 × 総件数で推定
+        let last_line = text.line_count().saturating_sub(1).max(1);
+        let ratio = cur_pos.line as f64 / last_line as f64;
+        (ratio * total as f64).round().clamp(1.0, total as f64) as usize
     }
-    Some(0)
 }
 
 pub fn find_next(query: &str, options: SearchOptions, file_size: Option<usize>) -> bool {
