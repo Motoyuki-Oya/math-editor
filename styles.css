@@ -692,6 +692,16 @@ body {
   content: "\200B";
 }
 
+/* Markdown テーブルの | 縦線自動列揃え */
+.mn-table-pipe {
+  position: relative;
+  display: inline-block;
+  vertical-align: baseline;
+  line-height: inherit;
+  text-align: center;
+  padding: 0 3px;
+}
+
 /* 空白文字の可視化 */
 .mn-space,
 .mn-zenkaku {

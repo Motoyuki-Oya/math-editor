@@ -1,0 +1,11 @@
+name = "Markdown"
+extensions = ["md", "markdown"]
+line_comments = []
+block_comments = [["<!--", "-->"]]
+string_delimiters = ["`", "```"]
+
+keywords = ["#", "##", "###", "####", "#####", "######", "-", "*", "+", ">"]
+types = []
+builtins = []
+constants = []
+operators = ["[", "]", "(", ")", "!", "*", "_", "`", "|"]

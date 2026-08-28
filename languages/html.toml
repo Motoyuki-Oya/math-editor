@@ -1,0 +1,22 @@
+name = "HTML"
+extensions = ["html", "htm", "svg"]
+line_comments = []
+block_comments = [["<!--", "-->"]]
+string_delimiters = ["\"", "'"]
+
+keywords = [
+  "doctype", "html", "head", "body", "title", "meta", "link", "script", "style", "div",
+  "span", "p", "a", "img", "ul", "ol", "li", "table", "tr", "td", "th", "form",
+  "input", "button", "textarea", "select", "option", "h1", "h2", "h3", "h4", "h5",
+  "h6", "header", "footer", "nav", "section", "article", "main"
+]
+
+types = []
+
+builtins = [
+  "class", "id", "style", "src", "href", "type", "name", "value", "placeholder",
+  "alt", "title", "rel", "target", "width", "height", "disabled", "checked", "readonly"
+]
+
+constants = []
+operators = ["<", ">", "</", "/>", "="]

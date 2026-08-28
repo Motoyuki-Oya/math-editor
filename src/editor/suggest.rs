@@ -9,8 +9,40 @@ use crate::structure::ast::Row;
 use crate::structure::plain;
 use crate::structure::text::Text;
 use crate::syntax::lang::LanguageDef;
-
 pub use crate::syntax::GhostText;
+
+/// 単語がプログラミング識別子（CamelCase, snake_case, 定数, 長い単語）であるか判定します。
+pub fn is_code_identifier(word: &str) -> bool {
+    if word.len() < 3 {
+        return false;
+    }
+    // snake_case
+    if word.contains('_') {
+        return true;
+    }
+    // CamelCase / PascalCase
+    let mut has_lower = false;
+    let mut has_upper = false;
+    for (i, c) in word.chars().enumerate() {
+        if c.is_lowercase() {
+            has_lower = true;
+        } else if c.is_uppercase() {
+            if i > 0 && has_lower {
+                return true; // camelCase
+            }
+            has_upper = true;
+        }
+    }
+    if has_upper && has_lower {
+        return true; // PascalCase
+    }
+    // ALL_CAPS (定数など)
+    if has_upper && !has_lower && word.len() >= 3 {
+        return true;
+    }
+    // 7文字以上の長い識別子
+    word.len() >= 7
+}
 
 /// 指定された行とキャレット位置から、直前の単語プレフィックスを抽出します。
 pub fn extract_prefix(line_text: &str, col: usize) -> Option<String> {
@@ -20,18 +52,34 @@ pub fn extract_prefix(line_text: &str, col: usize) -> Option<String> {
         return None;
     }
 
+    // LaTeX コマンド（\frac 等）のプレフィックス判定
     let mut start = col;
-    while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
+    while start > 0
+        && (chars[start - 1].is_alphanumeric()
+            || chars[start - 1] == '_'
+            || chars[start - 1] == '\\')
+    {
         start -= 1;
+        if start < col && chars[start] == '\\' {
+            break;
+        }
     }
 
     let prefix_chars = &chars[start..col];
-    if prefix_chars.is_empty() || !prefix_chars[0].is_alphabetic() && prefix_chars[0] != '_' {
+    if prefix_chars.is_empty() {
         return None;
     }
 
     let prefix: String = prefix_chars.iter().collect();
-    // 1文字だけの場合は誤爆やチラつきを防ぐため、2文字以上で候補を出す
+    if prefix.starts_with('\\') && prefix.chars().count() >= 2 {
+        return Some(prefix);
+    }
+
+    if !prefix_chars[0].is_alphabetic() && prefix_chars[0] != '_' {
+        return None;
+    }
+
+    // 通常の単語は2文字以上で候補を出す
     if prefix.chars().count() >= 2 {
         Some(prefix)
     } else {
@@ -39,7 +87,7 @@ pub fn extract_prefix(line_text: &str, col: usize) -> Option<String> {
     }
 }
 
-/// ドキュメントから識別子（単語）を収集します。
+/// ドキュメントからプログラミング識別子（単語）を収集します。
 pub fn collect_buffer_words(text: &Text, max_lines_scan: usize) -> HashSet<String> {
     let mut words = HashSet::new();
     let count = text.line_count().min(max_lines_scan);
@@ -47,17 +95,42 @@ pub fn collect_buffer_words(text: &Text, max_lines_scan: usize) -> HashSet<Strin
         let row: Row = text.line(line_idx).to_vec();
         let plain_line = plain::row(&row);
         for part in plain_line.split(|c: char| !c.is_alphanumeric() && c != '_') {
-            if part.chars().count() >= 3
-                && part
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_alphabetic() || c == '_')
-            {
+            if is_code_identifier(part) {
                 words.insert(part.to_string());
             }
         }
     }
     words
+}
+
+/// Markdown ドキュメントにおいて、指定行がコードブロック内（``` で囲まれた範囲）にあるか判定し、指定されている言語名を返します。
+pub fn markdown_code_block_lang(text: &Text, target_line: usize) -> Option<Option<String>> {
+    let mut in_block = false;
+    let mut block_lang = None;
+    for line_idx in 0..=target_line {
+        let row = text.line(line_idx);
+        let plain_line = plain::row(&row.to_vec());
+        let trimmed = plain_line.trim_start();
+        if trimmed.starts_with("```") {
+            if in_block {
+                in_block = false;
+                block_lang = None;
+            } else {
+                in_block = true;
+                let lang_name = trimmed.trim_start_matches('`').trim().to_string();
+                block_lang = if lang_name.is_empty() {
+                    None
+                } else {
+                    Some(lang_name)
+                };
+            }
+        }
+    }
+    if in_block {
+        Some(block_lang)
+    } else {
+        None
+    }
 }
 
 /// 現在のキャレット位置に対してゴーストテキスト候補を検索します。
@@ -73,29 +146,42 @@ pub fn find_suggestion(
 
     let mut candidates: Vec<String> = Vec::new();
 
-    // 1. 言語キーワード・型・組み込み辞書からの検索
-    if let Some(def) = lang {
-        for word in def
-            .keywords
-            .iter()
-            .chain(&def.types)
-            .chain(&def.builtins)
-            .chain(&def.constants)
-        {
-            if word.to_lowercase().starts_with(&prefix_lower) && word.len() > prefix.len() {
-                candidates.push(word.clone());
+    let is_markdown = lang.is_some_and(|l| l.name == "Markdown");
+
+    // 1. LaTeX コマンドの補完 (\frac, \alpha 等)
+    if prefix.starts_with('\\') {
+        if let Some(latex_def) = crate::syntax::for_name("LaTeX") {
+            for word in latex_def.keywords.iter().chain(&latex_def.builtins) {
+                if word.to_lowercase().starts_with(&prefix_lower) && word.len() > prefix.len() {
+                    candidates.push(word.clone());
+                }
             }
         }
-    }
-
-    // 2. バッファ内識別子からの検索
-    if let Some(words) = buffer_words {
-        for word in words {
-            if word.to_lowercase().starts_with(&prefix_lower)
-                && word.len() > prefix.len()
-                && !candidates.contains(word)
+    } else if !is_markdown {
+        // 通常のコード言語: 言語キーワード・型・組み込み辞書からの検索
+        if let Some(def) = lang {
+            for word in def
+                .keywords
+                .iter()
+                .chain(&def.types)
+                .chain(&def.builtins)
+                .chain(&def.constants)
             {
-                candidates.push(word.clone());
+                if word.to_lowercase().starts_with(&prefix_lower) && word.len() > prefix.len() {
+                    candidates.push(word.clone());
+                }
+            }
+        }
+
+        // バッファ内識別子からの検索
+        if let Some(words) = buffer_words {
+            for word in words {
+                if word.to_lowercase().starts_with(&prefix_lower)
+                    && word.len() > prefix.len()
+                    && !candidates.contains(word)
+                {
+                    candidates.push(word.clone());
+                }
             }
         }
     }
@@ -157,6 +243,18 @@ mod tests {
         assert_eq!(extract_prefix("  pu", 4), Some("pu".into()));
         assert_eq!(extract_prefix("  p", 3), None); // 1文字はNone
         assert_eq!(extract_prefix("hello(pu", 8), Some("pu".into()));
+        assert_eq!(extract_prefix("formula: \\fr", 12), Some("\\fr".into()));
+    }
+
+    #[test]
+    fn test_is_code_identifier() {
+        assert!(is_code_identifier("user_name"));
+        assert!(is_code_identifier("calculateTotalPrice"));
+        assert!(is_code_identifier("UserConfig"));
+        assert!(is_code_identifier("MAX_BUFFER_SIZE"));
+        assert!(!is_code_identifier("the"));
+        assert!(!is_code_identifier("and"));
+        assert!(!is_code_identifier("this"));
     }
 
     #[test]
@@ -173,10 +271,22 @@ mod tests {
     fn test_buffer_word_suggestion() {
         let mut words = HashSet::new();
         words.insert("calculateTotalPrice".into());
-        let ghost = find_suggestion(0, 3, "cal", None, Some(&words))
+        let langs = built_in_languages();
+        let rust = langs.iter().find(|l| l.name == "Rust").unwrap();
+        let ghost = find_suggestion(0, 3, "cal", Some(rust), Some(&words))
             .expect("Should suggest calculateTotalPrice");
         assert_eq!(ghost.prefix, "cal");
         assert_eq!(ghost.suffix, "culateTotalPrice");
         assert_eq!(ghost.full, "calculateTotalPrice");
+    }
+
+    #[test]
+    fn test_markdown_latex_suggestion() {
+        let langs = built_in_languages();
+        let md = langs.iter().find(|l| l.name == "Markdown").unwrap();
+        let ghost = find_suggestion(0, 5, "$\\fr", Some(md), None).expect("Should suggest \\frac");
+        assert_eq!(ghost.prefix, "\\fr");
+        assert_eq!(ghost.suffix, "ac");
+        assert_eq!(ghost.full, "\\frac");
     }
 }

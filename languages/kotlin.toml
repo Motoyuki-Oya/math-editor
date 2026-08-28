@@ -1,0 +1,29 @@
+name = "Kotlin"
+extensions = ["kt", "kts"]
+line_comments = ["//"]
+block_comments = [["/*", "*/"]]
+string_delimiters = ["\"", "\"\"\""]
+
+keywords = [
+  "package", "import", "class", "interface", "fun", "val", "var", "public", "private",
+  "protected", "internal", "override", "suspend", "data", "sealed", "enum", "object",
+  "companion", "return", "if", "else", "when", "for", "while", "do", "try", "catch",
+  "finally", "throw", "is", "in", "by", "lazy", "abstract", "open", "final", "lateinit",
+  "vararg", "inline", "crossinline", "noinline", "tailrec", "operator", "infix", "const",
+  "typealias"
+]
+
+types = [
+  "Int", "Long", "Short", "Byte", "Double", "Float", "Boolean", "String", "Char", "List",
+  "MutableList", "Map", "MutableMap", "Set", "MutableSet", "Array", "Unit", "Any",
+  "Nothing"
+]
+
+builtins = ["println", "print", "require", "check", "error", "lazy"]
+
+constants = ["true", "false", "null", "this", "super"]
+
+operators = [
+  "+", "-", "*", "/", "%", "=", "==", "!=", "===", "!==", "<", ">", "<=", ">=", "&&",
+  "||", "!", "?.", "?:", "!!", "->", "::"
+]
