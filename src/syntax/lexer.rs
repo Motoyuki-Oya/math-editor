@@ -29,6 +29,21 @@ impl TokenKind {
             TokenKind::Punctuation => "mn-syn-punct",
         }
     }
+
+    pub fn from_str_name(name: &str) -> TokenKind {
+        match name.to_lowercase().as_str() {
+            "keyword" => TokenKind::Keyword,
+            "type" => TokenKind::Type,
+            "string" => TokenKind::String,
+            "number" => TokenKind::Number,
+            "comment" => TokenKind::Comment,
+            "builtin" => TokenKind::Builtin,
+            "constant" => TokenKind::Constant,
+            "operator" => TokenKind::Operator,
+            "punctuation" | "punct" => TokenKind::Punctuation,
+            _ => TokenKind::Keyword,
+        }
+    }
 }
 
 /// 行内の文字インデックス範囲とトークン種類。
@@ -58,6 +73,61 @@ pub fn tokenize_line(line: &str, lang: &LanguageDef) -> Vec<TokenSpan> {
         }
 
         let slice_from_i: String = chars[i..].iter().collect();
+
+        // 1.5. 汎用行頭ルール (lang.line_rules: Markdownの見出し、コードフェンス等)
+        if chars[..i].iter().all(|c| c.is_whitespace()) {
+            let mut matched_line_rule = false;
+            for rule in &lang.line_rules {
+                if slice_from_i.starts_with(&rule.prefix) {
+                    let kind = TokenKind::from_str_name(&rule.kind);
+                    if rule.whole_line {
+                        spans.push(TokenSpan {
+                            start: i,
+                            end: len,
+                            kind,
+                        });
+                        return spans;
+                    } else {
+                        let prefix_len = rule.prefix.chars().count();
+                        spans.push(TokenSpan {
+                            start: i,
+                            end: i + prefix_len,
+                            kind,
+                        });
+                        i += prefix_len;
+                        matched_line_rule = true;
+                        break;
+                    }
+                }
+            }
+            if matched_line_rule {
+                continue;
+            }
+        }
+
+        // 1.6. 汎用囲みルール (lang.enclosures: TOMLの [section], [[array]] 等)
+        let mut matched_enclosure = false;
+        for enc in &lang.enclosures {
+            if slice_from_i.starts_with(&enc.open) {
+                let open_len = enc.open.chars().count();
+                let inner = &slice_from_i[open_len..];
+                if let Some(pos) = inner.find(&enc.close) {
+                    let total_chars =
+                        open_len + inner[..pos].chars().count() + enc.close.chars().count();
+                    spans.push(TokenSpan {
+                        start: i,
+                        end: i + total_chars,
+                        kind: TokenKind::from_str_name(&enc.kind),
+                    });
+                    i += total_chars;
+                    matched_enclosure = true;
+                    break;
+                }
+            }
+        }
+        if matched_enclosure {
+            continue;
+        }
 
         // 2. 行コメントの判定
         for lc in &lang.line_comments {
@@ -378,14 +448,33 @@ mod tests {
         let md = langs.iter().find(|l| l.name == "Markdown").unwrap();
         let line1 = "# 単なるテキストエディタ";
         let tokens1 = tokenize_line(line1, md);
-        assert_eq!(tokens1.first().map(|t| t.kind), Some(TokenKind::Keyword));
+        assert_eq!(tokens1.len(), 1);
+        assert_eq!(tokens1[0].kind, TokenKind::Keyword);
+        assert_eq!(tokens1[0].end, line1.chars().count());
 
         let line2 = "## 概要";
         let tokens2 = tokenize_line(line2, md);
-        assert_eq!(tokens2.first().map(|t| t.kind), Some(TokenKind::Keyword));
+        assert_eq!(tokens2.len(), 1);
+        assert_eq!(tokens2[0].kind, TokenKind::Keyword);
 
-        let line3 = "- リスト項目";
+        let line3 = "```kotlin";
         let tokens3 = tokenize_line(line3, md);
-        assert_eq!(tokens3.first().map(|t| t.kind), Some(TokenKind::Keyword));
+        assert_eq!(tokens3.len(), 1);
+        assert_eq!(tokens3[0].kind, TokenKind::Builtin);
+    }
+
+    #[test]
+    fn test_toml_sections() {
+        let langs = built_in_languages();
+        let toml = langs.iter().find(|l| l.name == "TOML").unwrap();
+        let line1 = "[package]";
+        let tokens1 = tokenize_line(line1, toml);
+        assert_eq!(tokens1.len(), 1);
+        assert_eq!(tokens1[0].kind, TokenKind::Type);
+
+        let line2 = "[[bin]]";
+        let tokens2 = tokenize_line(line2, toml);
+        assert_eq!(tokens2.len(), 1);
+        assert_eq!(tokens2[0].kind, TokenKind::Type);
     }
 }

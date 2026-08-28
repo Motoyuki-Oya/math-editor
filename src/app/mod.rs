@@ -179,6 +179,32 @@ pub fn App() -> impl IntoView {
             },
         );
 
+        let on_wheel = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::WheelEvent)>::new(
+            move |ev: web_sys::WheelEvent| {
+                if ev.ctrl_key() || ev.meta_key() {
+                    ev.prevent_default();
+                }
+            },
+        );
+        window
+            .add_event_listener_with_callback("wheel", on_wheel.as_ref().unchecked_ref())
+            .ok();
+        on_wheel.forget();
+
+        let on_keydown = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
+            move |ev: web_sys::KeyboardEvent| {
+                if (ev.ctrl_key() || ev.meta_key())
+                    && (ev.key() == "=" || ev.key() == "+" || ev.key() == "-" || ev.key() == "0")
+                {
+                    ev.prevent_default();
+                }
+            },
+        );
+        window
+            .add_event_listener_with_callback("keydown", on_keydown.as_ref().unchecked_ref())
+            .ok();
+        on_keydown.forget();
+
         window
             .add_event_listener_with_callback(
                 "pointermove",

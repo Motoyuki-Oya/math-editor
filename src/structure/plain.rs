@@ -6,16 +6,16 @@ use super::ast::{Between, MatrixKind, Node, NodeKind, Row};
 
 /// テキストの範囲の行。1 行に 1 つの文字列。
 pub fn lines(lines: &[Row]) -> String {
-    lines.iter().map(row).collect::<Vec<_>>().join("\n")
+    lines.iter().map(|r| row(r)).collect::<Vec<_>>().join("\n")
 }
 
 /// 構造の行。左から右に読みます。
-pub fn row(row: &Row) -> String {
+pub fn row(row: &[Node]) -> String {
     row.iter().map(node).collect()
 }
 
 /// 他のものの横にある行。複数の場合は括弧で囲みます。`c` の上に `a+b` は次のようには読み取れません。 `a+b/c`.
-fn part(part: &Row) -> String {
+fn part(part: &[Node]) -> String {
     let text = row(part);
     if part.len() > 1 {
         format!("({text})")
@@ -56,7 +56,7 @@ fn node(node: &Node) -> String {
         NodeKind::Matrix { kind, cells } => {
             let rows = cells
                 .iter()
-                .map(|cells| cells.iter().map(row).collect::<Vec<_>>().join(", "))
+                .map(|cells| cells.iter().map(|c| row(c)).collect::<Vec<_>>().join(", "))
                 .collect::<Vec<_>>()
                 .join("; ");
             match kind {
@@ -91,19 +91,19 @@ mod tests {
 
     #[test]
     fn a_fraction_reads_as_a_division() {
-        assert_eq!(row(&vec![stack(chars("a"), chars("b"))]), "a/b");
+        assert_eq!(row(&[stack(chars("a"), chars("b"))]), "a/b");
     }
 
     #[test]
     fn a_part_of_more_than_one_thing_gets_brackets() {
-        assert_eq!(row(&vec![stack(chars("a+b"), chars("c"))]), "(a+b)/c");
+        assert_eq!(row(&[stack(chars("a+b"), chars("c"))]), "(a+b)/c");
     }
 
     #[test]
     fn scripts_and_roots_read_the_way_they_are_typed() {
-        assert_eq!(row(&vec![Node::char('x'), Node::sup(chars("2"))]), "x^2");
-        assert_eq!(row(&vec![Node::char('x'), Node::sub(chars("i"))]), "x_i");
-        assert_eq!(row(&vec![Node::sqrt(None, chars("2"))]), "√2");
+        assert_eq!(row(&[Node::char('x'), Node::sup(chars("2"))]), "x^2");
+        assert_eq!(row(&[Node::char('x'), Node::sub(chars("i"))]), "x_i");
+        assert_eq!(row(&[Node::sqrt(None, chars("2"))]), "√2");
     }
 
     #[test]
@@ -112,13 +112,13 @@ mod tests {
             MatrixKind::Grid,
             vec![vec![chars("a"), chars("b")], vec![chars("c"), chars("d")]],
         );
-        assert_eq!(row(&vec![node]), "[a, b; c, d]");
+        assert_eq!(row(&[node]), "[a, b; c, d]");
     }
 
     #[test]
     fn a_group_keeps_its_own_brackets() {
         let node = Node::group(Delim::Paren, chars("x"));
-        assert_eq!(row(&vec![node]), "(x)");
+        assert_eq!(row(&[node]), "(x)");
     }
 
     /// 列の区切り文字はタブであり、他の場所でも同様です。

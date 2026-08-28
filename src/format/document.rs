@@ -12,12 +12,14 @@ pub const TAB_SOURCE: &str = "t";
 pub const NOTATION_MARK: char = '$';
 
 pub fn read(source: &str) -> Text {
-    Text::compose(source.split('\n').map(read_line).collect())
+    let normalized = source.replace("\r\n", "\n").replace('\r', "\n");
+    Text::compose(normalized.split('\n').map(read_line).collect())
 }
 
 /// ファイルの 1 行を読み取ります。範囲読みの読み込みが、届いた行をここで
 /// 変換します。ファイル以外（クリップボードなど）がここを通ってはいけません。
 pub fn read_line(line: &str) -> SourceLine {
+    let line = line.trim_end_matches(['\r', '\n']);
     // `$` を含まない行には島もエスケープもないので、文字列のまま持ち、
     // そのまま書き戻せる。巨大なファイルの大部分がこの形で済む。
     if !line.contains(NOTATION_MARK) {

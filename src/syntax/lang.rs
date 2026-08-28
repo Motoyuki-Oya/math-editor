@@ -3,6 +3,34 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+/// 行頭プレフィックスに基づくハイライトルール（Markdownの見出し、リスト等）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LineRule {
+    pub prefix: String,
+    pub kind: String,
+    #[serde(default)]
+    pub whole_line: bool,
+}
+
+/// 囲み記号に基づくハイライトルール（TOMLの [section]、[[bin]] 等）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnclosureRule {
+    pub open: String,
+    pub close: String,
+    pub kind: String,
+}
+
+/// 埋め込み言語ブロック（Markdown内の ```rust ... ``` や HTML 内の <script> 等）の定義。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbeddedLanguageRule {
+    #[serde(default)]
+    pub language: Option<String>,
+    pub open: String,
+    pub close: String,
+    #[serde(default)]
+    pub dynamic: bool,
+}
+
 /// 言語ごとの構文定義。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LanguageDef {
@@ -25,6 +53,12 @@ pub struct LanguageDef {
     pub constants: HashSet<String>,
     #[serde(default)]
     pub operators: HashSet<String>,
+    #[serde(default)]
+    pub line_rules: Vec<LineRule>,
+    #[serde(default)]
+    pub enclosures: Vec<EnclosureRule>,
+    #[serde(default)]
+    pub embedded_languages: Vec<EmbeddedLanguageRule>,
 }
 
 impl LanguageDef {
@@ -40,6 +74,9 @@ impl LanguageDef {
             builtins: HashSet::new(),
             constants: HashSet::new(),
             operators: HashSet::new(),
+            line_rules: Vec::new(),
+            enclosures: Vec::new(),
+            embedded_languages: Vec::new(),
         }
     }
 

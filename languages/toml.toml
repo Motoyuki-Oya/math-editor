@@ -8,3 +8,13 @@ types = []
 builtins = []
 constants = ["true", "false", "nan", "inf"]
 operators = ["="]
+
+[[enclosures]]
+open = "[["
+close = "]]"
+kind = "Type"
+
+[[enclosures]]
+open = "["
+close = "]"
+kind = "Type"

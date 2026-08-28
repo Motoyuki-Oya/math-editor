@@ -323,6 +323,29 @@ impl Editor {
         Did::Nothing
     }
 
+    /// 直前の漢字文字列にルビ（上付きアノテーション）を自動適用します。
+    pub fn apply_ruby(&mut self, kanji_len: usize, reading: &str) -> Did {
+        if self.touches_absent() || self.has_inside() {
+            return Did::Nothing;
+        }
+        let sel = self.primary();
+        if !sel.is_caret() || sel.head.col < kanji_len {
+            return Did::Nothing;
+        }
+        let line = sel.head.line;
+        let start = Pos::new(line, sel.head.col - kanji_len);
+        let end = sel.head;
+        let lines = self.text.slice(start, end);
+        let Some(items) = lines.first() else {
+            return Did::Nothing;
+        };
+        let mut node = Node::container(items.clone());
+        node.upper = reading.chars().map(Node::char).collect();
+        self.replace_range_with(start, end, vec![vec![node]]);
+        self.set_caret(Pos::new(line, start.col + 1));
+        Did::Changed
+    }
+
     /// 本文では列区切りを挿入し、入れ子構造では次のスロットへ移動します。
     pub fn tab(&mut self, back: bool) -> Did {
         if self.touches_absent() {

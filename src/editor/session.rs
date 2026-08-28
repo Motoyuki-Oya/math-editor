@@ -612,12 +612,15 @@ pub fn update_ghost_text(session: &mut Session) {
         }
     }
     let buffer_words = super::suggest::collect_buffer_words(doc.text(), 300);
+    let buffer_rubies = super::suggest::collect_buffer_rubies(doc.text(), 300);
     session.ghost = super::suggest::find_suggestion(
         pos.line,
         pos.col,
+        &line_row,
         &plain_line,
         lang.as_ref(),
         Some(&buffer_words),
+        Some(&buffer_rubies),
     );
 }
 
@@ -633,7 +636,11 @@ pub fn accept_suggestion(session: &Rc<RefCell<Session>>) -> bool {
     {
         let mut borrowed = session.borrow_mut();
         borrowed.edit(|editor| {
-            editor.insert_text(&ghost.suffix);
+            if let Some((kanji_len, reading)) = &ghost.ruby {
+                editor.apply_ruby(*kanji_len, reading);
+            } else {
+                editor.insert_text(&ghost.suffix);
+            }
         });
     }
     changed(session);

@@ -184,9 +184,27 @@ impl Viewport {
             return;
         };
         self.document.set_inner_html("");
+        let mut block_wrapper: Option<Element> = None;
         for line in window.clone() {
             if let Some(element) = draw_line(&doc, line) {
-                append(&self.document, &element);
+                let is_aligned = element.class_list().contains("mn-aligned-row");
+                if is_aligned {
+                    let wrapper = if let Some(ref w) = block_wrapper {
+                        w.clone()
+                    } else if let Ok(w) = doc.create_element("div") {
+                        w.set_class_name("mn-aligned-block");
+                        append(&self.document, &w);
+                        let w_clone = w.clone();
+                        block_wrapper = Some(w);
+                        w_clone
+                    } else {
+                        self.document.clone()
+                    };
+                    append(&wrapper, &element);
+                } else {
+                    block_wrapper = None;
+                    append(&self.document, &element);
+                }
             }
         }
         *self.drawn.borrow_mut() = window.clone();

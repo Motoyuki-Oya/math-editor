@@ -8,7 +8,7 @@ use crate::settings;
 use crate::structure::ast::{Between, Delim, MatrixKind, Node, NodeKind, Row};
 
 const SVG_NS: &str = "http://www.w3.org/2000/svg";
-const LIMIT_SCALE: f64 = 0.68;
+const LIMIT_SCALE: f64 = 0.62;
 const SCRIPT_SCALE: f64 = 0.72;
 const ROOT_INDEX_SCALE: f64 = 0.7;
 
@@ -91,7 +91,7 @@ pub struct Renderer<'a> {
     active: Option<&'a Path>,
     font_size: f64,
     language: Option<&'a crate::syntax::lang::LanguageDef>,
-    ghost_text: Option<(&'a str, usize)>,
+    ghost_text: Option<&'a crate::syntax::GhostText>,
 }
 
 /// 待機中の文字1 つのスパンとして描画されます。これにより、テキストの間隔と形状が維持されます。
@@ -173,7 +173,10 @@ impl<'a> Renderer<'a> {
         self
     }
 
-    pub fn with_ghost_text(mut self, ghost_text: Option<(&'a str, usize)>) -> Renderer<'a> {
+    pub fn with_ghost_text(
+        mut self,
+        ghost_text: Option<&'a crate::syntax::GhostText>,
+    ) -> Renderer<'a> {
         self.ghost_text = ghost_text;
         self
     }
@@ -193,16 +196,17 @@ impl<'a> Renderer<'a> {
             container.append_child(&self.empty(nested)).ok();
         }
 
-        let token_spans = if path.is_empty() {
-            self.language
-                .map(|lang| {
-                    let plain = cells_to_plain(cells);
-                    crate::syntax::tokenize_line(&plain, lang)
-                })
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        let token_spans = self
+            .language
+            .map(|lang| {
+                let plain = cells_to_plain(cells);
+                crate::syntax::tokenize_line(&plain, lang)
+            })
+            .unwrap_or_default();
+
+        let is_table_row = path.is_empty()
+            && self.language.is_some_and(|l| l.name == "Markdown")
+            && is_markdown_table_row(cells);
 
         let mut run: Option<Run> = None;
         for (index, cell) in cells.iter().enumerate() {
@@ -211,26 +215,20 @@ impl<'a> Renderer<'a> {
                 container.append_child(&preedit).ok();
             }
 
-            if let Some((ghost, col)) = self.ghost_text {
-                if index == col && path.is_empty() {
+            if let Some(ghost) = self.ghost_text {
+                if path.is_empty() && !ghost.suffix.is_empty() && index == ghost.col {
                     self.flush(&container, &mut run);
-                    let ghost_el = self.span("mn-ghost-text", ghost);
+                    let ghost_el = self.span("mn-ghost-text", &ghost.suffix);
                     container.append_child(&ghost_el).ok();
                 }
             }
 
-            let kind = if path.is_empty() {
-                token_kind_at(&token_spans, index)
-            } else {
-                None
-            };
+            let kind = token_kind_at(&token_spans, index);
 
             match cell {
-                Cell::Char('|')
-                    if path.is_empty() && self.language.is_some_and(|l| l.name == "Markdown") =>
-                {
+                Cell::Char('|') if is_table_row => {
                     self.flush(&container, &mut run);
-                    let element = self.span("mn-table-pipe mn-syn-punct", "|");
+                    let element = self.span("mn-table-pipe", "|");
                     element.set_attribute(START_ATTR, &index.to_string()).ok();
                     container.append_child(&element).ok();
                 }
@@ -258,7 +256,7 @@ impl<'a> Renderer<'a> {
                 }
                 cell => {
                     self.flush(&container, &mut run);
-                    let element = self.cell(cell, path, index, font_size);
+                    let element = self.cell(cell, path, index, font_size, kind);
                     element.set_attribute(START_ATTR, &index.to_string()).ok();
                     container.append_child(&element).ok();
                 }
@@ -268,9 +266,9 @@ impl<'a> Renderer<'a> {
         if let Some(preedit) = self.preedit_at(path, cells.len()) {
             container.append_child(&preedit).ok();
         }
-        if let Some((ghost, col)) = self.ghost_text {
-            if col >= cells.len() && path.is_empty() {
-                let ghost_el = self.span("mn-ghost-text", ghost);
+        if let Some(ghost) = self.ghost_text {
+            if path.is_empty() && !ghost.suffix.is_empty() && ghost.col >= cells.len() {
+                let ghost_el = self.span("mn-ghost-text", &ghost.suffix);
                 container.append_child(&ghost_el).ok();
             }
         }
@@ -294,6 +292,33 @@ impl<'a> Renderer<'a> {
 
     fn flush(&self, container: &Element, run: &mut Option<Run>) {
         let Some(run) = run.take() else { return };
+        let run_chars_count = run.text.chars().count();
+        if let Some(ghost) = self.ghost_text {
+            if let Some((kanji_len, ref reading)) = ghost.ruby {
+                let kanji_start = ghost.col.saturating_sub(kanji_len);
+                if ghost.col == run.start + run_chars_count && kanji_start >= run.start {
+                    let prefix_chars = kanji_start - run.start;
+                    if prefix_chars > 0 {
+                        let prefix_text: String = run.text.chars().take(prefix_chars).collect();
+                        let prefix_el = self.span(run.class, &prefix_text);
+                        prefix_el
+                            .set_attribute(START_ATTR, &run.start.to_string())
+                            .ok();
+                        container.append_child(&prefix_el).ok();
+                    }
+                    let kanji_text: String = run.text.chars().skip(prefix_chars).collect();
+                    let target_class = format!("{} mn-ghost-ruby-target", run.class);
+                    let kanji_el = self.span(&target_class, &kanji_text);
+                    kanji_el
+                        .set_attribute(START_ATTR, &kanji_start.to_string())
+                        .ok();
+                    let ruby_el = self.span("mn-ghost-ruby", reading);
+                    kanji_el.append_child(&ruby_el).ok();
+                    container.append_child(&kanji_el).ok();
+                    return;
+                }
+            }
+        }
         let element = self.span(run.class, &run.text);
         element
             .set_attribute(START_ATTR, &run.start.to_string())
@@ -301,14 +326,21 @@ impl<'a> Renderer<'a> {
         container.append_child(&element).ok();
     }
 
-    fn cell(&self, cell: &Cell<'_>, path: &Path, index: usize, font_size: f64) -> Element {
+    fn cell(
+        &self,
+        cell: &Cell<'_>,
+        path: &Path,
+        index: usize,
+        font_size: f64,
+        kind: Option<crate::syntax::TokenKind>,
+    ) -> Element {
         match cell {
             // 上記の実行によって処理されます。ランは決して独自のセルではありません。
-            Cell::Char(c) => self.span(RUN_CLASS, &c.to_string()),
+            Cell::Char(c) => self.span(run_class_for(kind), &c.to_string()),
             Cell::Space => self.span("mn-run mn-space", " "),
             Cell::ZenkakuSpace => self.span("mn-run mn-zenkaku", "\u{3000}"),
             Cell::Tab => self.el("span", TAB_CLASS),
-            Cell::Node(node) => self.node(node, path, index, font_size),
+            Cell::Node(node) => self.node(node, path, index, font_size, kind),
         }
     }
 
@@ -326,9 +358,16 @@ impl<'a> Renderer<'a> {
         self.row(&cells_of_row(&row), &child, font_size)
     }
 
-    fn node(&self, node: &Node, path: &Path, index: usize, font_size: f64) -> Element {
+    fn node(
+        &self,
+        node: &Node,
+        path: &Path,
+        index: usize,
+        font_size: f64,
+        kind: Option<crate::syntax::TokenKind>,
+    ) -> Element {
         let base = match &node.kind {
-            NodeKind::Char(c) => self.span(RUN_CLASS, &c.to_string()),
+            NodeKind::Char(c) => self.span(run_class_for(kind), &c.to_string()),
             NodeKind::Tab => self.el("span", TAB_CLASS),
             NodeKind::Stack { above, between, .. } => {
                 let frac = self.el("span", "mn-frac");
@@ -343,7 +382,9 @@ impl<'a> Renderer<'a> {
                     .ok();
                 frac.append_child(&num).ok();
                 match between {
-                    Between::Rule => frac.append_child(&self.el("span", "mn-frac-rule")).ok(),
+                    Between::Rule => frac
+                        .append_child(&self.el("span", "mn-frac-rule mn-syn-operator"))
+                        .ok(),
                     Between::Arrow(arrow) => frac.append_child(&self.arrow(*arrow)).ok(),
                     Between::Nothing => None,
                 };
@@ -368,7 +409,7 @@ impl<'a> Renderer<'a> {
                 }
                 // 記号は本体の上に配置され、テキスト内に本体が残ります。つまり、ルートはその周囲にあるものと同じベースライン上にあります。キック、下降、および長い上昇ストローク。直立ではなく傾斜しています。この傾斜により、記号は括弧ではなく部首として読み取られます。
                 sqrt.append_child(&self.svg(
-                    "mn-radical",
+                    "mn-radical mn-syn-operator",
                     "0 0 26 100",
                     "M0 58 L5 60 L11 96 L25 3",
                 ))
@@ -403,9 +444,9 @@ impl<'a> Renderer<'a> {
             }
             NodeKind::BigOp(glyph) => {
                 let class = if glyph.chars().count() > 1 {
-                    "mn-bigop-symbol mn-bigop-word"
+                    "mn-bigop-symbol mn-bigop-word mn-syn-operator"
                 } else {
-                    "mn-bigop-symbol"
+                    "mn-bigop-symbol mn-syn-operator"
                 };
                 self.span(class, glyph)
             }
@@ -445,6 +486,22 @@ impl<'a> Renderer<'a> {
                 container
             }
         };
+
+        if let Some(k) = kind {
+            let syn_class = match k {
+                crate::syntax::TokenKind::Keyword => "mn-syn-keyword",
+                crate::syntax::TokenKind::Type => "mn-syn-type",
+                crate::syntax::TokenKind::String => "mn-syn-string",
+                crate::syntax::TokenKind::Number => "mn-syn-number",
+                crate::syntax::TokenKind::Comment => "mn-syn-comment",
+                crate::syntax::TokenKind::Builtin => "mn-syn-builtin",
+                crate::syntax::TokenKind::Constant => "mn-syn-constant",
+                crate::syntax::TokenKind::Operator => "mn-syn-operator",
+                crate::syntax::TokenKind::Punctuation => "mn-syn-punct",
+            };
+            base.class_list().add_1(syn_class).ok();
+        }
+
         let lower_slot = node.lower_slot();
         let upper_slot = node.upper_slot();
         let is_active = |slot| {
@@ -524,7 +581,7 @@ impl<'a> Renderer<'a> {
 
     /// スタックの 2 行間の矢印。シャフトは柔軟な線なので、ルールと同様に、矢印は幅の広い行と同じ幅になります。
     fn arrow(&self, arrow: char) -> Element {
-        let holder = self.el("span", "mn-arrow");
+        let holder = self.el("span", "mn-arrow mn-syn-operator");
         let shaft = || self.el("span", "mn-arrow-shaft");
         let glyph = self.span("mn-arrow-head", &arrow.to_string());
         match arrow {
@@ -581,7 +638,7 @@ impl<'a> Renderer<'a> {
         } else {
             "mn-delim-close"
         };
-        self.svg(&format!("mn-delim {side}"), view_box, path)
+        self.svg(&format!("mn-delim mn-syn-punct {side}"), view_box, path)
     }
 
     fn el(&self, tag: &str, class: &str) -> Element {
@@ -740,6 +797,15 @@ fn text_vertical_metrics(font_size: f64) -> VerticalMetrics {
         above: font_size * 1.4,
         below: font_size * 0.6,
     }
+}
+
+pub fn is_markdown_table_row(cells: &[Cell<'_>]) -> bool {
+    let plain = cells_to_plain(cells);
+    let trimmed = plain.trim();
+    if trimmed.starts_with('#') || trimmed.starts_with("```") || trimmed.starts_with('`') {
+        return false;
+    }
+    trimmed.starts_with('|') && trimmed.chars().filter(|&c| c == '|').count() >= 2
 }
 
 #[cfg(test)]

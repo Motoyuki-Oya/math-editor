@@ -72,6 +72,7 @@ pub fn show_whitespace() -> bool {
 }
 
 /// フォントサイズを拡大（ズームイン）します。
+#[allow(dead_code)]
 pub fn zoom_in() {
     let mut s = current();
     if s.font_size < 48.0 {
@@ -82,6 +83,7 @@ pub fn zoom_in() {
 }
 
 /// フォントサイズを縮小（ズームアウト）します。
+#[allow(dead_code)]
 pub fn zoom_out() {
     let mut s = current();
     if s.font_size > 9.0 {
@@ -92,6 +94,7 @@ pub fn zoom_out() {
 }
 
 /// フォントサイズを標準（15px）にリセットします。
+#[allow(dead_code)]
 pub fn zoom_reset() {
     let mut s = current();
     s.font_size = 15.0;
@@ -182,8 +185,10 @@ pub fn read(text: &str) -> Settings {
         let (name, value) = (name.trim(), value.trim());
         match name {
             "font_size" => {
-                if let Ok(size) = value.parse() {
-                    settings.font_size = size;
+                if let Ok(size) = value.parse::<f64>() {
+                    if (9.0..=48.0).contains(&size) {
+                        settings.font_size = size;
+                    }
                 }
             }
             "font_family" => {

@@ -2,10 +2,27 @@ name = "Markdown"
 extensions = ["md", "markdown"]
 line_comments = []
 block_comments = [["<!--", "-->"]]
-string_delimiters = ["`", "```"]
+string_delimiters = ["`"]
 
-keywords = ["#", "##", "###", "####", "#####", "######", "-", "*", "+", ">"]
+keywords = ["-", "*", "+", ">"]
 types = []
 builtins = []
 constants = []
 operators = ["[", "]", "(", ")", "!", "*", "_", "`", "|"]
+
+[[line_rules]]
+prefix = "#"
+whole_line = true
+kind = "Keyword"
+
+[[line_rules]]
+prefix = "```"
+whole_line = true
+kind = "Builtin"
+
+[[embedded_languages]]
+open = "```"
+close = "```"
+dynamic = true
+
+

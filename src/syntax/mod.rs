@@ -22,6 +22,8 @@ pub struct GhostText {
     pub suffix: String,
     /// 補完される完全な単語 (例: "public")
     pub full: String,
+    /// 構造化（ルビ）補完情報: Some((対象漢字長, 読み文字列))
+    pub ruby: Option<(usize, String)>,
 }
 
 thread_local! {

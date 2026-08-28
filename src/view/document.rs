@@ -210,6 +210,7 @@ impl View {
             index,
             text,
         });
+        let is_markdown = state.language.is_some_and(|l| l.name == "Markdown");
         let draw_line = |doc: &Document, line: usize| {
             // キャレットがある行のみ、構成内容が表示されます。
             let here = preedit
@@ -221,22 +222,30 @@ impl View {
                     text: preedit.text,
                 });
             let active = (caret.at.line == line).then_some(path.as_slice());
-            let ghost_on_line = state
-                .ghost
-                .filter(|g| g.line == line && active.is_some())
-                .map(|g| (g.suffix.as_str(), g.col));
-            let holder = element(doc, "div", LINE_CLASS)?;
+            let ghost_on_line = state.ghost.filter(|g| g.line == line && active.is_some());
+            let row_nodes = text.line(line);
+            let is_aligned =
+                has_tab(row_nodes) || (is_markdown && is_markdown_table_line(row_nodes));
+            let class_name = if is_aligned {
+                "mn-line mn-aligned-row"
+            } else {
+                LINE_CLASS
+            };
+            let holder = element(doc, "div", class_name)?;
             holder.set_attribute(LINE_ATTR, &line.to_string()).ok();
+            let line_lang = state
+                .language
+                .and_then(|lang| embedded_block_lang_for_line(text, line, lang))
+                .or_else(|| state.language.cloned());
             let renderer = Renderer::new(doc)
                 .with_preedit(here.as_ref())
                 .with_active_path(active)
-                .with_language(state.language)
+                .with_language(line_lang.as_ref())
                 .with_ghost_text(ghost_on_line);
-            append(&holder, &renderer.line(text.line(line)));
+            append(&holder, &renderer.line(row_nodes));
             Some(holder)
         };
         let finish = |window: &Range<usize>| {
-            let is_markdown = state.language.is_some_and(|l| l.name == "Markdown");
             self.align_columns(text, window, is_markdown);
             self.rebuild_numbers(window, state.modified, state.show_numbers);
             if let Some(doc) = self.overlay.owner_document() {
@@ -383,16 +392,16 @@ impl View {
         while line < window.end {
             let row = text.line(line);
             let has_t = has_tab(row);
-            let has_p = is_markdown && has_pipe(row);
-            if !has_t && !has_p {
+            let is_tbl = is_markdown && is_markdown_table_line(row);
+            if !has_t && !is_tbl {
                 line += 1;
                 continue;
             }
-            let is_table = has_p;
+            let is_table = is_tbl;
             let mut end = line;
             while end < window.end
                 && (if is_table {
-                    has_pipe(text.line(end))
+                    is_markdown_table_line(text.line(end))
                 } else {
                     has_tab(text.line(end))
                 })
@@ -707,12 +716,6 @@ fn set_box(element: &Element, rect: Box2, origin: &web_sys::DomRect) {
 
 const TABLE_PIPE_CLASS: &str = "mn-table-pipe";
 
-pub(super) fn has_pipe(nodes: &[Node]) -> bool {
-    nodes
-        .iter()
-        .any(|node| matches!(node.kind, NodeKind::Char('|')))
-}
-
 pub(super) fn has_tab(nodes: &[Node]) -> bool {
     nodes.iter().any(|node| matches!(node.kind, NodeKind::Tab))
 }
@@ -733,4 +736,67 @@ pub(super) fn element(doc: &Document, tag: &str, class: &str) -> Option<Element>
     let element = doc.create_element(tag).ok()?;
     element.set_class_name(class);
     Some(element)
+}
+
+pub fn is_markdown_table_line(nodes: &[Node]) -> bool {
+    let plain = crate::structure::plain::row(nodes);
+    let trimmed = plain.trim();
+    if trimmed.starts_with('#') || trimmed.starts_with("```") || trimmed.starts_with('`') {
+        return false;
+    }
+    trimmed.starts_with('|') && trimmed.chars().filter(|&c| c == '|').count() >= 2
+}
+
+pub fn embedded_block_lang_for_line(
+    text: &Text,
+    target_line: usize,
+    lang: &crate::syntax::lang::LanguageDef,
+) -> Option<crate::syntax::lang::LanguageDef> {
+    if lang.embedded_languages.is_empty() {
+        return None;
+    }
+    let start_scan = target_line.saturating_sub(1000);
+    for rule in &lang.embedded_languages {
+        let mut in_block = false;
+        let mut inner_lang_name = String::new();
+        for line_idx in start_scan..=target_line {
+            let plain = crate::structure::plain::row(text.line(line_idx));
+            let trimmed = plain.trim();
+            if trimmed.starts_with(&rule.open) {
+                if in_block && rule.open == rule.close {
+                    if line_idx == target_line {
+                        return None; // 終了行自身はルート言語
+                    }
+                    in_block = false;
+                    inner_lang_name.clear();
+                } else {
+                    in_block = true;
+                    if rule.dynamic {
+                        inner_lang_name = trimmed.trim_start_matches(&rule.open).trim().to_string();
+                    } else if let Some(fixed) = &rule.language {
+                        inner_lang_name = fixed.clone();
+                    }
+                    if line_idx == target_line {
+                        return None; // 開始行自身はルート言語
+                    }
+                }
+            } else if in_block
+                && (trimmed.starts_with(&rule.close) || trimmed.contains(&rule.close))
+            {
+                if line_idx == target_line {
+                    return None; // 終了行自身はルート言語
+                }
+                in_block = false;
+                inner_lang_name.clear();
+            }
+        }
+        if in_block && !inner_lang_name.is_empty() {
+            if let Some(found) = crate::syntax::for_name(&inner_lang_name)
+                .or_else(|| crate::syntax::for_path(&format!("virtual.{}", inner_lang_name)))
+            {
+                return Some(found);
+            }
+        }
+    }
+    None
 }

@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use wasm_bindgen::JsCast;
 use web_sys::MouseEvent;
 
 use super::commands::leave_structure;
@@ -15,6 +16,40 @@ fn hit_at(session: &Rc<RefCell<Session>>, x: f64, y: f64) -> Hit {
     let borrowed = session.borrow();
     let doc = borrowed.document.borrow();
     borrowed.view.hit(doc.text(), x, y)
+}
+
+fn is_on_scrollbar(event: &MouseEvent) -> bool {
+    let Some(target) = event.target() else {
+        return false;
+    };
+    let Ok(el) = target.dyn_into::<web_sys::HtmlElement>() else {
+        return false;
+    };
+    if el.class_list().contains("mn-vscroll")
+        || el.class_list().contains("mn-hscroll")
+        || el.class_list().contains("mn-thumb-space")
+    {
+        return true;
+    }
+    if el.class_list().contains("mn-aligned-block") {
+        let rect = el.get_bounding_client_rect();
+        let client_h = el.client_height() as f64;
+        let y = event.client_y() as f64;
+        if y >= rect.top() + client_h {
+            return true;
+        }
+    }
+    if let Some(parent) = el.closest(".mn-aligned-block").ok().flatten() {
+        if let Ok(parent_el) = parent.dyn_into::<web_sys::HtmlElement>() {
+            let rect = parent_el.get_bounding_client_rect();
+            let client_h = parent_el.client_height() as f64;
+            let y = event.client_y() as f64;
+            if y >= rect.top() + client_h {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// クリックした入れ子Rowへキャレットを置き、そこで処理したかを返します。
@@ -48,7 +83,7 @@ fn click_in_structure(
 }
 
 pub fn on_mousedown(session: &Rc<RefCell<Session>>, event: MouseEvent) {
-    if event.button() != 0 {
+    if event.button() != 0 || is_on_scrollbar(&event) {
         return;
     }
     event.prevent_default();
@@ -149,7 +184,7 @@ pub fn on_mousemove(session: &Rc<RefCell<Session>>, event: MouseEvent) {
 }
 
 pub fn on_dblclick(session: &Rc<RefCell<Session>>, event: MouseEvent) {
-    if event.button() != 0 {
+    if event.button() != 0 || is_on_scrollbar(&event) {
         return;
     }
     event.prevent_default();

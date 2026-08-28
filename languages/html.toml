@@ -20,3 +20,14 @@ builtins = [
 
 constants = []
 operators = ["<", ">", "</", "/>", "="]
+
+[[embedded_languages]]
+language = "JavaScript"
+open = "<script"
+close = "</script>"
+
+[[embedded_languages]]
+language = "CSS"
+open = "<style"
+close = "</style>"
+
