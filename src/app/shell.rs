@@ -899,7 +899,10 @@ impl Shell {
                     // 行は見えた場所から取り寄せられる。最初の描き直しが
                     // 見えている窓を要求する。
                     editor::load_pending(doc.line_count);
+                    let doc_id = tab.id.get_untracked();
+                    editor::set_doc_path(doc_id, Some(path.clone()));
                     tab.path.set(Some(path));
+                    editor::redraw_all();
                     shell.status.set("開きました".into());
                     shell.mark_clean();
                     // 行数はバックグラウンドで走査中。確定したら手元へ合わせる。
@@ -980,10 +983,12 @@ impl Shell {
         for draft in drafts {
             let tab = self.add_tab(pane);
             tab.id.set(draft.id);
+            editor::set_doc_path(draft.id, draft.path.clone());
             editor::load(&draft.contents);
             tab.path.set(draft.path);
             tab.dirty.set(true);
         }
+        editor::redraw_all();
         self.sync_dirty();
         self.refresh();
         self.status.set("前回の編集内容を復元しました".into());

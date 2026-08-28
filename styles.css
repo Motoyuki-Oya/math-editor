@@ -698,8 +698,11 @@ body {
   display: inline-block;
   vertical-align: baseline;
   line-height: inherit;
-  text-align: center;
-  padding: 0 3px;
+  text-align: right;
+  min-width: 1em;
+  padding: 0 4px;
+  color: var(--syn-operator);
+  font-weight: bold;
 }
 
 /* 空白文字の可視化 */
