@@ -71,6 +71,8 @@ pub struct Overlay<'a> {
     pub linked: bool,
     /// 行数確定前は仮の行番号を表示しない。
     pub show_numbers: bool,
+    pub language: Option<&'a crate::syntax::lang::LanguageDef>,
+    pub ghost: Option<&'a crate::syntax::GhostText>,
 }
 
 #[derive(Default)]
@@ -219,7 +221,19 @@ impl View {
                     text: preedit.text,
                 });
             let active = (caret.at.line == line).then_some(path.as_slice());
-            self.draw_line(doc, text, line, here.as_ref(), active)
+            let ghost_on_line = state
+                .ghost
+                .filter(|g| g.line == line && active.is_some())
+                .map(|g| (g.suffix.as_str(), g.col));
+            let holder = element(doc, "div", LINE_CLASS)?;
+            holder.set_attribute(LINE_ATTR, &line.to_string()).ok();
+            let renderer = Renderer::new(doc)
+                .with_preedit(here.as_ref())
+                .with_active_path(active)
+                .with_language(state.language)
+                .with_ghost_text(ghost_on_line);
+            append(&holder, &renderer.line(text.line(line)));
+            Some(holder)
         };
         let finish = |window: &Range<usize>| {
             self.align_columns(text, window);
@@ -360,23 +374,6 @@ impl View {
             modified: state.modified.to_vec(),
             highlights: next_highlights,
         };
-    }
-
-    fn draw_line(
-        &self,
-        doc: &Document,
-        text: &Text,
-        line: usize,
-        preedit: Option<&Preedit<'_>>,
-        active: Option<&crate::view::row::Path>,
-    ) -> Option<Element> {
-        let holder = element(doc, "div", LINE_CLASS)?;
-        holder.set_attribute(LINE_ATTR, &line.to_string()).ok();
-        let renderer = Renderer::new(doc)
-            .with_preedit(preedit)
-            .with_active_path(active);
-        append(&holder, &renderer.line(text.line(line)));
-        Some(holder)
     }
 
     /// 隣接する行の列区切り文字を揃えます。これは、構造内の行になく行にできることの 1 つです。一度に数行行われますが、これは文書だけが持つことです。

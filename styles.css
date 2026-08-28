@@ -8,6 +8,15 @@
   --font-text: "Segoe UI", "Yu Gothic", "Meiryo", "Hiragino Sans", "Noto Sans JP", -apple-system, BlinkMacSystemFont, sans-serif;
   --font-math: "Cambria Math", "STIX Two Math", "Latin Modern Math", Georgia, "Times New Roman",
     serif;
+  --syn-keyword: #a626a4;
+  --syn-type: #c18401;
+  --syn-string: #50a14f;
+  --syn-number: #986801;
+  --syn-comment: #a0a1a7;
+  --syn-builtin: #0184bc;
+  --syn-constant: #e45649;
+  --syn-operator: #4078f2;
+  --syn-punct: #383a42;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -18,6 +27,15 @@
     --line: #34343c;
     --panel: #26262c;
     --accent: #6ea0ff;
+    --syn-keyword: #c678dd;
+    --syn-type: #e5c07b;
+    --syn-string: #98c379;
+    --syn-number: #d19a66;
+    --syn-comment: #7f848e;
+    --syn-builtin: #61afef;
+    --syn-constant: #e06c75;
+    --syn-operator: #56b6c2;
+    --syn-punct: #abb2bf;
   }
 }
 
@@ -722,6 +740,47 @@ body {
   text-decoration: underline;
   text-underline-offset: 2px;
   background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+/* 構文ハイライト */
+.mn-syn-keyword {
+  color: var(--syn-keyword);
+  font-weight: 500;
+}
+.mn-syn-type {
+  color: var(--syn-type);
+}
+.mn-syn-string {
+  color: var(--syn-string);
+}
+.mn-syn-number {
+  color: var(--syn-number);
+}
+.mn-syn-comment {
+  color: var(--syn-comment);
+  font-style: italic;
+}
+.mn-syn-builtin {
+  color: var(--syn-builtin);
+}
+.mn-syn-constant {
+  color: var(--syn-constant);
+}
+.mn-syn-operator {
+  color: var(--syn-operator);
+}
+.mn-syn-punct {
+  color: var(--syn-punct);
+}
+
+/* インライン補完（ゴーストテキスト / Phantom Text） */
+.mn-ghost-text {
+  color: var(--muted);
+  opacity: 0.45;
+  pointer-events: none;
+  user-select: none;
+  font-style: normal;
+  display: inline;
 }
 
 /* テキストの下のここに選択範囲とキャレットが描画されます。 */

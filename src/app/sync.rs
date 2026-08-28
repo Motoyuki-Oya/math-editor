@@ -299,6 +299,7 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
         }
         Task::Save { path } => match ipc::save_document(handle, &path).await {
             Ok(()) => {
+                editor::set_doc_path(tab.id.get_untracked(), Some(path.clone()));
                 tab.path.set(Some(path));
                 shell.status.set("保存しました".into());
                 shell.mark_clean_tab(tab);

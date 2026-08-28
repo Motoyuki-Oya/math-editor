@@ -461,7 +461,10 @@ impl Shell {
     /// タブのドキュメントを `pane` の画面に置き、未保存のマークを保持します。
     pub(super) fn show(&self, pane: Pane, tab: Tab) {
         let dirty = tab.dirty.get_untracked();
-        editor::bind_doc(pane.editor_pane(), tab.id.get_untracked());
+        let doc_id = tab.id.get_untracked();
+        let path = tab.path.get_untracked();
+        editor::set_doc_path(doc_id, path);
+        editor::bind_doc(pane.editor_pane(), doc_id);
         tab.dirty.set(dirty);
         if !dirty {
             drafts::forget(tab);
