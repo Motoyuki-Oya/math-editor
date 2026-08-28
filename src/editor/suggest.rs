@@ -52,6 +52,11 @@ pub fn extract_prefix(line_text: &str, col: usize) -> Option<String> {
         return None;
     }
 
+    // キャレットの直後に英数字やアンダースコアが存在する場合（単語の途中: 例 "pub|lic"）は補完を抑制
+    if col < chars.len() && (chars[col].is_alphanumeric() || chars[col] == '_') {
+        return None;
+    }
+
     // LaTeX コマンド（\frac 等）のプレフィックス判定
     let mut start = col;
     while start > 0
@@ -244,6 +249,9 @@ mod tests {
         assert_eq!(extract_prefix("  p", 3), None); // 1文字はNone
         assert_eq!(extract_prefix("hello(pu", 8), Some("pu".into()));
         assert_eq!(extract_prefix("formula: \\fr", 12), Some("\\fr".into()));
+        // 単語の途中（pub|lic）では None
+        assert_eq!(extract_prefix("public", 3), None);
+        assert_eq!(extract_prefix("user_name", 4), None);
     }
 
     #[test]
