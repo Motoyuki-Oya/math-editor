@@ -8,22 +8,22 @@ use super::Editor;
 use crate::structure::text::LineChange;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Step {
+pub(crate) enum Step {
     /// 入力された文字。その前のステップと結合します。
     Typing,
     Other,
 }
 
-pub(super) struct Recorder {
+pub(crate) struct Recorder {
     /// 現在のグループ。新しいステップで増える。
-    group: u64,
-    last: Step,
+    pub(crate) group: u64,
+    pub(crate) last: Step,
     /// いくつかの編集が 1 ステップとして行われている間に設定されます。
-    grouping: bool,
+    pub(crate) grouping: bool,
     /// そのステップが書き込まれると、残りがそれに結合されるように設定されます。
-    grouped: bool,
+    pub(crate) grouped: bool,
     /// いま開いたグループの、編集前のキャレットの控え。回収されるまで持つ。
-    before: Option<String>,
+    pub(crate) before: Option<String>,
 }
 
 impl Default for Recorder {
@@ -141,7 +141,7 @@ impl Editor {
             .join(";")
     }
 
-    pub(super) fn restore_state(&mut self, state: &str) {
+    pub fn restore_state(&mut self, state: &str) {
         use crate::structure::ast::Cursor;
         use crate::structure::text::{Pos, Sel};
         let mut cursors: Vec<super::UnifiedCursor> = state

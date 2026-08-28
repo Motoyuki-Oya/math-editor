@@ -13,6 +13,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State, Wry};
 pub struct Checks<R: Runtime> {
     wrap: CheckMenuItem<R>,
     line_numbers: CheckMenuItem<R>,
+    show_whitespace: CheckMenuItem<R>,
     split: CheckMenuItem<R>,
 }
 
@@ -20,9 +21,16 @@ pub struct Checks<R: Runtime> {
 /// once the settings are read and whenever one of them changes, so that the
 /// menu and the screen never disagree.
 #[tauri::command]
-pub fn sync_view_menu(state: State<'_, Checks<Wry>>, wrap: bool, line_numbers: bool, split: bool) {
+pub fn sync_view_menu(
+    state: State<'_, Checks<Wry>>,
+    wrap: bool,
+    line_numbers: bool,
+    show_whitespace: bool,
+    split: bool,
+) {
     state.wrap.set_checked(wrap).ok();
     state.line_numbers.set_checked(line_numbers).ok();
+    state.show_whitespace.set_checked(show_whitespace).ok();
     state.split.set_checked(split).ok();
 }
 
@@ -59,6 +67,8 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
             &item("save", "保存", Some("CmdOrCtrl+S"))?,
             &item("save_as", "名前を付けて保存…", Some("CmdOrCtrl+Shift+S"))?,
             &separator()?,
+            &item("print", "印刷…", Some("CmdOrCtrl+P"))?,
+            &separator()?,
             &item("close_tab", "タブを閉じる", Some("CmdOrCtrl+W"))?,
         ],
     )?;
@@ -93,9 +103,14 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         ],
     )?;
 
+    let zoom_in = item("zoom_in", "拡大", Some("CmdOrCtrl+="))?;
+    let zoom_out = item("zoom_out", "縮小", Some("CmdOrCtrl+-"))?;
+    let zoom_reset = item("zoom_reset", "実際のサイズ", Some("CmdOrCtrl+0"))?;
+
     let checks = Checks {
         wrap: check("wrap", "折り返す", None)?,
         line_numbers: check("line_numbers", "行番号を表示する", None)?,
+        show_whitespace: check("show_whitespace", "空白文字を表示する", Some("Alt+Z"))?,
         split: check("split", "左右に分割", Some("CmdOrCtrl+\\"))?,
     };
     let view = Submenu::with_items(
@@ -103,8 +118,13 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         "表示",
         true,
         &[
+            &zoom_in,
+            &zoom_out,
+            &zoom_reset,
+            &separator()?,
             &checks.wrap,
             &checks.line_numbers,
+            &checks.show_whitespace,
             &separator()?,
             &checks.split,
         ],

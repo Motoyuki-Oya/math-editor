@@ -25,6 +25,8 @@ pub struct Settings {
     pub history_limit: usize,
     /// グローバルショートカット (Ctrl+Alt+M) でアプリを呼び出せるかどうか。
     pub global_shortcut: bool,
+    /// 半角スペース、全角スペース、タブなどの空白文字を可視化するかどうか。
+    pub show_whitespace: bool,
 }
 
 impl Default for Settings {
@@ -38,6 +40,7 @@ impl Default for Settings {
             column_gap: 18.0,
             history_limit: 500,
             global_shortcut: true,
+            show_whitespace: false,
         }
     }
 }
@@ -61,6 +64,47 @@ pub fn line_numbers() -> bool {
 
 pub fn wrap() -> bool {
     CURRENT.with(|current| current.borrow().wrap)
+}
+
+#[allow(dead_code)]
+pub fn show_whitespace() -> bool {
+    CURRENT.with(|current| current.borrow().show_whitespace)
+}
+
+/// フォントサイズを拡大（ズームイン）します。
+pub fn zoom_in() {
+    let mut s = current();
+    if s.font_size < 48.0 {
+        s.font_size = (s.font_size + 1.0).min(48.0);
+        apply(s);
+        crate::editor::redraw_all();
+    }
+}
+
+/// フォントサイズを縮小（ズームアウト）します。
+pub fn zoom_out() {
+    let mut s = current();
+    if s.font_size > 9.0 {
+        s.font_size = (s.font_size - 1.0).max(9.0);
+        apply(s);
+        crate::editor::redraw_all();
+    }
+}
+
+/// フォントサイズを標準（15px）にリセットします。
+pub fn zoom_reset() {
+    let mut s = current();
+    s.font_size = 15.0;
+    apply(s);
+    crate::editor::redraw_all();
+}
+
+/// 空白文字の可視化トグルを切り替えます。
+pub fn toggle_whitespace() {
+    let mut s = current();
+    s.show_whitespace = !s.show_whitespace;
+    apply(s);
+    crate::editor::redraw_all();
 }
 
 /// 「設定」を有効にし、視覚的な設定を画面に表示します。
@@ -102,6 +146,11 @@ fn show(settings: &Settings) {
             },
         )
         .ok();
+    if settings.show_whitespace {
+        root.class_list().add_1("mn-show-whitespace").ok();
+    } else {
+        root.class_list().remove_1("mn-show-whitespace").ok();
+    }
     // 折り返しは文書のクラスなので、描く側 (`crate::view`) が現在の設定から決めます。
     // 行番号の幅もここにはありません。設定が言うのは番号を出すかどうかだけで、幅は文書の行数次第なので描く側が決めます。
 }
@@ -109,7 +158,7 @@ fn show(settings: &Settings) {
 /// ファイルに保存されている設定を書き込みます。1 行に 1 つの `name = value` で、これは TOML の小さなコーナーです。
 pub fn write(settings: &Settings) -> String {
     format!(
-        "font_size = {}\nfont_family = \"{}\"\ncaret_blink = {}\nwrap = {}\nline_numbers = {}\ncolumn_gap = {}\nhistory_limit = {}\nglobal_shortcut = {}\n",
+        "font_size = {}\nfont_family = \"{}\"\ncaret_blink = {}\nwrap = {}\nline_numbers = {}\ncolumn_gap = {}\nhistory_limit = {}\nglobal_shortcut = {}\nshow_whitespace = {}\n",
         settings.font_size,
         settings.font_family.replace('"', ""),
         settings.caret_blink,
@@ -118,6 +167,7 @@ pub fn write(settings: &Settings) -> String {
         settings.column_gap,
         settings.history_limit,
         settings.global_shortcut,
+        settings.show_whitespace,
     )
 }
 
@@ -169,6 +219,11 @@ pub fn read(text: &str) -> Settings {
                     settings.global_shortcut = enabled;
                 }
             }
+            "show_whitespace" => {
+                if let Ok(shown) = value.parse() {
+                    settings.show_whitespace = shown;
+                }
+            }
             _ => {}
         }
     }
@@ -188,6 +243,7 @@ mod tests {
             wrap: false,
             line_numbers: true,
             history_limit: 100,
+            show_whitespace: true,
             ..Settings::default()
         };
         assert!(read(&write(&settings)) == settings);

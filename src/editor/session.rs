@@ -8,9 +8,11 @@ use std::rc::Rc;
 use web_sys::{HtmlElement, HtmlTextAreaElement};
 
 use super::input;
-use super::model::{Editor, Flush};
+use super::model::{merge_cursors, Document, Editor, Flush, UnifiedCursor};
 use super::search;
 use crate::format::document;
+use crate::structure::ast::Cursor;
+use crate::structure::text::{Pos, Sel};
 use crate::view::document::{Caret, Overlay, View};
 
 pub struct Session {
@@ -19,7 +21,9 @@ pub struct Session {
     /// 現在表示している Document Model の ID。
     pub doc_id: usize,
     /// Document Model (M) への参照。
-    pub editor: Rc<RefCell<Editor>>,
+    pub document: Rc<RefCell<Document>>,
+    /// このペイン独自のキャレット・選択範囲 (V)。
+    pub cursors: Vec<UnifiedCursor>,
     pub view: View,
     pub textarea: HtmlTextAreaElement,
     pub focused: bool,
@@ -44,26 +48,88 @@ pub struct Session {
     pending_tail: Option<(usize, Vec<String>)>,
 }
 
+impl Session {
+    pub fn primary(&self) -> Sel {
+        self.cursors.last().expect("at least one cursor").sel
+    }
+
+    pub fn primary_cursor(&self) -> &UnifiedCursor {
+        self.cursors.last().expect("at least one cursor")
+    }
+
+    #[allow(dead_code)]
+    pub fn primary_cursor_mut(&mut self) -> &mut UnifiedCursor {
+        self.cursors.last_mut().expect("at least one cursor")
+    }
+
+    pub fn cursors(&self) -> &[UnifiedCursor] {
+        &self.cursors
+    }
+
+    pub fn sels(&self) -> Vec<Sel> {
+        self.cursors
+            .iter()
+            .filter(|cursor| cursor.inside.is_none())
+            .map(|cursor| cursor.sel)
+            .collect()
+    }
+
+    pub fn nested_cursor(&self) -> Option<&Cursor> {
+        self.primary_cursor().inside.as_ref()
+    }
+
+    #[allow(dead_code)]
+    pub fn merge_sels(&mut self) {
+        merge_cursors(&mut self.cursors);
+    }
+
+    /// 一時的に Editor ラッパーを構築して編集・カーソル操作を行います。
+    pub fn edit<R>(&mut self, f: impl FnOnce(&mut Editor) -> R) -> R {
+        let mut doc = self.document.borrow_mut();
+        let mut editor = Editor {
+            document: std::mem::take(&mut *doc),
+            cursors: std::mem::take(&mut self.cursors),
+        };
+        let res = f(&mut editor);
+        *doc = editor.document;
+        self.cursors = editor.cursors;
+        res
+    }
+}
+
 /// ドキュメントが変更されたペインで呼び出されます。呼び出し中に再び変更が起きてもよいよう、台帳の借用の外で呼べる共有の参照で持ちます。
 type OnChange = Rc<dyn Fn(usize)>;
+pub type OnRedraw = Rc<dyn Fn(usize)>;
 
 thread_local! {
     /// 全ての開いているドキュメントの Model (M)。タブID（doc_id）ごとに 1 つ保持される。
-    static DOCUMENTS: RefCell<HashMap<usize, Rc<RefCell<Editor>>>> = RefCell::new(HashMap::new());
+    static DOCUMENTS: RefCell<HashMap<usize, Rc<RefCell<Document>>>> = RefCell::new(HashMap::new());
     /// ペインごとに 1 つのセッション画面 (V)。分割ビューはリストを作成します。
     static PANES: RefCell<Vec<Rc<RefCell<Session>>>> = const { RefCell::new(Vec::new()) };
     /// 入力を行うペイン。
     static FOCUSED: Cell<usize> = const { Cell::new(0) };
     static NEXT_PANE: Cell<usize> = const { Cell::new(0) };
     static ON_CHANGE: RefCell<Option<OnChange>> = const { RefCell::new(None) };
+    static ON_REDRAW: RefCell<Vec<OnRedraw>> = const { RefCell::new(Vec::new()) };
+}
+
+pub fn add_on_redraw(callback: OnRedraw) {
+    ON_REDRAW.with(|slot| slot.borrow_mut().push(callback));
+}
+
+fn notify_redraw(pane: usize) {
+    let callbacks = ON_REDRAW.with(|slot| slot.borrow().clone());
+    for callback in callbacks {
+        callback(pane);
+    }
 }
 
 /// 指定IDの Document Model を取得、無ければ新規作成して返します。
-pub fn get_or_create_doc(id: usize) -> Rc<RefCell<Editor>> {
+pub fn get_or_create_doc(id: usize) -> Rc<RefCell<Document>> {
     DOCUMENTS.with(|docs| {
         docs.borrow_mut()
             .entry(id)
-            .or_insert_with(|| Rc::new(RefCell::new(Editor::default())))
+            .or_insert_with(|| Rc::new(RefCell::new(Document::default())))
             .clone()
     })
 }
@@ -107,7 +173,8 @@ pub fn bind_doc(pane: usize, doc_id: usize) {
     {
         let mut borrowed = session.borrow_mut();
         borrowed.doc_id = doc_id;
-        borrowed.editor = doc;
+        borrowed.document = doc;
+        borrowed.cursors = vec![UnifiedCursor::caret(Pos::default())];
         borrowed.preedit.clear();
         borrowed.search_from = None;
     }
@@ -123,11 +190,12 @@ pub fn init(root: &HtmlElement) -> Option<usize> {
     let pane = NEXT_PANE.get();
     NEXT_PANE.set(pane + 1);
     let doc_id = 0;
-    let editor = get_or_create_doc(doc_id);
+    let document = get_or_create_doc(doc_id);
     let session = Rc::new(RefCell::new(Session {
         pane,
         doc_id,
-        editor,
+        document,
+        cursors: vec![UnifiedCursor::caret(Pos::default())],
         view,
         textarea,
         focused: false,
@@ -178,18 +246,39 @@ pub fn close_pane(pane: usize) {
     }
 }
 
+/// フォーカスが変わった際にアプリケーション側へ通知します。
+type OnFocus = Rc<dyn Fn(usize)>;
+
+thread_local! {
+    static ON_FOCUS: RefCell<Option<OnFocus>> = const { RefCell::new(None) };
+}
+
+pub fn set_on_focus(callback: OnFocus) {
+    ON_FOCUS.with(|slot| *slot.borrow_mut() = Some(callback));
+}
+
+fn notify_focus(pane: usize) {
+    let callback = ON_FOCUS.with(|slot| slot.borrow().clone());
+    if let Some(callback) = callback {
+        callback(pane);
+    }
+}
+
 /// 入力を「ペイン」に送信します。
 pub fn focus_pane(pane: usize) {
     clear_linked();
     if pane_session(pane).is_some() {
         FOCUSED.set(pane);
+        notify_focus(pane);
     }
     focus();
 }
 
 /// イベントが発生したペインが、入力を受け取るペインです。
 pub fn note_focus(session: &Rc<RefCell<Session>>) {
-    FOCUSED.set(session.borrow().pane);
+    let pane = session.borrow().pane;
+    FOCUSED.set(pane);
+    notify_focus(pane);
 }
 
 /// クリックしたペインを入力先にする。Alt+クリックで別ペインへ移った場合は、
@@ -198,6 +287,7 @@ pub fn choose_pane(session: &Rc<RefCell<Session>>, add: bool) -> bool {
     let pane = session.borrow().pane;
     let was_linked = session.borrow().linked;
     let previous = FOCUSED.replace(pane);
+    notify_focus(pane);
     let crossed = add && previous != pane;
     let newly_linked = crossed && !was_linked;
     let sessions = PANES.with(|panes| panes.borrow().clone());
@@ -214,7 +304,9 @@ pub fn choose_pane(session: &Rc<RefCell<Session>>, add: bool) -> bool {
         }
     }
     for target in sessions {
-        redraw(&target);
+        if target.borrow().pane != pane {
+            scrolled(&target);
+        }
     }
     newly_linked
 }
@@ -282,7 +374,7 @@ pub(super) fn tail_locked(session: &Rc<RefCell<Session>>) -> bool {
     let borrowed = session.borrow();
     borrowed.counting
         && borrowed.pending_tail.as_ref().is_some_and(|(from, lines)| {
-            let line = borrowed.editor.borrow().primary().head.line;
+            let line = borrowed.primary().head.line;
             line >= *from && line < *from + lines.len()
         })
 }
@@ -309,9 +401,9 @@ pub(super) fn request_far_copy(pane: usize, copy: super::commands::FarCopy) {
 fn request_missing(session: &Rc<RefCell<Session>>) {
     let (pane, range) = {
         let borrowed = session.borrow();
-        let editor = borrowed.editor.borrow();
+        let doc = borrowed.document.borrow();
         let drawn = borrowed.view.drawn();
-        let Some(first) = editor.text().first_absent(drawn.start) else {
+        let Some(first) = doc.text().first_absent(drawn.start) else {
             return;
         };
         if first >= drawn.end {
@@ -325,9 +417,9 @@ fn request_missing(session: &Rc<RefCell<Session>>) {
     }
 }
 
-/// 検索欄の入力を可視範囲へ反映する。選択やキャレットは変更しない。
-pub fn preview_search(query: &str, options: search::SearchOptions) -> usize {
-    let Some(session) = session() else {
+/// 指定ペインの検索欄の入力を可視範囲へ反映する。選択やキャレットは変更しない。
+pub fn preview_search_pane(pane: usize, query: &str, options: search::SearchOptions) -> usize {
+    let Some(session) = pane_session(pane) else {
         return 0;
     };
     {
@@ -341,8 +433,10 @@ pub fn preview_search(query: &str, options: search::SearchOptions) -> usize {
     count
 }
 
-pub fn clear_search_preview() {
-    let Some(session) = session() else { return };
+pub fn clear_search_preview_pane(pane: usize) {
+    let Some(session) = pane_session(pane) else {
+        return;
+    };
     {
         let mut borrowed = session.borrow_mut();
         borrowed.preview_query.clear();
@@ -351,15 +445,32 @@ pub fn clear_search_preview() {
     redraw_preview_overlay(&session);
 }
 
+#[allow(dead_code)]
+pub fn preview_search(query: &str, options: search::SearchOptions) -> usize {
+    if let Some(focused_session) = session() {
+        let pane = focused_session.borrow().pane;
+        preview_search_pane(pane, query, options)
+    } else {
+        0
+    }
+}
+
+pub fn clear_search_preview() {
+    if let Some(focused_session) = session() {
+        let pane = focused_session.borrow().pane;
+        clear_search_preview_pane(pane);
+    }
+}
+
 fn redraw_preview_overlay(session: &Rc<RefCell<Session>>) {
     let session = session.borrow();
-    let editor = session.editor.borrow();
-    let caret = caret_of(&session, &editor);
-    let carets = carets_of(&session, &editor);
+    let doc = session.document.borrow();
+    let caret = caret_of(&session);
+    let carets = carets_of(&session);
     let highlights = preview_highlights(&session);
-    let modified = editor.modified_lines();
-    let sels = editor.sels();
-    let line_count = editor.text().line_count();
+    let modified = doc.modified_lines();
+    let sels = session.sels();
+    let line_count = doc.text().line_count();
     session.view.redraw_overlay(
         line_count,
         &Overlay {
@@ -380,9 +491,9 @@ fn refresh_preview(session: &mut Session) {
         session.preview_found.clear();
         return;
     }
-    let editor = session.editor.borrow();
+    let doc = session.document.borrow();
     session.preview_found = search::find_range(
-        editor.text(),
+        doc.text(),
         &session.preview_query,
         session.preview_options,
         session.preview_file_size,
@@ -441,6 +552,7 @@ pub fn redraw_doc(doc_id: usize, origin_pane: Option<usize>) {
         if is_origin {
             redraw(&s);
         } else {
+            s.borrow().view.invalidate();
             scrolled(&s);
         }
     }
@@ -450,14 +562,14 @@ pub fn redraw_doc(doc_id: usize, origin_pane: Option<usize>) {
 pub fn redraw(session: &Rc<RefCell<Session>>) {
     {
         let session = session.borrow();
-        let editor = session.editor.borrow();
-        let caret = caret_of(&session, &editor);
-        let carets = carets_of(&session, &editor);
+        let doc = session.document.borrow();
+        let caret = caret_of(&session);
+        let carets = carets_of(&session);
         let highlights = preview_highlights(&session);
-        let modified = editor.modified_lines();
-        let sels = editor.sels();
+        let modified = doc.modified_lines();
+        let sels = session.sels();
         session.view.draw(
-            editor.text(),
+            doc.text(),
             &Overlay {
                 sels: &sels,
                 highlights: &highlights,
@@ -477,6 +589,8 @@ pub fn redraw(session: &Rc<RefCell<Session>>) {
     refresh_preview(&mut session.borrow_mut());
     redraw_preview_overlay(session);
     request_missing(session);
+    let pane = session.borrow().pane;
+    notify_redraw(pane);
 }
 
 /// ホイール。窓を行の分だけ動かして描き直します。
@@ -496,14 +610,14 @@ pub(super) fn thumb_moved(session: &Rc<RefCell<Session>>) {
 pub fn scrolled(session: &Rc<RefCell<Session>>) {
     {
         let session = session.borrow();
-        let editor = session.editor.borrow();
-        let caret = caret_of(&session, &editor);
-        let carets = carets_of(&session, &editor);
+        let doc = session.document.borrow();
+        let caret = caret_of(&session);
+        let carets = carets_of(&session);
         let highlights = preview_highlights(&session);
-        let modified = editor.modified_lines();
-        let sels = editor.sels();
+        let modified = doc.modified_lines();
+        let sels = session.sels();
         session.view.repaint(
-            editor.text(),
+            doc.text(),
             &Overlay {
                 sels: &sels,
                 highlights: &highlights,
@@ -521,21 +635,23 @@ pub fn scrolled(session: &Rc<RefCell<Session>>) {
     refresh_preview(&mut session.borrow_mut());
     redraw_preview_overlay(session);
     request_missing(session);
+    let pane = session.borrow().pane;
+    notify_redraw(pane);
 }
 
 /// 1 つのキャレットで両方のケースを説明するため、描画に選択するモードはありません。
-fn caret_of<'a>(session: &'a Session, editor: &'a Editor) -> Caret<'a> {
+fn caret_of<'a>(session: &'a Session) -> Caret<'a> {
     Caret {
-        at: editor.primary().head,
-        inside: editor.nested_cursor(),
+        at: session.primary().head,
+        inside: session.nested_cursor(),
         composing: (!session.preedit.is_empty()).then_some(session.preedit.as_str()),
     }
 }
 
-fn carets_of<'a>(session: &'a Session, editor: &'a Editor) -> Vec<Caret<'a>> {
-    let last = editor.cursors().len().saturating_sub(1);
-    editor
-        .cursors()
+fn carets_of<'a>(session: &'a Session) -> Vec<Caret<'a>> {
+    let last = session.cursors.len().saturating_sub(1);
+    session
+        .cursors
         .iter()
         .enumerate()
         .map(|(index, cursor)| Caret {
@@ -571,10 +687,8 @@ pub fn focus() {
 pub fn load(text: &str) {
     let Some(session) = session() else { return };
     session
-        .borrow()
-        .editor
         .borrow_mut()
-        .load_contents(document::read(text));
+        .edit(|editor| editor.load_contents(document::read(text)));
     changed(&session);
 }
 
@@ -584,7 +698,7 @@ pub fn load_pending(line_count: usize) {
     let Some(session) = session() else { return };
     {
         let borrowed = session.borrow();
-        borrowed.editor.borrow_mut().load_pending(line_count);
+        borrowed.document.borrow_mut().load_pending(line_count);
     }
     {
         let mut borrowed = session.borrow_mut();
@@ -601,19 +715,20 @@ pub fn show_tail(pane: usize, lines: &[String]) {
         return;
     };
     let from = {
-        let borrowed = session.borrow();
-        let mut editor = borrowed.editor.borrow_mut();
-        let count = editor.text().line_count();
-        let from = count.saturating_sub(lines.len());
-        editor.forget_range(from..count);
-        editor.feed(
-            from,
-            lines.iter().map(|line| document::read_line(line)).collect(),
-        );
-        let last = count.saturating_sub(1);
-        let col = editor.text().line_len(last);
-        editor.set_caret(crate::structure::text::Pos::new(last, col));
-        from
+        let mut borrowed = session.borrow_mut();
+        borrowed.edit(|editor| {
+            let count = editor.text().line_count();
+            let from = count.saturating_sub(lines.len());
+            editor.forget_range(from..count);
+            editor.feed(
+                from,
+                lines.iter().map(|line| document::read_line(line)).collect(),
+            );
+            let last = count.saturating_sub(1);
+            let col = editor.text().line_len(last);
+            editor.set_caret(Pos::new(last, col));
+            from
+        })
     };
     {
         let mut borrowed = session.borrow_mut();
@@ -641,7 +756,7 @@ fn apply_line_count(
         );
         let last = count.saturating_sub(1);
         let col = editor.text().line_len(last);
-        editor.set_caret(crate::structure::text::Pos::new(last, col));
+        editor.set_caret(Pos::new(last, col));
     } else if let Some(shift) = jump_end {
         editor.move_document_edge(true, shift);
     }
@@ -661,13 +776,10 @@ pub fn set_line_count(pane: usize, count: usize) {
         (pending_tail, jump_end)
     };
     {
-        let borrowed = session.borrow();
-        apply_line_count(
-            &mut borrowed.editor.borrow_mut(),
-            pending_tail,
-            jump_end,
-            count,
-        );
+        let mut borrowed = session.borrow_mut();
+        borrowed.edit(|editor| {
+            apply_line_count(editor, pending_tail, jump_end, count);
+        });
     }
     redraw(&session);
 }
@@ -682,26 +794,42 @@ pub fn feed_pane(pane: usize, from: usize, lines: &[String]) {
     let Some(session) = pane_session(pane) else {
         return;
     };
-    session.borrow().editor.borrow_mut().feed(
+    session.borrow().document.borrow_mut().feed(
         from,
         lines.iter().map(|line| document::read_line(line)).collect(),
     );
     {
         let borrowed = session.borrow();
-        let mut editor = borrowed.editor.borrow_mut();
-        if editor.resident_lines() > RESIDENT_LIMIT {
-            let drawn = borrowed.view.drawn();
-            editor.evict_far(drawn.start.saturating_sub(RESIDENT_KEEP)..drawn.end + RESIDENT_KEEP);
+        let mut doc = borrowed.document.borrow_mut();
+        if doc.resident_lines() > RESIDENT_LIMIT {
+            let mut min_start = borrowed.view.drawn().start;
+            let mut max_end = borrowed.view.drawn().end;
+            let mut pinned: Vec<usize> = Vec::new();
+            let sessions = PANES.with(|panes| panes.borrow().clone());
+            for s in &sessions {
+                if s.borrow().doc_id == borrowed.doc_id {
+                    let d = s.borrow().view.drawn();
+                    min_start = min_start.min(d.start);
+                    max_end = max_end.max(d.end);
+                    for sel in s.borrow().cursors() {
+                        pinned.push(sel.start().line);
+                        pinned.push(sel.end().line);
+                    }
+                }
+            }
+            doc.evict_far(
+                min_start.saturating_sub(RESIDENT_KEEP)..max_end + RESIDENT_KEEP,
+                &pinned,
+            );
         }
     }
     // 描き直すのは届いた行が画面に見えるときだけ。
     let (visible, follows_caret) = {
         let borrowed = session.borrow();
-        let editor = borrowed.editor.borrow();
         let drawn = borrowed.view.drawn();
         (
             from < drawn.end && from + lines.len() > drawn.start,
-            drawn.contains(&editor.primary().head.line),
+            drawn.contains(&borrowed.primary().head.line),
         )
     };
     if visible {
@@ -717,9 +845,8 @@ pub fn feed_pane(pane: usize, from: usize, lines: &[String]) {
 /// たまった編集を、文書の本体へ送れる形で渡します。何もなければ None。
 pub fn take_flush(pane: usize) -> Option<FlushBatch> {
     let session = pane_session(pane)?;
-    let borrowed = session.borrow();
-    let mut editor = borrowed.editor.borrow_mut();
-    take_flush_of(&mut editor)
+    let mut borrowed = session.borrow_mut();
+    borrowed.edit(take_flush_of)
 }
 
 /// 入れ替えの行番号は本体側（編集前）の行番号で、後ろの入れ替えから先に
@@ -776,7 +903,7 @@ pub fn stats() -> (usize, usize) {
     session()
         .map(|session| {
             let borrowed = session.borrow();
-            let (characters, lines) = borrowed.editor.borrow().text().stats();
+            let (characters, lines) = borrowed.document.borrow().text().stats();
             (characters, if borrowed.counting { 0 } else { lines })
         })
         .unwrap_or((0, 1))
@@ -785,14 +912,71 @@ pub fn stats() -> (usize, usize) {
 /// 入力を受けるペインの文書が手元に全部あるか。検索や置換が文書の本体の
 /// 走査を要るかの見分け。
 pub fn fully_resident() -> bool {
-    session().is_some_and(|session| session.borrow().editor.borrow().text().absent_lines() == 0)
+    session().is_some_and(|session| session.borrow().document.borrow().text().absent_lines() == 0)
 }
 
 /// 保存などで文書がファイルと一致した際、変更行マーカーをクリアします。
 pub fn clear_modified(pane: usize) {
     if let Some(session) = pane_session(pane) {
         let doc_id = session.borrow().doc_id;
-        session.borrow().editor.borrow_mut().clear_modified();
-        redraw_doc(doc_id, None);
+        clear_modified_doc(doc_id);
     }
+}
+
+pub fn clear_modified_doc(doc_id: usize) {
+    let doc = get_or_create_doc(doc_id);
+    doc.borrow_mut().clear_modified();
+    redraw_doc(doc_id, Some(FOCUSED.get()));
+}
+
+/// 文書の本体が巻き戻ったのに合わせる: 該当ドキュメントを開いているセッションへ
+/// テキストを合わせ、カーソルを復元する。
+pub fn apply_restored(doc_id: usize, state: &str, touched_from: usize, line_count: usize) {
+    let sessions = PANES.with(|panes| panes.borrow().clone());
+    let mut text_restored = false;
+
+    for s in &sessions {
+        if s.borrow().doc_id == doc_id {
+            s.borrow_mut().edit(|editor| {
+                if !text_restored {
+                    editor.apply_restored(state, touched_from, line_count);
+                    text_restored = true;
+                } else {
+                    editor.restore_state(state);
+                }
+            });
+        }
+    }
+
+    if !text_restored {
+        let doc = get_or_create_doc(doc_id);
+        let mut editor = Editor {
+            document: std::mem::take(&mut *doc.borrow_mut()),
+            cursors: vec![],
+        };
+        editor.apply_restored(state, touched_from, line_count);
+        *doc.borrow_mut() = editor.document;
+    }
+
+    redraw_doc(doc_id, Some(FOCUSED.get()));
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct UrlTooltip {
+    pub url: String,
+    pub left: f64,
+    pub top: f64,
+}
+
+pub fn url_at_caret(pane: usize) -> Option<UrlTooltip> {
+    let session = pane_session(pane)?;
+    let borrowed = session.borrow();
+    let doc = borrowed.document.borrow();
+    let caret = caret_of(&borrowed);
+    let (url, rect) = borrowed.view.url_at_caret(doc.text(), &caret)?;
+    Some(UrlTooltip {
+        url,
+        left: rect.left,
+        top: rect.top,
+    })
 }

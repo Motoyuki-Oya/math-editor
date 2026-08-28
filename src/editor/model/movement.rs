@@ -35,7 +35,11 @@ impl Editor {
     /// 本文では行間を移動し、入れ子構造では内容のある上下スロット間を移動します。
     pub fn move_v(&mut self, down: bool, extend: bool) -> Did {
         if self.has_inside() {
-            self.move_vertical_cursors(down);
+            if extend {
+                self.leave_structure();
+            } else {
+                self.move_vertical_cursors(down);
+            }
         }
         self.map_sels(extend, |text, head| {
             let line = if down {
@@ -43,7 +47,33 @@ impl Editor {
             } else {
                 head.line.checked_sub(1).unwrap_or(head.line)
             };
-            text.clamp(Pos::new(line.min(text.line_count() - 1), head.col))
+            text.clamp(Pos::new(
+                line.min(text.line_count().saturating_sub(1)),
+                head.col,
+            ))
+        });
+        Did::Moved
+    }
+
+    /// ページ単位（PageUp / PageDown）の移動
+    pub fn move_page(&mut self, down: bool, extend: bool) -> Did {
+        if self.has_inside() {
+            if extend {
+                self.leave_structure();
+            } else {
+                self.move_vertical_cursors(down);
+            }
+        }
+        self.map_sels(extend, |text, head| {
+            let line = if down {
+                head.line + 20
+            } else {
+                head.line.saturating_sub(20)
+            };
+            text.clamp(Pos::new(
+                line.min(text.line_count().saturating_sub(1)),
+                head.col,
+            ))
         });
         Did::Moved
     }
@@ -81,19 +111,16 @@ impl Editor {
     }
 
     pub(super) fn map_sels(&mut self, extend: bool, step: impl Fn(&Text, Pos) -> Pos) {
-        self.recorder.cut();
-        for sel in self
-            .cursors
-            .iter_mut()
-            .filter(|cursor| cursor.inside.is_none())
-        {
+        let Editor { document, cursors } = self;
+        document.recorder.cut();
+        for sel in cursors.iter_mut().filter(|cursor| cursor.inside.is_none()) {
             // 他のエディタと同様に、Shift を使用せずに選択範囲を折りたたむと、近くの端が維持されます。
             let from = if extend || sel.is_caret() {
                 sel.head
             } else {
                 sel.head.min(sel.anchor).max(sel.start())
             };
-            let head = step(&self.text, from);
+            let head = step(&document.text, from);
             sel.head = head;
             if !extend {
                 sel.anchor = head;

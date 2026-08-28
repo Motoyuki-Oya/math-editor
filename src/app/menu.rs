@@ -38,6 +38,7 @@ pub(super) fn choose(shell: Shell, name: &str, from: From) {
         "open" => shell.open(),
         "save" => shell.save(false),
         "save_as" => shell.save(true),
+        "print" => shell.print(),
         "close_tab" => {
             let pane = shell.pane_untracked();
             shell.close(pane, pane.current.get_untracked());
@@ -49,12 +50,19 @@ pub(super) fn choose(shell: Shell, name: &str, from: From) {
         "find" => shell.find(Field::Query),
         "replace" => shell.find(Field::Replacement),
         "insert_structure" => shell.pane().palette.update(|open| *open = !*open),
+        "zoom_in" => settings::zoom_in(),
+        "zoom_out" => settings::zoom_out(),
+        "zoom_reset" => settings::zoom_reset(),
         "wrap" => change(Settings {
             wrap: !current.wrap,
             ..current
         }),
         "line_numbers" => change(Settings {
             line_numbers: !current.line_numbers,
+            ..current
+        }),
+        "show_whitespace" => change(Settings {
+            show_whitespace: !current.show_whitespace,
             ..current
         }),
         "split" => shell.toggle_split(),
@@ -68,7 +76,13 @@ pub(super) fn show_state(shell: Shell) {
     let settings = settings::current();
     let split = shell.panes.with_untracked(Vec::len) > 1;
     spawn_local(async move {
-        ipc::sync_view_menu(settings.wrap, settings.line_numbers, split).await;
+        ipc::sync_view_menu(
+            settings.wrap,
+            settings.line_numbers,
+            settings.show_whitespace,
+            split,
+        )
+        .await;
     });
 }
 

@@ -66,9 +66,32 @@ impl Editor {
         true
     }
 
+    /// 構造内のカーソル位置にある単語を選択します。
+    pub fn select_nested_word_at(&mut self, at: Pos, cursor: &Cursor) -> bool {
+        if !self.enter_at(at, cursor) {
+            return false;
+        }
+        self.with_cursor(Inside::Extend, |editing| {
+            editing.select_word();
+            None
+        })
+    }
+
+    /// 構造内のカーソル位置があるスロット全体を選択します。
+    pub fn select_nested_row_at(&mut self, at: Pos, cursor: &Cursor) -> bool {
+        if !self.enter_at(at, cursor) {
+            return false;
+        }
+        self.with_cursor(Inside::Extend, |editing| {
+            editing.select_row();
+            None
+        })
+    }
+
     pub fn leave_structure(&mut self) -> bool {
         let mut left = false;
-        for selection in &mut self.cursors {
+        let Editor { document, cursors } = self;
+        for selection in cursors {
             let Some(cursor) = selection.inside.take() else {
                 continue;
             };
@@ -77,11 +100,11 @@ impl Editor {
                 .path
                 .first()
                 .map_or(cursor.index, |(node, _)| node + 1);
-            selection.sel = Sel::caret(self.text.clamp(Pos::new(selection.sel.head.line, col)));
+            selection.sel = Sel::caret(document.text.clamp(Pos::new(selection.sel.head.line, col)));
             left = true;
         }
         if left {
-            self.recorder.cut();
+            self.document.recorder.cut();
         }
         left
     }
@@ -195,11 +218,12 @@ impl Editor {
                 self.modified_lines.insert(line);
             }
         }
-        let Some(root) = self.text.line_mut(line) else {
+        let transient_structure = self.cursors[index].transient_structure;
+        let Some(root) = self.document.text.line_mut(line) else {
             return false;
         };
         let escape = command(&mut Editing::new(root, &mut cursor));
-        let transient_done = self.cursors[index].transient_structure.is_some_and(|at| {
+        let transient_done = transient_structure.is_some_and(|at| {
             cursor.path.is_empty()
                 && root.get(at).is_some_and(|node| {
                     !matches!(
@@ -293,6 +317,7 @@ impl Editor {
         })
     }
 
+    #[allow(dead_code)]
     pub fn nested_selection(&self) -> Option<Row> {
         let cursor = self.primary_cursor().inside.as_ref()?;
         if cursor.is_caret() {

@@ -46,6 +46,8 @@ impl AppState {
     }
 
     fn adopt(&self, doc: store::Document) -> OpenedDocument {
+        let encoding = doc.encoding().label().to_string();
+        let line_ending = doc.line_ending().label().to_string();
         let opened = OpenedDocument {
             handle: {
                 let mut next = self.next_document.lock().unwrap();
@@ -54,6 +56,8 @@ impl AppState {
             },
             line_count: doc.line_count(),
             bytes: doc.bytes(),
+            encoding,
+            line_ending,
         };
         self.docs.lock().unwrap().insert(opened.handle, doc);
         self.searches
@@ -106,12 +110,21 @@ async fn pick_save_path(app: tauri::AppHandle, default_name: String) -> Option<S
     .map(|p| p.to_string_lossy().into_owned())
 }
 
-/// 開き方の答え: 文書の取っ手と、行数と大きさ。
+/// 開き方の答え: 文書の取っ手と、行数と大きさ、文字コード、改行コード。
 #[derive(serde::Serialize)]
 struct OpenedDocument {
     handle: u64,
     line_count: usize,
     bytes: usize,
+    encoding: String,
+    line_ending: String,
+}
+
+#[derive(serde::Serialize)]
+struct ReopenedDocument {
+    line_count: usize,
+    encoding: String,
+    line_ending: String,
 }
 
 /// 文書を全部 1 つの文字列で webview へ渡さずに開きます。本体はネイティブ側の
@@ -128,6 +141,66 @@ async fn open_document(state: State<'_, AppState>, path: String) -> Result<Opene
         });
     }
     Ok(opened)
+}
+
+/// 指定した文字コードでファイルを開き直します。
+#[tauri::command]
+async fn reopen_document_encoding(
+    state: State<'_, AppState>,
+    handle: u64,
+    encoding: String,
+) -> Result<ReopenedDocument, String> {
+    let enc = store::FileEncoding::from_label(&encoding)
+        .ok_or_else(|| format!("未知の文字コードです: {encoding}"))?;
+    let (line_count, enc_label, line_ending, scan) = state.with_doc(handle, |doc| {
+        let scan = doc.reopen_with_encoding(enc)?;
+        Ok((
+            doc.line_count(),
+            doc.encoding().label().to_string(),
+            doc.line_ending().label().to_string(),
+            scan,
+        ))
+    })?;
+    if let Some(scan) = scan {
+        std::thread::spawn(move || {
+            let _ = scan.run();
+        });
+    }
+    Ok(ReopenedDocument {
+        line_count,
+        encoding: enc_label,
+        line_ending,
+    })
+}
+
+/// 文書の文字コードを設定します（保存時に使われます）。
+#[tauri::command]
+async fn set_document_encoding(
+    state: State<'_, AppState>,
+    handle: u64,
+    encoding: String,
+) -> Result<(), String> {
+    let enc = store::FileEncoding::from_label(&encoding)
+        .ok_or_else(|| format!("未知の文字コードです: {encoding}"))?;
+    state.with_doc(handle, |doc| {
+        doc.set_encoding(enc);
+        Ok(())
+    })
+}
+
+/// 文書の改行コードを設定します（保存時に使われます）。
+#[tauri::command]
+async fn set_document_line_ending(
+    state: State<'_, AppState>,
+    handle: u64,
+    line_ending: String,
+) -> Result<(), String> {
+    let le = store::LineEnding::from_label(&line_ending)
+        .ok_or_else(|| format!("未知の改行コードです: {line_ending}"))?;
+    state.with_doc(handle, |doc| {
+        doc.set_line_ending(le);
+        Ok(())
+    })
 }
 
 /// 走査の完了を待ち、文書の行数を確定させる。
@@ -206,6 +279,7 @@ struct RestoredLines {
     state: String,
     touched_from: usize,
     line_count: usize,
+    clean: bool,
 }
 
 #[tauri::command]
@@ -224,6 +298,7 @@ async fn undo_lines(
                 state: restored.state,
                 touched_from: restored.touched_from,
                 line_count: restored.line_count,
+                clean: doc.is_clean(),
             }),
         )
     })
@@ -724,6 +799,26 @@ fn frontend_ready(state: State<'_, AppState>) {
     }
 }
 
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        std::process::Command::new("cmd")
+            .args(["/c", "start", "", &url])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+        Ok(())
+    }
+}
+
 /// 保存されていない作業が失われる前に確認します。 WebView 自体の `confirm()` はすべてのプラットフォームで使用できるわけではないため、質問はネイティブ ダイアログを経由します。
 #[tauri::command]
 async fn confirm_discard(app: tauri::AppHandle, message: String) -> bool {
@@ -853,6 +948,10 @@ pub fn run() {
             remove_draft,
             read_drafts,
             file_size,
+            reopen_document_encoding,
+            set_document_encoding,
+            set_document_line_ending,
+            open_external_url,
             menu::sync_view_menu
         ])
         .run(tauri::generate_context!())

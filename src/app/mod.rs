@@ -14,7 +14,6 @@ use leptos::prelude::*;
 use leptos::reactive::owner::Owner;
 use leptos::task::spawn_local;
 
-use find::FindBar;
 use panes::PaneView;
 use preferences::Preferences;
 use shell::{Pane, Shell};
@@ -42,6 +41,9 @@ pub fn App() -> impl IntoView {
 
     Effect::new(move |_| {
         editor::set_on_change(std::rc::Rc::new(move |pane| shell.mark_dirty(pane)));
+        editor::set_on_focus(std::rc::Rc::new(move |pane| {
+            shell.note_focus_by_editor_pane(pane)
+        }));
         sync::install(shell);
         keys::install_shortcuts(shell);
         menu::install(shell);
@@ -201,12 +203,11 @@ pub fn App() -> impl IntoView {
         }
     });
 
-    view! {
-        <div class="app">
-            <Show when=move || shell.searching.get()>
-                <FindBar shell=shell/>
-            </Show>
+    let encoding_menu = RwSignal::new(None::<(f64, f64)>);
+    let line_ending_menu = RwSignal::new(None::<(f64, f64)>);
 
+    view! {
+        <div class="app" on:contextmenu=move |ev| ev.prevent_default()>
             <Show when=move || shell.preferences.get()>
                 <Preferences open=shell.preferences/>
             </Show>
@@ -276,8 +277,133 @@ pub fn App() -> impl IntoView {
                         format!("{characters} 文字 / {lines} 行")
                     }
                 }}</span>
+                <span
+                    class="status-clickable"
+                    title="改行コードを変更"
+                    on:click=move |ev: web_sys::MouseEvent| {
+                        let x = ev.client_x() as f64;
+                        let y = ev.client_y() as f64;
+                        line_ending_menu.set(Some((x, y)));
+                        encoding_menu.set(None);
+                    }
+                >
+                    {move || shell.tab().line_ending.get()}
+                </span>
+                <span
+                    class="status-clickable"
+                    title="文字コードを変更 / 開き直す"
+                    on:click=move |ev: web_sys::MouseEvent| {
+                        let x = ev.client_x() as f64;
+                        let y = ev.client_y() as f64;
+                        encoding_menu.set(Some((x, y)));
+                        line_ending_menu.set(None);
+                    }
+                >
+                    {move || shell.tab().encoding.get()}
+                </span>
                 <span class="status-message">{move || shell.status.get()}</span>
             </div>
+
+            <Show when=move || encoding_menu.get().is_some()>
+                {move || {
+                    let (x, y) = encoding_menu.get()?;
+                    let encodings = [
+                        ("UTF-8", "UTF-8"),
+                        ("UTF-8 (BOM)", "UTF-8 (BOM)"),
+                        ("Shift-JIS", "Shift-JIS (CP932)"),
+                        ("EUC-JP", "EUC-JP"),
+                        ("ISO-2022-JP", "ISO-2022-JP (JIS)"),
+                    ];
+                    Some(view! {
+                        <div
+                            class="tab-context-menu-backdrop"
+                            on:mousedown=move |_| encoding_menu.set(None)
+                            on:contextmenu=move |ev| {
+                                ev.prevent_default();
+                                encoding_menu.set(None);
+                            }
+                        >
+                            <div
+                                class="tab-context-menu"
+                                style=format!("left: {}px; bottom: {}px;", x.max(8.0), (web_sys::window().and_then(|w| w.inner_height().ok()).and_then(|h| h.as_f64()).unwrap_or(600.0) - y + 6.0).max(24.0))
+                                on:mousedown=move |ev| ev.stop_propagation()
+                            >
+                                <div class="status-menu-header">"エンコードを指定して再読み込み"</div>
+                                {encodings.iter().map(|&(enc_id, label)| {
+                                    view! {
+                                        <button
+                                            class="context-menu-item"
+                                            on:click=move |_| {
+                                                shell.reopen_with_encoding(enc_id);
+                                                encoding_menu.set(None);
+                                            }
+                                        >
+                                            {label}
+                                        </button>
+                                    }
+                                }).collect::<Vec<_>>()}
+                                <div class="context-menu-separator"/>
+                                <div class="status-menu-header">"エンコードを指定して保存"</div>
+                                {encodings.iter().map(|&(enc_id, label)| {
+                                    view! {
+                                        <button
+                                            class="context-menu-item"
+                                            on:click=move |_| {
+                                                shell.set_encoding(enc_id);
+                                                encoding_menu.set(None);
+                                            }
+                                        >
+                                            {label}
+                                        </button>
+                                    }
+                                }).collect::<Vec<_>>()}
+                            </div>
+                        </div>
+                    })
+                }}
+            </Show>
+
+            <Show when=move || line_ending_menu.get().is_some()>
+                {move || {
+                    let (x, y) = line_ending_menu.get()?;
+                    let line_endings = [
+                        ("CRLF", "CRLF (Windows: \\r\\n)"),
+                        ("LF", "LF (Unix/macOS: \\n)"),
+                        ("CR", "CR (Classic Mac: \\r)"),
+                    ];
+                    Some(view! {
+                        <div
+                            class="tab-context-menu-backdrop"
+                            on:mousedown=move |_| line_ending_menu.set(None)
+                            on:contextmenu=move |ev| {
+                                ev.prevent_default();
+                                line_ending_menu.set(None);
+                            }
+                        >
+                            <div
+                                class="tab-context-menu"
+                                style=format!("left: {}px; bottom: {}px;", x.max(8.0), (web_sys::window().and_then(|w| w.inner_height().ok()).and_then(|h| h.as_f64()).unwrap_or(600.0) - y + 6.0).max(24.0))
+                                on:mousedown=move |ev| ev.stop_propagation()
+                            >
+                                <div class="status-menu-header">"改行コードを選択"</div>
+                                {line_endings.iter().map(|&(le_id, label)| {
+                                    view! {
+                                        <button
+                                            class="context-menu-item"
+                                            on:click=move |_| {
+                                                shell.set_line_ending(le_id);
+                                                line_ending_menu.set(None);
+                                            }
+                                        >
+                                            {label}
+                                        </button>
+                                    }
+                                }).collect::<Vec<_>>()}
+                            </div>
+                        </div>
+                    })
+                }}
+            </Show>
 
             <Show when=move || shell.tab_drag.get().map(|d| d.is_dragging).unwrap_or(false)>
                 {move || {

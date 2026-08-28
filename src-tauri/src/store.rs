@@ -24,6 +24,180 @@ const HISTORY_LIMIT: usize = 1000;
 /// ファイルを読むときのひとかたまり。
 const CHUNK: usize = 1 << 20;
 
+/// ファイルの文字エンコーディング。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FileEncoding {
+    Utf8,
+    Utf8Bom,
+    ShiftJis,
+    EucJp,
+    Iso2022Jp,
+    Utf16Le,
+    Utf16Be,
+}
+
+impl FileEncoding {
+    pub fn label(&self) -> &'static str {
+        match self {
+            FileEncoding::Utf8 => "UTF-8",
+            FileEncoding::Utf8Bom => "UTF-8 (BOM)",
+            FileEncoding::ShiftJis => "Shift_JIS",
+            FileEncoding::EucJp => "EUC-JP",
+            FileEncoding::Iso2022Jp => "ISO-2022-JP",
+            FileEncoding::Utf16Le => "UTF-16 LE",
+            FileEncoding::Utf16Be => "UTF-16 BE",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        let normalized = label
+            .trim()
+            .to_ascii_uppercase()
+            .replace(['-', '_', ' ', '(', ')'], "");
+        match normalized.as_str() {
+            "UTF8" => Some(FileEncoding::Utf8),
+            "UTF8BOM" => Some(FileEncoding::Utf8Bom),
+            "SHIFTJIS" | "SJIS" | "CP932" | "WINDOWS31J" => Some(FileEncoding::ShiftJis),
+            "EUCJP" | "EUC" => Some(FileEncoding::EucJp),
+            "ISO2022JP" | "JIS" => Some(FileEncoding::Iso2022Jp),
+            "UTF16LE" | "UTF16" => Some(FileEncoding::Utf16Le),
+            "UTF16BE" => Some(FileEncoding::Utf16Be),
+            _ => None,
+        }
+    }
+
+    pub fn encoding(&self) -> &'static encoding_rs::Encoding {
+        match self {
+            FileEncoding::Utf8 | FileEncoding::Utf8Bom => encoding_rs::UTF_8,
+            FileEncoding::ShiftJis => encoding_rs::SHIFT_JIS,
+            FileEncoding::EucJp => encoding_rs::EUC_JP,
+            FileEncoding::Iso2022Jp => encoding_rs::ISO_2022_JP,
+            FileEncoding::Utf16Le => encoding_rs::UTF_16LE,
+            FileEncoding::Utf16Be => encoding_rs::UTF_16BE,
+        }
+    }
+
+    pub fn decode_line(&self, bytes: &[u8]) -> String {
+        match self {
+            FileEncoding::Utf8 | FileEncoding::Utf8Bom => {
+                String::from_utf8_lossy(bytes).into_owned()
+            }
+            _ => {
+                let (cow, _, _) = self.encoding().decode(bytes);
+                cow.into_owned()
+            }
+        }
+    }
+
+    pub fn encode_str(&self, text: &str) -> Vec<u8> {
+        match self {
+            FileEncoding::Utf8 | FileEncoding::Utf8Bom => text.as_bytes().to_vec(),
+            _ => {
+                let (cow, _, _) = self.encoding().encode(text);
+                cow.into_owned()
+            }
+        }
+    }
+
+    /// 先頭バイト列から文字コードを自動判別する。BOM の有無も返す。
+    pub fn detect(bytes: &[u8]) -> (FileEncoding, bool) {
+        if bytes.starts_with(b"\xEF\xBB\xBF") {
+            return (FileEncoding::Utf8Bom, true);
+        }
+        if bytes.starts_with(b"\xFF\xFE") {
+            return (FileEncoding::Utf16Le, true);
+        }
+        if bytes.starts_with(b"\xFE\xFF") {
+            return (FileEncoding::Utf16Be, true);
+        }
+        // ISO-2022-JP のエスケープシーケンス判定
+        if memchr::memmem::find(bytes, b"\x1b$B").is_some()
+            || memchr::memmem::find(bytes, b"\x1b$@").is_some()
+            || memchr::memmem::find(bytes, b"\x1b(J").is_some()
+        {
+            return (FileEncoding::Iso2022Jp, false);
+        }
+        // 完全な UTF-8 かどうか
+        if std::str::from_utf8(bytes).is_ok() {
+            return (FileEncoding::Utf8, false);
+        }
+        // chardetng による日本語文字コードの高精度推定
+        let mut detector = chardetng::EncodingDetector::new();
+        detector.feed(bytes, true);
+        let guessed = detector.guess(Some(b"jp"), true);
+        if guessed == encoding_rs::SHIFT_JIS {
+            (FileEncoding::ShiftJis, false)
+        } else if guessed == encoding_rs::EUC_JP {
+            (FileEncoding::EucJp, false)
+        } else if guessed == encoding_rs::ISO_2022_JP {
+            (FileEncoding::Iso2022Jp, false)
+        } else {
+            (FileEncoding::Utf8, false)
+        }
+    }
+}
+
+/// 改行コード。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LineEnding {
+    CrLf,
+    Lf,
+    Cr,
+}
+
+impl LineEnding {
+    pub fn label(&self) -> &'static str {
+        match self {
+            LineEnding::CrLf => "CRLF",
+            LineEnding::Lf => "LF",
+            LineEnding::Cr => "CR",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label.trim().to_ascii_uppercase().as_str() {
+            "CRLF" => Some(LineEnding::CrLf),
+            "LF" => Some(LineEnding::Lf),
+            "CR" => Some(LineEnding::Cr),
+            _ => None,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &'static [u8] {
+        match self {
+            LineEnding::CrLf => b"\r\n",
+            LineEnding::Lf => b"\n",
+            LineEnding::Cr => b"\r",
+        }
+    }
+
+    /// バイト列から改行コードを判別する。
+    pub fn detect(bytes: &[u8]) -> Self {
+        let crlf = memchr::memmem::find_iter(bytes, b"\r\n").count();
+        let total_n = memchr::memchr_iter(b'\n', bytes).count();
+        let lf_only = total_n.saturating_sub(crlf);
+        let total_r = memchr::memchr_iter(b'\r', bytes).count();
+        let cr_only = total_r.saturating_sub(crlf);
+
+        if crlf >= lf_only && crlf >= cr_only && crlf > 0 {
+            LineEnding::CrLf
+        } else if lf_only >= cr_only && lf_only > 0 {
+            LineEnding::Lf
+        } else if cr_only > 0 {
+            LineEnding::Cr
+        } else {
+            #[cfg(windows)]
+            {
+                LineEnding::CrLf
+            }
+            #[cfg(not(windows))]
+            {
+                LineEnding::Lf
+            }
+        }
+    }
+}
+
 /// チャンク内の改行を数え、STRIDE 行ごとの行頭バイト位置を `marks` へ足す。
 /// `line` は通し行数、`offset` はチャンク先頭のファイル内バイト位置。
 fn index_chunk(chunk: &[u8], offset: u64, line: &mut usize, marks: &mut Vec<u64>) {
@@ -135,6 +309,8 @@ struct Source {
     /// 開いたときの姿。外から書き換えられると seek 読みが壊れるので、
     /// 変わっていたら読む前に断る。
     modified: Option<SystemTime>,
+    encoding: FileEncoding,
+    line_ending: LineEnding,
 }
 
 pub struct BackgroundScan {
@@ -143,7 +319,6 @@ pub struct BackgroundScan {
     path: PathBuf,
     offset: u64,
     line: usize,
-    carry: Vec<u8>,
 }
 
 impl BackgroundScan {
@@ -157,11 +332,6 @@ impl BackgroundScan {
                 .fill_buf()
                 .map_err(|e| format!("{} を読めませんでした: {e}", self.path.display()))?;
             if chunk.is_empty() {
-                if !self.carry.is_empty() {
-                    let error = format!("{} は UTF-8 ではありません", self.path.display());
-                    self.index.state.lock().unwrap().broken = Some(error.clone());
-                    return Err(error);
-                }
                 let mut index = self.index.state.lock().unwrap();
                 index.lines = self.line + 1;
                 index.done = true;
@@ -169,11 +339,6 @@ impl BackgroundScan {
             }
             let mut marks = Vec::new();
             index_chunk(chunk, self.offset, &mut self.line, &mut marks);
-            if !valid_utf8(&mut self.carry, chunk) {
-                let error = format!("{} は UTF-8 ではありません", self.path.display());
-                self.index.state.lock().unwrap().broken = Some(error.clone());
-                return Err(error);
-            }
             let len = chunk.len();
             self.offset += len as u64;
             self.reader.consume(len);
@@ -185,8 +350,10 @@ impl BackgroundScan {
 }
 
 impl Source {
-    /// 先頭 1MB だけ読み、索引を作り、残りを BackgroundScan に任せる。
-    fn open(path: &Path) -> Result<(Source, Option<BackgroundScan>), String> {
+    fn open_with_encoding(
+        path: &Path,
+        specified_encoding: Option<FileEncoding>,
+    ) -> Result<(Source, Option<BackgroundScan>), String> {
         let file =
             File::open(path).map_err(|e| format!("{} を開けませんでした: {e}", path.display()))?;
         let modified = file.metadata().ok().and_then(|meta| meta.modified().ok());
@@ -196,35 +363,57 @@ impl Source {
         let scan_file =
             File::open(path).map_err(|e| format!("{} を読めませんでした: {e}", path.display()))?;
         let mut reader = BufReader::with_capacity(CHUNK, scan_file);
+
+        let (encoding, has_bom, line_ending) = {
+            let chunk = reader
+                .fill_buf()
+                .map_err(|e| format!("{} を読めませんでした: {e}", path.display()))?;
+            let (detected_enc, has_bom) = match specified_encoding {
+                Some(enc) => {
+                    let has_bom =
+                        enc == FileEncoding::Utf8Bom && chunk.starts_with(b"\xEF\xBB\xBF");
+                    (enc, has_bom)
+                }
+                None => FileEncoding::detect(chunk),
+            };
+            let detected_le = LineEnding::detect(chunk);
+            (detected_enc, has_bom, detected_le)
+        };
+
+        let initial_offset =
+            if has_bom && (encoding == FileEncoding::Utf8Bom || encoding == FileEncoding::Utf8) {
+                3u64
+            } else {
+                0u64
+            };
+
         let index = Arc::new(ScanIndex {
             state: Mutex::new(ScanState {
-                marks: vec![0],
+                marks: vec![initial_offset],
                 lines: 0,
                 done: false,
                 broken: None,
             }),
         });
-        let mut marks = vec![0u64];
+        let mut marks = vec![initial_offset];
         let mut line = 0usize;
         let mut offset = 0u64;
-        let mut carry: Vec<u8> = Vec::new();
         {
-            let chunk = reader
+            let chunk_buf = reader
                 .fill_buf()
                 .map_err(|e| format!("{} を読めませんでした: {e}", path.display()))?;
-            index_chunk(chunk, offset, &mut line, &mut marks);
-            if !valid_utf8(&mut carry, chunk) {
-                return Err(format!("{} は UTF-8 ではありません", path.display()));
-            }
-            let len = chunk.len();
+            let chunk = if initial_offset > 0 && chunk_buf.len() >= initial_offset as usize {
+                &chunk_buf[initial_offset as usize..]
+            } else {
+                chunk_buf
+            };
+            index_chunk(chunk, initial_offset, &mut line, &mut marks);
+            let len = chunk_buf.len();
             offset += len as u64;
             reader.consume(len);
         }
         // 最初のチャンクでファイル全体を読めたなら、行数はここで確定する。
         let done = offset >= bytes;
-        if done && !carry.is_empty() {
-            return Err(format!("{} は UTF-8 ではありません", path.display()));
-        }
 
         {
             let mut state = index.state.lock().unwrap();
@@ -239,6 +428,8 @@ impl Source {
             index: index.clone(),
             bytes,
             modified,
+            encoding,
+            line_ending,
         };
 
         let scan = if done {
@@ -251,7 +442,6 @@ impl Source {
                 path: path.to_path_buf(),
                 offset,
                 line,
-                carry,
             })
         };
 
@@ -312,10 +502,12 @@ impl Source {
         let first = lines.len().saturating_sub(count);
         lines[first..]
             .iter()
-            .map(|line| {
-                std::str::from_utf8(line)
-                    .map(str::to_string)
-                    .map_err(|_| format!("{} は UTF-8 ではありません", self.path.display()))
+            .map(|raw_line| {
+                let mut line = *raw_line;
+                if line.last() == Some(&b'\r') {
+                    line = &line[..line.len() - 1];
+                }
+                Ok(self.encoding.decode_line(line))
             })
             .collect()
     }
@@ -331,6 +523,8 @@ impl Source {
             index: self.index.clone(),
             bytes: self.bytes,
             modified: self.modified,
+            encoding: self.encoding,
+            line_ending: self.line_ending,
         })
     }
 
@@ -367,7 +561,12 @@ impl Source {
         let broken = |e| format!("{} を読めませんでした: {e}", self.path.display());
         self.file.seek(SeekFrom::Start(start)).map_err(broken)?;
         self.file.read_exact(&mut bytes).map_err(broken)?;
-        let match_bytes = literal_positions(&bytes, query.as_bytes(), case_sensitive);
+        let query_bytes = self.encoding.encode_str(query);
+        let match_bytes = if !query_bytes.is_empty() {
+            literal_positions(&bytes, &query_bytes, case_sensitive)
+        } else {
+            Vec::new()
+        };
         let marker_bytes: Vec<usize> = memchr::memchr_iter(marker, &bytes).collect();
         // 候補が無ければ行番号へ直す必要もない。巨大な改行配列を作らず返る。
         if match_bytes.is_empty() && marker_bytes.is_empty() {
@@ -396,7 +595,7 @@ impl Source {
             if line < from || line >= to || marked.contains(&line) {
                 continue;
             }
-            let end_byte = byte + query.len();
+            let end_byte = byte + query_bytes.len();
             if bytes[byte..end_byte].contains(&b'\n') {
                 continue;
             }
@@ -404,10 +603,8 @@ impl Source {
                 .checked_sub(1)
                 .and_then(|index| newlines.get(index))
                 .map_or(0, |newline| newline + 1);
-            let start_col = std::str::from_utf8(&bytes[line_start..byte])
-                .map_err(|_| format!("{} は UTF-8 ではありません", self.path.display()))?
-                .chars()
-                .count();
+            let prefix = &bytes[line_start..byte];
+            let start_col = self.encoding.decode_line(prefix).chars().count();
             let width = query.chars().count();
             hits.push(ScanHit {
                 line,
@@ -459,40 +656,15 @@ impl Source {
             if buffer.last() == Some(&b'\n') {
                 buffer.pop();
             }
-            let text = std::str::from_utf8(&buffer)
-                .map_err(|_| format!("{} は UTF-8 ではありません", self.path.display()))?;
-            if !f(line, text) {
+            if buffer.last() == Some(&b'\r') {
+                buffer.pop();
+            }
+            let text = self.encoding.decode_line(&buffer);
+            if !f(line, &text) {
                 return Ok(());
             }
         }
         Ok(())
-    }
-}
-
-/// チャンクの並びが UTF-8 かどうか。文字の途中でチャンクが切れることがある
-/// ので、切れ端は `carry` に持ち越して次のチャンクの頭と合わせて見る。
-fn valid_utf8(carry: &mut Vec<u8>, mut chunk: &[u8]) -> bool {
-    // 巨大なログや生成テキストの大半はASCII。sliceのword-at-a-time判定で
-    // 通れば、汎用UTF-8検証をもう一度全バイトへ掛けない。
-    if carry.is_empty() && chunk.is_ascii() {
-        return true;
-    }
-    while !carry.is_empty() && !chunk.is_empty() {
-        carry.push(chunk[0]);
-        chunk = &chunk[1..];
-        match std::str::from_utf8(carry) {
-            Ok(_) => carry.clear(),
-            Err(e) if e.error_len().is_some() || carry.len() >= 4 => return false,
-            Err(_) => {}
-        }
-    }
-    match std::str::from_utf8(chunk) {
-        Ok(_) => true,
-        Err(e) if e.error_len().is_some() => false,
-        Err(e) => {
-            *carry = chunk[e.valid_up_to()..].to_vec();
-            true
-        }
     }
 }
 
@@ -540,6 +712,9 @@ pub struct Document {
     count: usize,
     undo: Vec<Step>,
     redo: Vec<Step>,
+    saved_undo_len: usize,
+    encoding: FileEncoding,
+    line_ending: LineEnding,
 }
 
 /// 元に戻す・やり直すの結果: 復元すべき控えと、行が変わった範囲の始まり。
@@ -578,8 +753,17 @@ pub struct SearchSpec<'a> {
 
 impl Document {
     pub fn open(path: &str) -> Result<(Document, Option<BackgroundScan>), String> {
-        let (source, scan) = Source::open(Path::new(path))?;
+        Self::open_with_encoding(path, None)
+    }
+
+    pub fn open_with_encoding(
+        path: &str,
+        encoding: Option<FileEncoding>,
+    ) -> Result<(Document, Option<BackgroundScan>), String> {
+        let (source, scan) = Source::open_with_encoding(Path::new(path), encoding)?;
         let count = source.lines();
+        let enc = source.encoding;
+        let line_ending = source.line_ending;
         Ok((
             Document {
                 pieces: vec![Piece::Disk {
@@ -587,22 +771,79 @@ impl Document {
                     lines: count,
                 }],
                 count,
+                encoding: enc,
+                line_ending,
                 source: Some(source),
                 undo: Vec::new(),
                 redo: Vec::new(),
+                saved_undo_len: 0,
             },
             scan,
         ))
     }
 
     pub fn empty() -> Document {
+        #[cfg(windows)]
+        let line_ending = LineEnding::CrLf;
+        #[cfg(not(windows))]
+        let line_ending = LineEnding::Lf;
+
         Document {
             source: None,
             pieces: vec![Piece::Fresh(vec![String::new()])],
             count: 1,
             undo: Vec::new(),
             redo: Vec::new(),
+            saved_undo_len: 0,
+            encoding: FileEncoding::Utf8,
+            line_ending,
         }
+    }
+
+    pub fn encoding(&self) -> FileEncoding {
+        self.encoding
+    }
+
+    pub fn line_ending(&self) -> LineEnding {
+        self.line_ending
+    }
+
+    pub fn set_encoding(&mut self, encoding: FileEncoding) {
+        self.encoding = encoding;
+    }
+
+    pub fn set_line_ending(&mut self, line_ending: LineEnding) {
+        self.line_ending = line_ending;
+    }
+
+    /// 指定した文字コードでファイルを開き直す。
+    pub fn reopen_with_encoding(
+        &mut self,
+        encoding: FileEncoding,
+    ) -> Result<Option<BackgroundScan>, String> {
+        let Some(source) = self.source.as_ref() else {
+            self.encoding = encoding;
+            return Ok(None);
+        };
+        let path = source.path.clone();
+        let (new_source, scan) = Source::open_with_encoding(&path, Some(encoding))?;
+        let count = new_source.lines();
+        self.count = count;
+        self.encoding = encoding;
+        self.line_ending = new_source.line_ending;
+        self.pieces = vec![Piece::Disk {
+            from: 0,
+            lines: count,
+        }];
+        self.undo.clear();
+        self.redo.clear();
+        self.saved_undo_len = 0;
+        self.source = Some(new_source);
+        Ok(scan)
+    }
+
+    pub fn is_clean(&self) -> bool {
+        self.undo.len() == self.saved_undo_len
     }
 
     pub fn line_count(&self) -> usize {
@@ -628,6 +869,9 @@ impl Document {
             count: self.count,
             undo: Vec::new(),
             redo: Vec::new(),
+            saved_undo_len: 0,
+            encoding: self.encoding,
+            line_ending: self.line_ending,
         })
     }
 
@@ -1128,12 +1372,20 @@ impl Document {
     /// 文書の行を書き手へ流す。全文を 1 つの文字列に集めない。
     pub fn write_to<W: Write>(&mut self, out: &mut W) -> Result<(), String> {
         let mut broken = None;
+        let line_ending_bytes = self.line_ending.as_bytes();
+        let encoding = self.encoding;
+        if encoding == FileEncoding::Utf8Bom {
+            if let Err(e) = out.write_all(b"\xEF\xBB\xBF") {
+                return Err(format!("書き込めませんでした: {e}"));
+            }
+        }
         self.each_line(0, self.count, &mut |i, line| {
             let write = |out: &mut W| -> std::io::Result<()> {
                 if i > 0 {
-                    out.write_all(b"\n")?;
+                    out.write_all(line_ending_bytes)?;
                 }
-                out.write_all(line.as_bytes())
+                let encoded = encoding.encode_str(line);
+                out.write_all(&encoded)
             };
             match write(out) {
                 Ok(()) => true,
@@ -1157,24 +1409,37 @@ impl Document {
         let tmp = format!("{path}.saving");
         let fail = |e: String| format!("{path} を保存できませんでした: {e}");
         // 書きながら次の索引を作る。保存が終わった姿はこの索引そのもの。
-        let mut marks = vec![0u64];
+        let initial_offset = if self.encoding == FileEncoding::Utf8Bom {
+            3u64
+        } else {
+            0u64
+        };
+        let mut marks = vec![initial_offset];
         let mut written = 0u64;
         {
             let file = File::create(&tmp).map_err(|e| fail(e.to_string()))?;
             let mut out = BufWriter::with_capacity(CHUNK, file);
+            if self.encoding == FileEncoding::Utf8Bom {
+                out.write_all(b"\xEF\xBB\xBF")
+                    .map_err(|e| fail(e.to_string()))?;
+                written += 3;
+            }
             let count = self.count;
             let mut broken = None;
+            let line_ending_bytes = self.line_ending.as_bytes();
+            let encoding = self.encoding;
             self.each_line(0, count, &mut |i, line| {
                 let mut write = |out: &mut BufWriter<File>| -> std::io::Result<()> {
                     if i > 0 {
-                        out.write_all(b"\n")?;
-                        written += 1;
+                        out.write_all(line_ending_bytes)?;
+                        written += line_ending_bytes.len() as u64;
                         if i % STRIDE == 0 {
                             marks.push(written);
                         }
                     }
-                    out.write_all(line.as_bytes())?;
-                    written += line.len() as u64;
+                    let encoded = encoding.encode_str(line);
+                    out.write_all(&encoded)?;
+                    written += encoded.len() as u64;
                     Ok(())
                 };
                 match write(&mut out) {
@@ -1225,11 +1490,14 @@ impl Document {
             }),
             bytes: written,
             modified,
+            encoding: self.encoding,
+            line_ending: self.line_ending,
         });
         self.pieces = vec![Piece::Disk {
             from: 0,
             lines: self.count,
         }];
+        self.saved_undo_len = self.undo.len();
         Ok(())
     }
 }
@@ -1743,6 +2011,132 @@ mod tests {
                 "line 99999 with some content"
             ]
         );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn shift_jis_reading_and_writing_and_search() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("planetext-sjis-test.txt");
+        let path_str = path.to_str().unwrap();
+
+        // CP932 / Shift-JIS: 2バイト目が 0x5C (\) になる文字「表」「能」「構」や半角カナ「ｱｲｳ」を含む
+        let original_text = "日本語のテスト\n表・能・構の文字\n半角ｶﾅｱｲｳｴｵ\n12345";
+        let (sjis_bytes, _, _) = encoding_rs::SHIFT_JIS.encode(original_text);
+        std::fs::write(&path, &sjis_bytes).unwrap();
+
+        // 開いて自動判別
+        let (mut doc, _) = Document::open(path_str).unwrap();
+        assert_eq!(doc.encoding(), FileEncoding::ShiftJis);
+        assert_eq!(doc.line_count(), 4);
+        assert_eq!(
+            doc.read(0, 4).unwrap(),
+            vec!["日本語のテスト", "表・能・構の文字", "半角ｶﾅｱｲｳｴｵ", "12345"]
+        );
+
+        // リテラル検索
+        let (hits, _) = doc.scan_literal("能", true, '$', 0, 4, 64).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].line, 1);
+        assert_eq!(hits[0].start, 2);
+        assert_eq!(hits[0].end, 3);
+
+        // 正規表現検索
+        let pattern = regex::Regex::new(r"表.能").unwrap();
+        let (hits, _) = doc.scan(&pattern, '$', 0, 4, 64).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].line, 1);
+        assert_eq!(hits[0].start, 0);
+        assert_eq!(hits[0].end, 3);
+
+        // 編集して Shift-JIS で保存
+        doc.replace(3, 4, vec!["新行".into()], 1, "", "").unwrap();
+        doc.save(path_str).unwrap();
+
+        let saved_bytes = std::fs::read(&path).unwrap();
+        let (decoded, _, _) = encoding_rs::SHIFT_JIS.decode(&saved_bytes);
+        assert_eq!(
+            decoded,
+            "日本語のテスト\n表・能・構の文字\n半角ｶﾅｱｲｳｴｵ\n新行"
+        );
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn euc_jp_and_iso2022jp_reading() {
+        let dir = std::env::temp_dir();
+
+        // EUC-JP テスト
+        let euc_path = dir.join("planetext-euc-test.txt");
+        let euc_text = "EUC-JPの日本語テキスト\n二行目";
+        let (euc_bytes, _, _) = encoding_rs::EUC_JP.encode(euc_text);
+        std::fs::write(&euc_path, &euc_bytes).unwrap();
+
+        let (mut doc, _) = Document::open(euc_path.to_str().unwrap()).unwrap();
+        assert_eq!(doc.encoding(), FileEncoding::EucJp);
+        assert_eq!(
+            doc.read(0, 2).unwrap(),
+            vec!["EUC-JPの日本語テキスト", "二行目"]
+        );
+        std::fs::remove_file(euc_path).ok();
+
+        // ISO-2022-JP テスト
+        let jis_path = dir.join("planetext-jis-test.txt");
+        let jis_text = "JISの日本語テキスト\n二行目";
+        let (jis_bytes, _, _) = encoding_rs::ISO_2022_JP.encode(jis_text);
+        std::fs::write(&jis_path, &jis_bytes).unwrap();
+
+        let (mut doc, _) = Document::open(jis_path.to_str().unwrap()).unwrap();
+        assert_eq!(doc.encoding(), FileEncoding::Iso2022Jp);
+        assert_eq!(
+            doc.read(0, 2).unwrap(),
+            vec!["JISの日本語テキスト", "二行目"]
+        );
+        std::fs::remove_file(jis_path).ok();
+    }
+
+    #[test]
+    fn line_ending_detection_and_saving() {
+        let dir = std::env::temp_dir();
+        let crlf_path = dir.join("planetext-crlf-test.txt");
+        std::fs::write(&crlf_path, b"line1\r\nline2\r\nline3").unwrap();
+
+        let (mut doc, _) = Document::open(crlf_path.to_str().unwrap()).unwrap();
+        assert_eq!(doc.line_ending(), LineEnding::CrLf);
+        assert_eq!(doc.read(0, 3).unwrap(), vec!["line1", "line2", "line3"]);
+
+        // LFに切り替えて保存
+        doc.set_line_ending(LineEnding::Lf);
+        doc.save(crlf_path.to_str().unwrap()).unwrap();
+
+        let saved = std::fs::read(&crlf_path).unwrap();
+        assert_eq!(saved, b"line1\nline2\nline3");
+        std::fs::remove_file(crlf_path).ok();
+    }
+
+    #[test]
+    fn reopen_with_encoding_switches_decoding() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("planetext-reopen-test.txt");
+        let text = "あいうえお";
+        let (sjis_bytes, _, _) = encoding_rs::SHIFT_JIS.encode(text);
+        std::fs::write(&path, &sjis_bytes).unwrap();
+
+        let (mut doc, _) = Document::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(doc.encoding(), FileEncoding::ShiftJis);
+        assert_eq!(doc.read(0, 1).unwrap(), vec!["あいうえお"]);
+
+        // UTF-8 で強制開き直し（文字化けが起きることを確認）
+        doc.reopen_with_encoding(FileEncoding::Utf8).unwrap();
+        assert_eq!(doc.encoding(), FileEncoding::Utf8);
+        assert_ne!(doc.read(0, 1).unwrap(), vec!["あいうえお"]);
+
+        // 再度 Shift-JIS で開き直すと正常に復帰
+        doc.reopen_with_encoding(FileEncoding::ShiftJis).unwrap();
+        assert_eq!(doc.encoding(), FileEncoding::ShiftJis);
+        assert_eq!(doc.read(0, 1).unwrap(), vec!["あいうえお"]);
+
         std::fs::remove_file(path).ok();
     }
 }

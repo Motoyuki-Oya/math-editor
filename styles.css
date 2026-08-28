@@ -5,7 +5,7 @@
   --line: #d9d9e0;
   --panel: #f6f6f8;
   --accent: #2f6feb;
-  --font-text: "Noto Sans JP", "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
+  --font-text: "Segoe UI", "Yu Gothic", "Meiryo", "Hiragino Sans", "Noto Sans JP", -apple-system, BlinkMacSystemFont, sans-serif;
   --font-math: "Cambria Math", "STIX Two Math", "Latin Modern Math", Georgia, "Times New Roman",
     serif;
 }
@@ -34,6 +34,9 @@ body {
   background: var(--bg);
   color: var(--fg);
   font-family: var(--font-text);
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   font-size: 15px;
 }
 
@@ -86,13 +89,27 @@ body {
   font-size: 13px;
 }
 
+.editor-container {
+  position: relative;
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
 .findbar {
+  position: absolute;
+  top: 10px;
+  right: 20px;
+  z-index: 50;
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
-  padding: 6px 10px;
+  gap: 6px;
+  padding: 6px 8px;
   background: var(--panel);
-  border-bottom: 1px solid var(--line);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  align-items: center;
 }
 
 .group {
@@ -268,6 +285,7 @@ body {
 .tab-name,
 .tab-close,
 .tab-add,
+.tab-split,
 .tab-palette {
   border: none;
   background: none;
@@ -289,6 +307,7 @@ body {
 
 .tab-close,
 .tab-add,
+.tab-split,
 .tab-palette {
   padding: 3px 6px;
   color: var(--muted);
@@ -301,6 +320,11 @@ body {
   padding: 3px 8px;
 }
 
+.tab-split {
+  font-size: 13px;
+  padding: 3px 6px;
+}
+
 .tab-palette {
   margin-left: auto;
   font-size: 13px;
@@ -308,8 +332,52 @@ body {
 
 .tab-close:hover,
 .tab-add:hover,
+.tab-split:hover,
 .tab-palette:hover {
   color: var(--fg);
+}
+
+.tab-context-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+}
+
+.tab-context-menu {
+  position: fixed;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  padding: 4px;
+  min-width: 160px;
+  display: flex;
+  flex-direction: column;
+  z-index: 10000;
+}
+
+.context-menu-item {
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 10px;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 0.1s, color 0.1s;
+}
+
+.context-menu-item:hover {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.context-menu-separator {
+  height: 1px;
+  background: var(--line);
+  margin: 4px 2px;
 }
 
 /* 分割ビュー: ペインは横に並んでいます。 */
@@ -366,8 +434,11 @@ body {
      ページには見えている行しか無い。 */
   overflow: hidden;
   outline: none;
-  line-height: 2;
+  line-height: 1.5;
   cursor: text;
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   font-size: var(--setting-font-size, 15px);
   font-family: var(--setting-font-text, var(--font-text));
 }
@@ -520,7 +591,7 @@ body {
 
 .mn-line {
   position: relative;
-  min-height: 1.6em;
+  min-height: 1.35em;
   white-space: pre-wrap;
   /* 必要な箇所で下に続く行: 長い単語は のままです長い単語。 */
   overflow-wrap: anywhere;
@@ -592,13 +663,58 @@ body {
 
 /* 列区切り文字、$(t)。その幅は、隣接する行の 区切り文字が揃うように描画中に設定されます。 */
 .mn-tab {
+  position: relative;
   display: inline-block;
   width: 1em;
   vertical-align: baseline;
+  line-height: inherit;
 }
 
 .mn-tab::after {
   content: "\200B";
+}
+
+/* 空白文字の可視化 */
+.mn-space,
+.mn-zenkaku {
+  position: relative;
+}
+
+.mn-show-whitespace .mn-space::before {
+  content: "·";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--muted);
+  opacity: 0.45;
+  pointer-events: none;
+  font-weight: bold;
+}
+
+.mn-show-whitespace .mn-zenkaku::before {
+  content: "□";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--muted);
+  opacity: 0.4;
+  pointer-events: none;
+  font-size: 0.75em;
+}
+
+.mn-show-whitespace .mn-tab::before {
+  content: "→";
+  position: absolute;
+  left: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  opacity: 0.4;
+  font-size: 0.85em;
+  line-height: 1;
+  pointer-events: none;
 }
 
 /* IME がまだコミットしていないテキストです。 */
@@ -671,12 +787,34 @@ body {
 
 .statusbar {
   display: flex;
-  gap: 18px;
+  align-items: center;
+  gap: 16px;
   padding: 4px 12px;
   border-top: 1px solid var(--line);
   background: var(--panel);
   color: var(--muted);
   font-size: 12px;
+  user-select: none;
+}
+
+.status-clickable {
+  cursor: pointer;
+  padding: 1px 6px;
+  border-radius: 3px;
+  transition: background 0.1s, color 0.1s;
+}
+
+.status-clickable:hover {
+  background: var(--line);
+  color: var(--fg);
+}
+
+.status-menu-header {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 4px 10px 2px;
+  font-weight: 600;
+  user-select: none;
 }
 
 .status-message {
@@ -917,4 +1055,107 @@ body {
 .mn-matrix-cell {
   display: inline-flex;
   align-items: center;
+}
+
+/* URLフォーカス ツールチップ */
+.url-tooltip {
+  position: fixed;
+  z-index: 10000;
+  transform: translateY(-100%);
+  margin-top: -6px;
+  display: inline-flex;
+  align-items: center;
+  pointer-events: auto;
+  user-select: none;
+}
+
+.url-tooltip-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  background: var(--bg-hover, #2a2d32);
+  color: var(--text-primary, #ffffff);
+  border: 1px solid var(--border-color, #444850);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.url-tooltip-button:hover {
+  background: var(--accent, #388bfd);
+  border-color: var(--accent, #388bfd);
+  color: #ffffff;
+}
+
+.url-tooltip-icon {
+  font-size: 12px;
+  line-height: 1;
+}
+
+/* 印刷用スタイル */
+#print-container {
+  display: none;
+}
+
+@media print {
+  @page {
+    margin: 15mm 20mm;
+    size: auto;
+  }
+
+  body, html {
+    overflow: visible !important;
+    height: auto !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  .app {
+    display: none !important;
+  }
+
+  #print-container {
+    display: block !important;
+    font-family: var(--setting-font-text, var(--font-text));
+    font-size: var(--setting-font-size, 14px);
+    line-height: 1.9;
+    color: #000000;
+    background: #ffffff;
+  }
+
+  #print-container .print-line {
+    display: flex;
+    align-items: baseline;
+    min-height: 1.6em;
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+
+  #print-container .print-line-num {
+    width: 45px;
+    margin-right: 14px;
+    color: #888888;
+    font-size: 0.85em;
+    text-align: right;
+    user-select: none;
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+  }
+
+  #print-container .print-line-content {
+    flex: 1;
+    min-width: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  #print-container .mn-tab {
+    display: inline-block;
+    width: 2em;
+  }
 }

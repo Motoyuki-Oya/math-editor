@@ -30,12 +30,13 @@ pub fn on_menu(chosen: impl Fn(&str) + 'static) {
 }
 
 /// Tells the system's 表示 menu what is currently on.
-pub async fn sync_view_menu(wrap: bool, line_numbers: bool, split: bool) {
+pub async fn sync_view_menu(wrap: bool, line_numbers: bool, show_whitespace: bool, split: bool) {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct Args {
         wrap: bool,
         line_numbers: bool,
+        show_whitespace: bool,
         split: bool,
     }
     let _ = call(
@@ -43,6 +44,7 @@ pub async fn sync_view_menu(wrap: bool, line_numbers: bool, split: bool) {
         Args {
             wrap,
             line_numbers,
+            show_whitespace,
             split,
         },
     )
@@ -112,12 +114,75 @@ pub struct OpenedDocument {
     pub handle: u64,
     pub line_count: usize,
     pub bytes: usize,
+    #[serde(default = "default_encoding")]
+    pub encoding: String,
+    #[serde(default = "default_line_ending")]
+    pub line_ending: String,
+}
+
+fn default_encoding() -> String {
+    "UTF-8".to_string()
+}
+
+fn default_line_ending() -> String {
+    "CRLF".to_string()
+}
+
+#[derive(Deserialize)]
+pub struct ReopenedDocument {
+    pub line_count: usize,
+    pub encoding: String,
+    pub line_ending: String,
 }
 
 /// 文書を全文の文字列で受け取らずに開きます。ネイティブ側が本体を保持します。
 pub async fn open_document(path: &str) -> Result<OpenedDocument, String> {
     let value = call("open_document", PathArg { path }).await?;
     serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
+}
+
+/// 指定した文字コードで文書を開き直します。
+pub async fn reopen_document_encoding(
+    handle: u64,
+    encoding: &str,
+) -> Result<ReopenedDocument, String> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        handle: u64,
+        encoding: &'a str,
+    }
+    let value = call("reopen_document_encoding", Args { handle, encoding }).await?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
+}
+
+/// 文書の文字コードを設定します（保存時に使われます）。
+pub async fn set_document_encoding(handle: u64, encoding: &str) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        handle: u64,
+        encoding: &'a str,
+    }
+    call("set_document_encoding", Args { handle, encoding })
+        .await
+        .map(|_| ())
+}
+
+/// 文書の改行コードを設定します（保存時に使われます）。
+pub async fn set_document_line_ending(handle: u64, line_ending: &str) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        handle: u64,
+        line_ending: &'a str,
+    }
+    call(
+        "set_document_line_ending",
+        Args {
+            handle,
+            line_ending,
+        },
+    )
+    .await
+    .map(|_| ())
 }
 
 /// 走査の完了を待ち、確定した行数を返します。
@@ -215,6 +280,8 @@ pub struct RestoredLines {
     pub state: String,
     pub touched_from: usize,
     pub line_count: usize,
+    #[serde(default)]
+    pub clean: bool,
 }
 
 pub async fn undo_lines(handle: u64, redo: bool) -> Option<RestoredLines> {
@@ -489,4 +556,12 @@ pub async fn file_size(path: Option<&str>, id: usize) -> Option<usize> {
 
 pub async fn frontend_ready() {
     let _ = call("frontend_ready", NoArgs {}).await;
+}
+
+pub async fn open_external_url(url: &str) {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        url: &'a str,
+    }
+    let _ = call("open_external_url", Args { url }).await;
 }

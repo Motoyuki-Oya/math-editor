@@ -44,19 +44,20 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
         event.prevent_default();
         return;
     }
-    let did = {
-        let borrowed = session.borrow();
-        let mut editor = borrowed.editor.borrow_mut();
-        let editor = &mut *editor;
+    let did = session.borrow_mut().edit(|editor| {
         match (ctrl, key.as_str()) {
             (_, "ArrowLeft") => editor.move_h(false, shift),
             (_, "ArrowRight") => editor.move_h(true, shift),
             (true, "ArrowUp") if !event.alt_key() && !shift => editor.annotate(true),
             (true, "ArrowDown") if !event.alt_key() && !shift => editor.annotate(false),
+            (true, "ArrowUp") if shift => editor.move_document_edge(false, true),
+            (true, "ArrowDown") if shift => editor.move_document_edge(true, true),
             (false, "ArrowUp") => editor.move_v(false, shift),
             (false, "ArrowDown") => editor.move_v(true, shift),
             // Alt+Up/Down は行を移動します。 Ctrl+Up/Down は上または下の共通欄を開きます。
             (true, "ArrowUp") | (true, "ArrowDown") => Did::Nothing,
+            (false, "PageUp") => editor.move_page(false, shift),
+            (false, "PageDown") => editor.move_page(true, shift),
             (false, "Home") => editor.move_line_edge(false, shift),
             (false, "End") => editor.move_line_edge(true, shift),
             (true, "Home") => editor.move_document_edge(false, shift),
@@ -75,6 +76,22 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
                     Did::Nothing
                 }
             }
+            (true, "=") | (true, "+") => {
+                crate::settings::zoom_in();
+                Did::Nothing
+            }
+            (true, "-") | (true, "_") => {
+                crate::settings::zoom_out();
+                Did::Nothing
+            }
+            (true, "0") => {
+                crate::settings::zoom_reset();
+                Did::Nothing
+            }
+            (false, "z") if event.alt_key() => {
+                crate::settings::toggle_whitespace();
+                Did::Nothing
+            }
             // 元に戻す、やり直し、およびクリップボードは、テキスト内でも構造内でも同様にウィンドウ ショートカットによって 1 回処理されます。
             (true, _) => Did::Nothing,
             // タブはテキスト内の列区切り文字であり、構造内の次のスロットです。
@@ -82,7 +99,7 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
             // 印刷可能なキーは入力イベントとして到着し、IME もカバーします。
             (false, _) => Did::Nothing,
         }
-    };
+    });
     match did {
         Did::Nothing => return,
         Did::Moved => redraw(session),
@@ -100,7 +117,7 @@ fn apply_linked_edit(
         return false;
     }
     for session in sessions {
-        let did = edit(&mut session.borrow().editor.borrow_mut());
+        let did = session.borrow_mut().edit(&edit);
         match did {
             Did::Changed => changed(&session),
             Did::Moved => redraw(&session),

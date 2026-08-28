@@ -22,17 +22,32 @@ pub(super) fn install_shortcuts(shell: Shell) {
         if !(event.ctrl_key() || event.meta_key()) {
             if event.key() == "Escape" {
                 crate::editor::clear_search_preview();
+                shell.panes.with_untracked(|panes| {
+                    for pane in panes {
+                        pane.searching.set(false);
+                    }
+                });
                 shell.searching.set(false);
+            }
+            if event.key() == "F3" {
+                event.prevent_default();
             }
             return;
         }
         let shift = event.shift_key();
+        let key_lower = event.key().to_lowercase();
+        // WebView2の画面内検索ポップアップ（Ctrl+G / Cmd+G）を無効化
+        if key_lower == "g" {
+            event.prevent_default();
+            return;
+        }
         // メニュー バーの項目は、横にあるキーによって決まります。
-        let item = match (event.key().to_lowercase().as_str(), shift) {
+        let item = match (key_lower.as_str(), shift) {
             ("n", _) | ("t", _) => Some("new"),
             ("o", _) => Some("open"),
             ("s", false) => Some("save"),
             ("s", true) => Some("save_as"),
+            ("p", false) => Some("print"),
             ("f", _) => Some("find"),
             ("r", _) => Some("replace"),
             ("w", _) => Some("close_tab"),
@@ -49,7 +64,7 @@ pub(super) fn install_shortcuts(shell: Shell) {
             return;
         }
         // メニュー バーにはタブ間の移動を行う場所がないため、ここに留まります。
-        if event.key().to_lowercase() == "tab" {
+        if key_lower == "tab" {
             event.prevent_default();
             let pane = shell.pane_untracked();
             let count = pane.tabs.with_untracked(Vec::len);
