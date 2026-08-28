@@ -1,19 +1,29 @@
 //! 言語定義（LanguageDef）のデータ構造および組み込み言語定義。
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 /// 言語ごとの構文定義。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LanguageDef {
     pub name: String,
+    #[serde(default)]
     pub extensions: Vec<String>,
+    #[serde(default)]
     pub line_comments: Vec<String>,
+    #[serde(default)]
     pub block_comments: Vec<(String, String)>,
+    #[serde(default)]
     pub string_delimiters: Vec<String>,
+    #[serde(default)]
     pub keywords: HashSet<String>,
+    #[serde(default)]
     pub types: HashSet<String>,
+    #[serde(default)]
     pub builtins: HashSet<String>,
+    #[serde(default)]
     pub constants: HashSet<String>,
+    #[serde(default)]
     pub operators: HashSet<String>,
 }
 
@@ -32,583 +42,53 @@ impl LanguageDef {
             operators: HashSet::new(),
         }
     }
+
+    /// TOML 文字列から言語定義を読み込みます。
+    pub fn from_toml(content: &str) -> Result<Self, toml::de::Error> {
+        toml::from_str(content)
+    }
 }
 
-/// 組み込みの 10 言語定義を生成します。
+/// 組み込みの 11 言語/フォーマット定義を `languages/*.toml` から読み込みます。
 pub fn built_in_languages() -> Vec<LanguageDef> {
     vec![
-        rust_def(),
-        kotlin_def(),
-        typescript_def(),
-        javascript_def(),
-        python_def(),
-        toml_def(),
-        json_def(),
-        html_def(),
-        css_def(),
-        markdown_def(),
-        latex_def(),
+        LanguageDef::from_toml(include_str!("../../languages/rust.toml")).expect("valid rust.toml"),
+        LanguageDef::from_toml(include_str!("../../languages/kotlin.toml"))
+            .expect("valid kotlin.toml"),
+        LanguageDef::from_toml(include_str!("../../languages/typescript.toml"))
+            .expect("valid typescript.toml"),
+        LanguageDef::from_toml(include_str!("../../languages/javascript.toml"))
+            .expect("valid javascript.toml"),
+        LanguageDef::from_toml(include_str!("../../languages/python.toml"))
+            .expect("valid python.toml"),
+        LanguageDef::from_toml(include_str!("../../languages/toml.toml")).expect("valid toml.toml"),
+        LanguageDef::from_toml(include_str!("../../languages/json.toml")).expect("valid json.toml"),
+        LanguageDef::from_toml(include_str!("../../languages/html.toml")).expect("valid html.toml"),
+        LanguageDef::from_toml(include_str!("../../languages/css.toml")).expect("valid css.toml"),
+        LanguageDef::from_toml(include_str!("../../languages/markdown.toml"))
+            .expect("valid markdown.toml"),
+        LanguageDef::from_toml(include_str!("../../languages/latex.toml"))
+            .expect("valid latex.toml"),
     ]
 }
 
-fn to_set(items: &[&str]) -> HashSet<String> {
-    items.iter().map(|s| s.to_string()).collect()
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn rust_def() -> LanguageDef {
-    LanguageDef {
-        name: "Rust".into(),
-        extensions: vec!["rs".into()],
-        line_comments: vec!["//".into()],
-        block_comments: vec![("/*".into(), "*/".into())],
-        string_delimiters: vec!["\"".into(), "r#\"".into()],
-        keywords: to_set(&[
-            "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
-            "extern", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move",
-            "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super", "trait",
-            "type", "unsafe", "use", "where", "while", "yield",
-        ]),
-        types: to_set(&[
-            "bool", "char", "str", "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32",
-            "i64", "i128", "isize", "f32", "f64", "String", "Vec", "Option", "Result", "Box", "Rc",
-            "Arc", "RefCell", "Mutex",
-        ]),
-        builtins: to_set(&[
-            "println",
-            "eprintln",
-            "print",
-            "eprint",
-            "format",
-            "vec",
-            "panic",
-            "assert",
-            "assert_eq",
-            "assert_ne",
-            "todo",
-            "unimplemented",
-            "unreachable",
-            "dbg",
-        ]),
-        constants: to_set(&["true", "false", "Some", "None", "Ok", "Err"]),
-        operators: to_set(&[
-            "+", "-", "*", "/", "%", "=", "==", "!=", "<", ">", "<=", ">=", "&&", "||", "!", "&",
-            "|", "^", "<<", ">>", "=>", "->", "::",
-        ]),
-    }
-}
+    #[test]
+    fn test_builtin_languages_load_from_toml() {
+        let langs = built_in_languages();
+        assert_eq!(langs.len(), 11);
+        let rust = langs.iter().find(|l| l.name == "Rust").unwrap();
+        assert!(rust.keywords.contains("fn"));
+        assert!(rust.extensions.contains(&"rs".to_string()));
 
-fn kotlin_def() -> LanguageDef {
-    LanguageDef {
-        name: "Kotlin".into(),
-        extensions: vec!["kt".into(), "kts".into()],
-        line_comments: vec!["//".into()],
-        block_comments: vec![("/*".into(), "*/".into())],
-        string_delimiters: vec!["\"".into(), "\"\"\"".into()],
-        keywords: to_set(&[
-            "package",
-            "import",
-            "class",
-            "interface",
-            "fun",
-            "val",
-            "var",
-            "public",
-            "private",
-            "protected",
-            "internal",
-            "override",
-            "suspend",
-            "data",
-            "sealed",
-            "enum",
-            "object",
-            "companion",
-            "return",
-            "if",
-            "else",
-            "when",
-            "for",
-            "while",
-            "do",
-            "try",
-            "catch",
-            "finally",
-            "throw",
-            "is",
-            "in",
-            "by",
-            "lazy",
-            "abstract",
-            "open",
-            "final",
-            "lateinit",
-            "vararg",
-            "inline",
-            "crossinline",
-            "noinline",
-            "tailrec",
-            "operator",
-            "infix",
-            "const",
-            "typealias",
-        ]),
-        types: to_set(&[
-            "Int",
-            "Long",
-            "Short",
-            "Byte",
-            "Double",
-            "Float",
-            "Boolean",
-            "String",
-            "Char",
-            "List",
-            "MutableList",
-            "Map",
-            "MutableMap",
-            "Set",
-            "MutableSet",
-            "Array",
-            "Unit",
-            "Any",
-            "Nothing",
-        ]),
-        builtins: to_set(&["println", "print", "require", "check", "error", "lazy"]),
-        constants: to_set(&["true", "false", "null", "this", "super"]),
-        operators: to_set(&[
-            "+", "-", "*", "/", "%", "=", "==", "!=", "===", "!==", "<", ">", "<=", ">=", "&&",
-            "||", "!", "?.", "?:", "!!", "->", "::",
-        ]),
-    }
-}
+        let kt = langs.iter().find(|l| l.name == "Kotlin").unwrap();
+        assert!(kt.keywords.contains("fun"));
+        assert!(kt.keywords.contains("public"));
 
-fn typescript_def() -> LanguageDef {
-    let mut def = javascript_def();
-    def.name = "TypeScript".into();
-    def.extensions = vec!["ts".into(), "tsx".into(), "mts".into(), "cts".into()];
-    def.keywords.extend(
-        [
-            "interface",
-            "type",
-            "namespace",
-            "declare",
-            "enum",
-            "implements",
-            "readonly",
-            "as",
-            "is",
-            "keyof",
-            "typeof",
-            "never",
-            "unknown",
-            "any",
-            "override",
-            "abstract",
-            "satisfies",
-        ]
-        .iter()
-        .map(|s| s.to_string()),
-    );
-    def.types.extend(
-        [
-            "string", "number", "boolean", "symbol", "bigint", "void", "object", "Promise",
-            "Array", "Record", "Partial", "Required", "Readonly",
-        ]
-        .iter()
-        .map(|s| s.to_string()),
-    );
-    def
-}
-
-fn javascript_def() -> LanguageDef {
-    LanguageDef {
-        name: "JavaScript".into(),
-        extensions: vec!["js".into(), "jsx".into(), "mjs".into(), "cjs".into()],
-        line_comments: vec!["//".into()],
-        block_comments: vec![("/*".into(), "*/".into())],
-        string_delimiters: vec!["\"".into(), "'".into(), "`".into()],
-        keywords: to_set(&[
-            "async",
-            "await",
-            "break",
-            "case",
-            "catch",
-            "class",
-            "const",
-            "continue",
-            "debugger",
-            "default",
-            "delete",
-            "do",
-            "else",
-            "export",
-            "extends",
-            "finally",
-            "for",
-            "function",
-            "if",
-            "import",
-            "in",
-            "instanceof",
-            "let",
-            "new",
-            "return",
-            "static",
-            "super",
-            "switch",
-            "this",
-            "throw",
-            "try",
-            "typeof",
-            "var",
-            "void",
-            "while",
-            "with",
-            "yield",
-            "from",
-            "of",
-        ]),
-        types: to_set(&[
-            "Object", "Function", "Boolean", "Symbol", "Number", "BigInt", "Math", "Date",
-            "String", "RegExp", "Array", "Map", "Set", "WeakMap", "WeakSet", "Promise",
-        ]),
-        builtins: to_set(&[
-            "console",
-            "window",
-            "document",
-            "parseInt",
-            "parseFloat",
-            "isNaN",
-            "isFinite",
-            "setTimeout",
-            "setInterval",
-            "clearTimeout",
-            "clearInterval",
-        ]),
-        constants: to_set(&["true", "false", "null", "undefined", "NaN", "Infinity"]),
-        operators: to_set(&[
-            "+", "-", "*", "/", "%", "=", "==", "===", "!=", "!==", "<", ">", "<=", ">=", "&&",
-            "||", "!", "??", "?.", "=>", "++", "--", "+=", "-=", "*=", "/=",
-        ]),
-    }
-}
-
-fn python_def() -> LanguageDef {
-    LanguageDef {
-        name: "Python".into(),
-        extensions: vec!["py".into(), "pyw".into(), "pyi".into()],
-        line_comments: vec!["#".into()],
-        block_comments: vec![
-            ("'''".into(), "'''".into()),
-            ("\"\"\"".into(), "\"\"\"".into()),
-        ],
-        string_delimiters: vec!["\"".into(), "'".into(), "\"\"\"".into(), "'''".into()],
-        keywords: to_set(&[
-            "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del",
-            "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in",
-            "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while",
-            "with", "yield", "match", "case",
-        ]),
-        types: to_set(&[
-            "int",
-            "float",
-            "complex",
-            "str",
-            "bytes",
-            "bytearray",
-            "memoryview",
-            "list",
-            "tuple",
-            "range",
-            "dict",
-            "set",
-            "frozenset",
-            "bool",
-            "type",
-            "Optional",
-            "Union",
-            "List",
-            "Dict",
-            "Tuple",
-            "Set",
-            "Any",
-        ]),
-        builtins: to_set(&[
-            "print",
-            "len",
-            "range",
-            "enumerate",
-            "zip",
-            "map",
-            "filter",
-            "sorted",
-            "reversed",
-            "sum",
-            "min",
-            "max",
-            "abs",
-            "round",
-            "all",
-            "any",
-            "isinstance",
-            "issubclass",
-            "getattr",
-            "setattr",
-            "hasattr",
-            "open",
-            "input",
-        ]),
-        constants: to_set(&["True", "False", "None", "self", "cls"]),
-        operators: to_set(&[
-            "+", "-", "*", "/", "//", "%", "**", "=", "==", "!=", "<", ">", "<=", ">=", "->", "+=",
-            "-=", "*=", "/=",
-        ]),
-    }
-}
-
-fn toml_def() -> LanguageDef {
-    LanguageDef {
-        name: "TOML".into(),
-        extensions: vec!["toml".into()],
-        line_comments: vec!["#".into()],
-        block_comments: Vec::new(),
-        string_delimiters: vec!["\"".into(), "'".into(), "\"\"\"".into(), "'''".into()],
-        keywords: HashSet::new(),
-        types: HashSet::new(),
-        builtins: HashSet::new(),
-        constants: to_set(&["true", "false", "nan", "inf"]),
-        operators: to_set(&["="]),
-    }
-}
-
-fn json_def() -> LanguageDef {
-    LanguageDef {
-        name: "JSON".into(),
-        extensions: vec!["json".into(), "jsonc".into()],
-        line_comments: vec!["//".into()],
-        block_comments: vec![("/*".into(), "*/".into())],
-        string_delimiters: vec!["\"".into()],
-        keywords: HashSet::new(),
-        types: HashSet::new(),
-        builtins: HashSet::new(),
-        constants: to_set(&["true", "false", "null"]),
-        operators: to_set(&[":", ","]),
-    }
-}
-
-fn html_def() -> LanguageDef {
-    LanguageDef {
-        name: "HTML".into(),
-        extensions: vec!["html".into(), "htm".into(), "svg".into()],
-        line_comments: Vec::new(),
-        block_comments: vec![("<!--".into(), "-->".into())],
-        string_delimiters: vec!["\"".into(), "'".into()],
-        keywords: to_set(&[
-            "doctype", "html", "head", "body", "title", "meta", "link", "script", "style", "div",
-            "span", "p", "a", "img", "ul", "ol", "li", "table", "tr", "td", "th", "form", "input",
-            "button", "textarea", "select", "option", "h1", "h2", "h3", "h4", "h5", "h6", "header",
-            "footer", "nav", "section", "article", "main",
-        ]),
-        types: HashSet::new(),
-        builtins: to_set(&[
-            "class",
-            "id",
-            "style",
-            "src",
-            "href",
-            "type",
-            "name",
-            "value",
-            "placeholder",
-            "alt",
-            "title",
-            "rel",
-            "target",
-            "width",
-            "height",
-            "disabled",
-            "checked",
-            "readonly",
-        ]),
-        constants: HashSet::new(),
-        operators: to_set(&["<", ">", "</", "/>", "="]),
-    }
-}
-
-fn css_def() -> LanguageDef {
-    LanguageDef {
-        name: "CSS".into(),
-        extensions: vec!["css".into(), "scss".into(), "less".into()],
-        line_comments: vec!["//".into()],
-        block_comments: vec![("/*".into(), "*/".into())],
-        string_delimiters: vec!["\"".into(), "'".into()],
-        keywords: to_set(&[
-            "@import",
-            "@media",
-            "@keyframes",
-            "@font-face",
-            "@supports",
-            "@charset",
-            "important",
-            "from",
-            "to",
-        ]),
-        types: to_set(&[
-            "px", "em", "rem", "vh", "vw", "%", "deg", "s", "ms", "fr", "auto", "none", "inherit",
-            "initial", "unset",
-        ]),
-        builtins: to_set(&[
-            "var",
-            "calc",
-            "rgb",
-            "rgba",
-            "hsl",
-            "hsla",
-            "color-mix",
-            "linear-gradient",
-            "radial-gradient",
-            "url",
-            "min",
-            "max",
-            "clamp",
-        ]),
-        constants: to_set(&[
-            "display",
-            "position",
-            "top",
-            "right",
-            "bottom",
-            "left",
-            "width",
-            "height",
-            "min-width",
-            "max-width",
-            "min-height",
-            "max-height",
-            "margin",
-            "padding",
-            "border",
-            "background",
-            "color",
-            "font",
-            "font-size",
-            "font-family",
-            "font-weight",
-            "line-height",
-            "text-align",
-            "text-decoration",
-            "flex",
-            "grid",
-            "align-items",
-            "justify-content",
-            "gap",
-            "opacity",
-            "overflow",
-            "z-index",
-            "cursor",
-            "pointer-events",
-            "user-select",
-            "box-sizing",
-            "border-radius",
-            "box-shadow",
-            "transition",
-            "animation",
-            "transform",
-        ]),
-        operators: to_set(&[":", ";", "{", "}", ",", ">", "+", "~"]),
-    }
-}
-
-fn markdown_def() -> LanguageDef {
-    LanguageDef {
-        name: "Markdown".into(),
-        extensions: vec!["md".into(), "markdown".into()],
-        line_comments: Vec::new(),
-        block_comments: vec![("<!--".into(), "-->".into())],
-        string_delimiters: vec!["`".into(), "```".into()],
-        keywords: to_set(&[
-            "#", "##", "###", "####", "#####", "######", "-", "*", "+", ">",
-        ]),
-        types: HashSet::new(),
-        builtins: HashSet::new(),
-        constants: HashSet::new(),
-        operators: to_set(&["[", "]", "(", ")", "!", "*", "_", "`", "|"]),
-    }
-}
-
-fn latex_def() -> LanguageDef {
-    LanguageDef {
-        name: "LaTeX".into(),
-        extensions: vec!["tex".into(), "latex".into(), "sty".into(), "cls".into()],
-        line_comments: vec!["%".into()],
-        block_comments: Vec::new(),
-        string_delimiters: Vec::new(),
-        keywords: to_set(&[
-            "\\begin",
-            "\\end",
-            "\\documentclass",
-            "\\usepackage",
-            "\\section",
-            "\\subsection",
-            "\\subsubsection",
-            "\\item",
-            "\\cite",
-            "\\ref",
-            "\\label",
-            "\\newcommand",
-            "\\renewcommand",
-        ]),
-        types: to_set(&[
-            "document",
-            "equation",
-            "align",
-            "matrix",
-            "pmatrix",
-            "bmatrix",
-            "cases",
-            "itemize",
-            "enumerate",
-            "figure",
-            "table",
-        ]),
-        builtins: to_set(&[
-            "\\frac",
-            "\\sqrt",
-            "\\sum",
-            "\\int",
-            "\\prod",
-            "\\lim",
-            "\\alpha",
-            "\\beta",
-            "\\gamma",
-            "\\delta",
-            "\\epsilon",
-            "\\theta",
-            "\\lambda",
-            "\\mu",
-            "\\pi",
-            "\\sigma",
-            "\\phi",
-            "\\omega",
-            "\\infty",
-            "\\partial",
-            "\\times",
-            "\\cdot",
-            "\\le",
-            "\\ge",
-            "\\ne",
-            "\\approx",
-            "\\in",
-            "\\subset",
-            "\\cup",
-            "\\cap",
-            "\\text",
-            "\\mathbf",
-            "\\mathit",
-            "\\mathbb",
-            "\\mathcal",
-        ]),
-        constants: HashSet::new(),
-        operators: to_set(&["$", "$$", "{", "}", "[", "]", "^", "_", "&", "\\\\"]),
+        let md = langs.iter().find(|l| l.name == "Markdown").unwrap();
+        assert!(md.extensions.contains(&"md".to_string()));
     }
 }

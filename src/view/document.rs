@@ -236,7 +236,8 @@ impl View {
             Some(holder)
         };
         let finish = |window: &Range<usize>| {
-            self.align_columns(text, window);
+            let is_markdown = state.language.is_some_and(|l| l.name == "Markdown");
+            self.align_columns(text, window, is_markdown);
             self.rebuild_numbers(window, state.modified, state.show_numbers);
             if let Some(doc) = self.overlay.owner_document() {
                 self.draw_overlay(&doc, state);
@@ -376,27 +377,44 @@ impl View {
         };
     }
 
-    /// 隣接する行の列区切り文字を揃えます。これは、構造内の行になく行にできることの 1 つです。一度に数行行われますが、これは文書だけが持つことです。
-    fn align_columns(&self, text: &Text, window: &Range<usize>) {
+    /// 隣接する行の列区切り文字（タブまたは Markdown のテーブル縦線 '|'）を揃えます。
+    fn align_columns(&self, text: &Text, window: &Range<usize>, is_markdown: bool) {
         let mut line = window.start;
         while line < window.end {
-            if !has_tab(text.line(line)) {
+            let row = text.line(line);
+            let has_t = has_tab(row);
+            let has_p = is_markdown && has_pipe(row);
+            if !has_t && !has_p {
                 line += 1;
                 continue;
             }
+            let is_table = has_p;
             let mut end = line;
-            while end < window.end && has_tab(text.line(end)) {
+            while end < window.end
+                && (if is_table {
+                    has_pipe(text.line(end))
+                } else {
+                    has_tab(text.line(end))
+                })
+            {
                 end += 1;
             }
-            self.align_block(line..end);
+            self.align_block(
+                line..end,
+                if is_table {
+                    TABLE_PIPE_CLASS
+                } else {
+                    TAB_CLASS
+                },
+            );
             line = end;
         }
     }
 
-    fn align_block(&self, block: std::ops::Range<usize>) {
+    fn align_block(&self, block: std::ops::Range<usize>, class_name: &'static str) {
         let tabs: Vec<Vec<Element>> = block
             .map(|line| match self.line_row(line) {
-                Some(row) => children_of_class(&row, TAB_CLASS),
+                Some(row) => children_of_class(&row, class_name),
                 None => Vec::new(),
             })
             .collect();
@@ -682,6 +700,14 @@ fn set_box(element: &Element, rect: Box2, origin: &web_sys::DomRect) {
         rect.height
     );
     element.set_attribute("style", &style).ok();
+}
+
+const TABLE_PIPE_CLASS: &str = "mn-table-pipe";
+
+pub(super) fn has_pipe(nodes: &[Node]) -> bool {
+    nodes
+        .iter()
+        .any(|node| matches!(node.kind, NodeKind::Char('|')))
 }
 
 pub(super) fn has_tab(nodes: &[Node]) -> bool {

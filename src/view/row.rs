@@ -226,6 +226,14 @@ impl<'a> Renderer<'a> {
             };
 
             match cell {
+                Cell::Char('|')
+                    if path.is_empty() && self.language.is_some_and(|l| l.name == "Markdown") =>
+                {
+                    self.flush(&container, &mut run);
+                    let element = self.span("mn-table-pipe mn-syn-punct", "|");
+                    element.set_attribute(START_ATTR, &index.to_string()).ok();
+                    container.append_child(&element).ok();
+                }
                 Cell::Char(c) => {
                     if let Some(r) = run.as_mut() {
                         if r.kind == kind {

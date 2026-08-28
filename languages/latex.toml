@@ -1,0 +1,28 @@
+name = "LaTeX"
+extensions = ["tex", "latex", "sty", "cls"]
+line_comments = ["%"]
+block_comments = []
+string_delimiters = []
+
+keywords = [
+  "\\begin", "\\end", "\\documentclass", "\\usepackage", "\\section",
+  "\\subsection", "\\subsubsection", "\\item", "\\cite", "\\ref",
+  "\\label", "\\newcommand", "\\renewcommand"
+]
+
+types = [
+  "document", "equation", "align", "matrix", "pmatrix", "bmatrix",
+  "cases", "itemize", "enumerate", "figure", "table"
+]
+
+builtins = [
+  "\\frac", "\\sqrt", "\\sum", "\\int", "\\prod", "\\lim", "\\alpha",
+  "\\beta", "\\gamma", "\\delta", "\\epsilon", "\\theta", "\\lambda",
+  "\\mu", "\\pi", "\\sigma", "\\phi", "\\omega", "\\infty", "\\partial",
+  "\\times", "\\cdot", "\\le", "\\ge", "\\ne", "\\approx", "\\in",
+  "\\subset", "\\cup", "\\cap", "\\text", "\\mathbf", "\\mathit",
+  "\\mathbb", "\\mathcal"
+]
+
+constants = []
+operators = ["$", "$$", "{", "}", "[", "]", "^", "_", "&", "\\\\"]

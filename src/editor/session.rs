@@ -603,7 +603,14 @@ pub fn update_ghost_text(session: &mut Session) {
     let line_row = doc.text().line(pos.line).to_vec();
     let plain_line = crate::structure::plain::row(&line_row);
     let path = doc_path(session.doc_id);
-    let lang = path.as_deref().and_then(crate::syntax::for_path);
+    let mut lang = path.as_deref().and_then(crate::syntax::for_path);
+    if lang.as_ref().is_some_and(|l| l.name == "Markdown") {
+        if let Some(Some(name)) = super::suggest::markdown_code_block_lang(doc.text(), pos.line) {
+            if let Some(resolved) = crate::syntax::for_name(&name) {
+                lang = Some(resolved);
+            }
+        }
+    }
     let buffer_words = super::suggest::collect_buffer_words(doc.text(), 300);
     session.ghost = super::suggest::find_suggestion(
         pos.line,
