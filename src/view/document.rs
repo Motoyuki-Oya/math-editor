@@ -620,6 +620,69 @@ impl View {
         let rect = self.caret_box(caret)?;
         Some(self.viewport.reveal(&self.scroller, rect))
     }
+
+    /// キャレット位置にあるURLと画面座標を返します。
+    pub fn url_at_caret(&self, text: &Text, caret: &Caret<'_>) -> Option<(String, Box2)> {
+        if caret.inside.is_some() {
+            return None;
+        }
+        let line_num = caret.at.line;
+        let line = text.line(line_num);
+        let line_str: String = line
+            .iter()
+            .map(|n| crate::structure::text::as_char(n).unwrap_or(' '))
+            .collect();
+        let col = caret.at.col;
+
+        let (url_start, url_end, url) = find_url_on_line(&line_str, col)?;
+        let start_box = self.place_box(line_num, &[], url_start)?;
+        let end_box = self.place_box(line_num, &[], url_end).unwrap_or(start_box);
+        let rect = Box2 {
+            left: start_box.left,
+            top: start_box.top,
+            width: (end_box.left - start_box.left).max(20.0),
+            height: start_box.height,
+        };
+        Some((url, rect))
+    }
+}
+
+pub fn find_url_on_line(line_text: &str, col: usize) -> Option<(usize, usize, String)> {
+    let mut search_from = 0;
+    while let Some(rel_start) = line_text[search_from..]
+        .find("http://")
+        .or_else(|| line_text[search_from..].find("https://"))
+    {
+        let abs_start_byte = search_from + rel_start;
+        let url_slice = &line_text[abs_start_byte..];
+        let url_chars: String = url_slice
+            .chars()
+            .take_while(|&c| {
+                !c.is_whitespace()
+                    && !matches!(
+                        c,
+                        '"' | '\''
+                            | '<'
+                            | '>'
+                            | '`'
+                            | '）'
+                            | '」'
+                            | '』'
+                            | '】'
+                            | '、'
+                            | '。'
+                    )
+            })
+            .collect();
+        let char_len = url_chars.chars().count();
+        let abs_char_start = line_text[..abs_start_byte].chars().count();
+        let abs_char_end = abs_char_start + char_len;
+        if col >= abs_char_start && col <= abs_char_end && char_len > 7 {
+            return Some((abs_char_start, abs_char_end, url_chars));
+        }
+        search_from = abs_start_byte + url_chars.len().max(1);
+    }
+    None
 }
 
 fn set_box(element: &Element, rect: Box2, origin: &web_sys::DomRect) {

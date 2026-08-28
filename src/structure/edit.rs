@@ -98,6 +98,79 @@ impl<'a> Editing<'a> {
         self.cursor.index = self.current_row().len();
     }
 
+    /// キャレット位置の単語（英数字、識別子、漢字・カタカナ・ひらがな等）を選択します。
+    pub fn select_word(&mut self) {
+        self.stop_waiting();
+        let row = self.current_row();
+        if row.is_empty() {
+            return;
+        }
+
+        let col = self.cursor.index;
+        let target_idx = if col >= row.len() {
+            row.len().saturating_sub(1)
+        } else if col > 0
+            && row
+                .get(col)
+                .and_then(super::text::as_char)
+                .is_some_and(|c| c.is_whitespace() || !super::text::is_word(c))
+        {
+            if row
+                .get(col - 1)
+                .and_then(super::text::as_char)
+                .is_some_and(super::text::is_word)
+            {
+                col - 1
+            } else if col + 1 < row.len()
+                && row
+                    .get(col + 1)
+                    .and_then(super::text::as_char)
+                    .is_some_and(super::text::is_word)
+            {
+                col + 1
+            } else {
+                col
+            }
+        } else {
+            col
+        };
+
+        let Some(target_char) = row
+            .get(target_idx)
+            .and_then(super::text::as_char)
+        else {
+            self.cursor.anchor = target_idx;
+            self.cursor.index = target_idx + 1;
+            return;
+        };
+
+        let kind = super::text::char_kind(target_char);
+        let mut start = target_idx;
+        while start > 0 {
+            let prev_c = row
+                .get(start - 1)
+                .and_then(super::text::as_char);
+            if prev_c.is_some_and(|c| super::text::char_kind(c) == kind) {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+        let mut end = target_idx + 1;
+        while end < row.len() {
+            let next_c = row
+                .get(end)
+                .and_then(super::text::as_char);
+            if next_c.is_some_and(|c| super::text::char_kind(c) == kind) {
+                end += 1;
+            } else {
+                break;
+            }
+        }
+        self.cursor.anchor = start;
+        self.cursor.index = end;
+    }
+
     /// 単純なキャレットを `index` に配置します。選択以外のすべてがこの方法で終了するため、選択がその選択を行ったコマンドよりも長く存続することはありません。
     fn caret_at(&mut self, index: usize) {
         self.cursor.index = index;

@@ -38,6 +38,7 @@ pub(super) fn choose(shell: Shell, name: &str, from: From) {
         "open" => shell.open(),
         "save" => shell.save(false),
         "save_as" => shell.save(true),
+        "print" => shell.print(),
         "close_tab" => {
             let pane = shell.pane_untracked();
             shell.close(pane, pane.current.get_untracked());

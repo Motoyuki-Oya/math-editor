@@ -91,6 +91,50 @@ impl Sel {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CharKind {
+    Alphanumeric, // [a-zA-Z0-9_] + 全角英数字
+    Kanji,
+    Hiragana,
+    Katakana,
+    Whitespace,
+    Punctuation,
+}
+
+pub fn char_kind(c: char) -> CharKind {
+    if c.is_whitespace() {
+        CharKind::Whitespace
+    } else if c.is_ascii_alphanumeric()
+        || c == '_'
+        || ('\u{FF10}'..='\u{FF19}').contains(&c)
+        || ('\u{FF21}'..='\u{FF3A}').contains(&c)
+        || ('\u{FF41}'..='\u{FF5A}').contains(&c)
+        || c == '＿'
+    {
+        CharKind::Alphanumeric
+    } else if ('\u{4E00}'..='\u{9FFF}').contains(&c)
+        || ('\u{3400}'..='\u{4DBF}').contains(&c)
+        || ('\u{F900}'..='\u{FAFF}').contains(&c)
+    {
+        CharKind::Kanji
+    } else if ('\u{3040}'..='\u{309F}').contains(&c) {
+        CharKind::Hiragana
+    } else if ('\u{30A0}'..='\u{30FF}').contains(&c)
+        || ('\u{31F0}'..='\u{31FF}').contains(&c)
+        || ('\u{FF65}'..='\u{FF9F}').contains(&c)
+        || c == 'ー'
+        || c == '・'
+    {
+        CharKind::Katakana
+    } else {
+        CharKind::Punctuation
+    }
+}
+
+pub fn is_word(c: char) -> bool {
+    char_kind(c) != CharKind::Whitespace && char_kind(c) != CharKind::Punctuation
+}
+
 /// ファイルから来た行の姿。呼び出し元（保存形式の層）が、素のテキストだけの
 /// 行と、構造を含むため解析済みの行を区別して渡す。
 pub enum SourceLine {

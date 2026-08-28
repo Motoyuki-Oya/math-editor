@@ -99,6 +99,7 @@ impl Session {
 
 /// ドキュメントが変更されたペインで呼び出されます。呼び出し中に再び変更が起きてもよいよう、台帳の借用の外で呼べる共有の参照で持ちます。
 type OnChange = Rc<dyn Fn(usize)>;
+pub type OnRedraw = Rc<dyn Fn(usize)>;
 
 thread_local! {
     /// 全ての開いているドキュメントの Model (M)。タブID（doc_id）ごとに 1 つ保持される。
@@ -109,6 +110,18 @@ thread_local! {
     static FOCUSED: Cell<usize> = const { Cell::new(0) };
     static NEXT_PANE: Cell<usize> = const { Cell::new(0) };
     static ON_CHANGE: RefCell<Option<OnChange>> = const { RefCell::new(None) };
+    static ON_REDRAW: RefCell<Vec<OnRedraw>> = const { RefCell::new(Vec::new()) };
+}
+
+pub fn add_on_redraw(callback: OnRedraw) {
+    ON_REDRAW.with(|slot| slot.borrow_mut().push(callback));
+}
+
+fn notify_redraw(pane: usize) {
+    let callbacks = ON_REDRAW.with(|slot| slot.borrow().clone());
+    for callback in callbacks {
+        callback(pane);
+    }
 }
 
 /// 指定IDの Document Model を取得、無ければ新規作成して返します。
@@ -291,7 +304,9 @@ pub fn choose_pane(session: &Rc<RefCell<Session>>, add: bool) -> bool {
         }
     }
     for target in sessions {
-        redraw(&target);
+        if target.borrow().pane != pane {
+            scrolled(&target);
+        }
     }
     newly_linked
 }
@@ -574,6 +589,8 @@ pub fn redraw(session: &Rc<RefCell<Session>>) {
     refresh_preview(&mut session.borrow_mut());
     redraw_preview_overlay(session);
     request_missing(session);
+    let pane = session.borrow().pane;
+    notify_redraw(pane);
 }
 
 /// ホイール。窓を行の分だけ動かして描き直します。
@@ -618,6 +635,8 @@ pub fn scrolled(session: &Rc<RefCell<Session>>) {
     refresh_preview(&mut session.borrow_mut());
     redraw_preview_overlay(session);
     request_missing(session);
+    let pane = session.borrow().pane;
+    notify_redraw(pane);
 }
 
 /// 1 つのキャレットで両方のケースを説明するため、描画に選択するモードはありません。
@@ -942,4 +961,24 @@ pub fn apply_restored(doc_id: usize, state: &str, touched_from: usize, line_coun
     }
     
     redraw_doc(doc_id, Some(FOCUSED.get()));
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct UrlTooltip {
+    pub url: String,
+    pub left: f64,
+    pub top: f64,
+}
+
+pub fn url_at_caret(pane: usize) -> Option<UrlTooltip> {
+    let session = pane_session(pane)?;
+    let borrowed = session.borrow();
+    let doc = borrowed.document.borrow();
+    let caret = caret_of(&borrowed);
+    let (url, rect) = borrowed.view.url_at_caret(doc.text(), &caret)?;
+    Some(UrlTooltip {
+        url,
+        left: rect.left,
+        top: rect.top,
+    })
 }

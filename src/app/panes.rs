@@ -9,6 +9,8 @@ use super::hold_focus;
 use super::palette::Palette;
 use super::shell::{self, Pane, Shell};
 use crate::editor;
+use crate::ipc;
+use leptos::task::spawn_local;
 
 /// タブのコンテキストメニュー状態。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -61,6 +63,33 @@ pub(super) fn PaneView(
             == Some(pane.key)
     };
 
+use std::rc::Rc;
+
+    let url_tooltip = RwSignal::new(None::<editor::UrlTooltip>);
+    let check_url = move || {
+        if let Some(ep) = pane.editor.get_value() {
+            url_tooltip.set(editor::url_at_caret(ep));
+        } else {
+            url_tooltip.set(None);
+        }
+    };
+
+    Effect::new(move |_| {
+        if let Some(ep) = pane.editor.get_value() {
+            editor::add_on_redraw(Rc::new(move |id| {
+                if id == ep {
+                    url_tooltip.set(editor::url_at_caret(ep));
+                }
+            }));
+        }
+    });
+
+    let open_url = move |url: String| {
+        spawn_local(async move {
+            ipc::open_external_url(&url).await;
+        });
+    };
+
     view! {
         <div
             class=move || if focused() { "pane pane-focused" } else { "pane" }
@@ -79,7 +108,41 @@ pub(super) fn PaneView(
                 <Show when=move || pane.searching.get()>
                     <FindBar shell=shell pane=pane/>
                 </Show>
-                <div class="editor" node_ref=editor_ref></div>
+                <div
+                    class="editor"
+                    node_ref=editor_ref
+                    on:keyup=move |_| check_url()
+                    on:pointerup=move |_| check_url()
+                    on:wheel=move |_| check_url()
+                    on:scroll=move |_| check_url()
+                ></div>
+                <Show when=move || url_tooltip.get().is_some()>
+                    {move || {
+                        let tooltip = url_tooltip.get()?;
+                        let url_str = tooltip.url.clone();
+                        let url_click = tooltip.url.clone();
+                        Some(view! {
+                            <div
+                                class="url-tooltip"
+                                style=format!("left: {}px; top: {}px;", tooltip.left.max(8.0), tooltip.top.max(8.0))
+                                on:mousedown=move |ev| ev.stop_propagation()
+                            >
+                                <button
+                                    class="url-tooltip-button"
+                                    title=url_str
+                                    on:click=move |ev| {
+                                        ev.prevent_default();
+                                        ev.stop_propagation();
+                                        open_url(url_click.clone());
+                                    }
+                                >
+                                    <span class="url-tooltip-icon">"🔗"</span>
+                                    <span>"リンクを開く ↗"</span>
+                                </button>
+                            </div>
+                        })
+                    }}
+                </Show>
             </div>
             <Show when=move || context_menu.get().is_some()>
                 <TabContextMenu shell=shell pane=pane state=context_menu/>

@@ -59,6 +59,8 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
             &item("save", "保存", Some("CmdOrCtrl+S"))?,
             &item("save_as", "名前を付けて保存…", Some("CmdOrCtrl+Shift+S"))?,
             &separator()?,
+            &item("print", "印刷…", Some("CmdOrCtrl+P"))?,
+            &separator()?,
             &item("close_tab", "タブを閉じる", Some("CmdOrCtrl+W"))?,
         ],
     )?;

@@ -66,6 +66,28 @@ impl Editor {
         true
     }
 
+    /// 構造内のカーソル位置にある単語を選択します。
+    pub fn select_nested_word_at(&mut self, at: Pos, cursor: &Cursor) -> bool {
+        if !self.enter_at(at, cursor) {
+            return false;
+        }
+        self.with_cursor(Inside::Extend, |editing| {
+            editing.select_word();
+            None
+        })
+    }
+
+    /// 構造内のカーソル位置があるスロット全体を選択します。
+    pub fn select_nested_row_at(&mut self, at: Pos, cursor: &Cursor) -> bool {
+        if !self.enter_at(at, cursor) {
+            return false;
+        }
+        self.with_cursor(Inside::Extend, |editing| {
+            editing.select_row();
+            None
+        })
+    }
+
     pub fn leave_structure(&mut self) -> bool {
         let mut left = false;
         let Editor { document, cursors } = self;
