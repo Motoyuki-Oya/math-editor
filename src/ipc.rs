@@ -215,6 +215,8 @@ pub struct RestoredLines {
     pub state: String,
     pub touched_from: usize,
     pub line_count: usize,
+    #[serde(default)]
+    pub clean: bool,
 }
 
 pub async fn undo_lines(handle: u64, redo: bool) -> Option<RestoredLines> {

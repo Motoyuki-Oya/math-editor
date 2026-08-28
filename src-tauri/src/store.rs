@@ -540,6 +540,7 @@ pub struct Document {
     count: usize,
     undo: Vec<Step>,
     redo: Vec<Step>,
+    saved_undo_len: usize,
 }
 
 /// 元に戻す・やり直すの結果: 復元すべき控えと、行が変わった範囲の始まり。
@@ -590,6 +591,7 @@ impl Document {
                 source: Some(source),
                 undo: Vec::new(),
                 redo: Vec::new(),
+                saved_undo_len: 0,
             },
             scan,
         ))
@@ -602,7 +604,12 @@ impl Document {
             count: 1,
             undo: Vec::new(),
             redo: Vec::new(),
+            saved_undo_len: 0,
         }
+    }
+
+    pub fn is_clean(&self) -> bool {
+        self.undo.len() == self.saved_undo_len
     }
 
     pub fn line_count(&self) -> usize {
@@ -628,6 +635,7 @@ impl Document {
             count: self.count,
             undo: Vec::new(),
             redo: Vec::new(),
+            saved_undo_len: 0,
         })
     }
 
@@ -1230,6 +1238,7 @@ impl Document {
             from: 0,
             lines: self.count,
         }];
+        self.saved_undo_len = self.undo.len();
         Ok(())
     }
 }

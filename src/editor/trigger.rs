@@ -22,11 +22,10 @@ enum Seed {
 pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
     let (sel, is_nested, sels) = {
         let borrowed = session.borrow();
-        let editor = borrowed.editor.borrow();
         (
-            editor.primary(),
-            editor.nested_cursor().is_some(),
-            editor.sels(),
+            borrowed.primary(),
+            borrowed.nested_cursor().is_some(),
+            borrowed.sels(),
         )
     };
     if !sel.is_caret() || is_nested {
@@ -41,12 +40,10 @@ pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
         if !all_trigger {
             return false;
         }
-        {
-            let borrowed = session.borrow();
-            let mut editor = borrowed.editor.borrow_mut();
+        session.borrow_mut().edit(|editor| {
             editor.start_structure();
             editor.insert_text(&c.to_string());
-        }
+        });
         session::changed(session);
         return true;
     }
@@ -57,18 +54,14 @@ pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
     let from = Pos::new(sel.head.line, sel.head.col - consume);
     match seed {
         Seed::Text(text) => {
-            session
-                .borrow()
-                .editor
-                .borrow_mut()
-                .replace_range(from, sel.head, &text);
+            session.borrow_mut().edit(|editor| {
+                editor.replace_range(from, sel.head, &text);
+            });
             session::changed(session);
             true
         }
         seed => {
-            {
-                let borrowed = session.borrow();
-                let mut editor = borrowed.editor.borrow_mut();
+            session.borrow_mut().edit(|editor| {
                 // ショートカット文字列の置換と構造の配置を、履歴上の1操作にまとめます。
                 editor.one_step(|editor| {
                     editor.replace_range(from, sel.head, "");
@@ -94,7 +87,7 @@ pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
                         }
                     }
                 });
-            }
+            });
             session::focus();
             session::changed(session);
             true
@@ -104,10 +97,9 @@ pub fn type_char(session: &Rc<RefCell<Session>>, c: char) -> bool {
 
 /// キャレットの前にある、構造Nodeを空白として読み替えた文字列。
 fn text_before(session: &Rc<RefCell<Session>>, at: Pos) -> String {
-    let editor_rc = session.borrow().editor.clone();
-    let editor = editor_rc.borrow();
-    editor
-        .text()
+    let borrowed = session.borrow();
+    let doc = borrowed.document.borrow();
+    doc.text()
         .line(at.line)
         .iter()
         .take(at.col)

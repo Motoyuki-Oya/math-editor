@@ -206,6 +206,7 @@ struct RestoredLines {
     state: String,
     touched_from: usize,
     line_count: usize,
+    clean: bool,
 }
 
 #[tauri::command]
@@ -224,6 +225,7 @@ async fn undo_lines(
                 state: restored.state,
                 touched_from: restored.touched_from,
                 line_count: restored.line_count,
+                clean: doc.is_clean(),
             }),
         )
     })

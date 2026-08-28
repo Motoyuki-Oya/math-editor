@@ -8,7 +8,7 @@ mod history;
 mod movement;
 mod nested;
 
-pub use cursor::UnifiedCursor;
+pub use cursor::{merge_cursors, UnifiedCursor};
 pub use history::Flush;
 use history::{Recorder, Step};
 
@@ -35,31 +35,23 @@ impl Did {
     }
 }
 
-pub struct Editor {
-    text: Text,
-    cursors: Vec<UnifiedCursor>,
-    recorder: Recorder,
-    modified_lines: std::collections::BTreeSet<usize>,
+/// ドキュメントのモデル層: テキスト本体、Undo/Redo 履歴、変更行の管理。
+/// 表記や画面、キャレット位置については何も知らず、複数ペイン間で共有されます。
+#[derive(Default)]
+pub struct Document {
+    pub(crate) text: Text,
+    pub(crate) recorder: Recorder,
+    pub(crate) modified_lines: std::collections::BTreeSet<usize>,
 }
 
-impl Default for Editor {
-    fn default() -> Self {
-        Self {
-            text: Text::default(),
-            cursors: vec![UnifiedCursor::caret(Pos::default())],
-            recorder: Recorder::default(),
-            modified_lines: std::collections::BTreeSet::new(),
-        }
-    }
-}
-
-impl Editor {
+impl Document {
     pub fn text(&self) -> &Text {
         &self.text
     }
 
-    pub fn cursors(&self) -> &[UnifiedCursor] {
-        &self.cursors
+    #[allow(dead_code)]
+    pub fn text_mut(&mut self) -> &mut Text {
+        &mut self.text
     }
 
     pub fn modified_lines(&self) -> Vec<usize> {
@@ -70,7 +62,7 @@ impl Editor {
         self.modified_lines.clear();
     }
 
-    pub(super) fn mark_lines_modified(
+    pub fn mark_lines_modified(
         &mut self,
         from_line: usize,
         to_line: usize,
@@ -95,7 +87,81 @@ impl Editor {
         self.modified_lines = next_modified;
     }
 
+    pub fn load(&mut self, text: Text) {
+        self.text = text;
+        self.recorder = Recorder::default();
+        self.clear_modified();
+    }
+
+    pub fn load_pending(&mut self, line_count: usize) {
+        self.load(Text::pending(line_count));
+    }
+
+    pub fn resize_pending(&mut self, line_count: usize) {
+        self.text.resize_pending(line_count);
+    }
+
+    pub fn resident_lines(&self) -> usize {
+        self.text.line_count() - self.text.absent_lines()
+    }
+
+    pub fn evict_far(&mut self, keep: std::ops::Range<usize>, pinned: &[usize]) {
+        self.text.evict_far(keep, pinned);
+    }
+
+    pub fn forget_range(&mut self, range: std::ops::Range<usize>) {
+        self.text.forget_range(range);
+    }
+
+    pub fn feed(&mut self, from: usize, lines: Vec<crate::structure::text::SourceLine>) {
+        for (offset, line) in lines.into_iter().enumerate() {
+            self.text.fill_line(from + offset, line);
+        }
+    }
+
+
+    #[allow(dead_code)]
+    pub fn stats(&self) -> (usize, usize) {
+        self.text.stats()
+    }
+}
+
+pub struct Editor {
+    pub document: Document,
+    pub cursors: Vec<UnifiedCursor>,
+}
+
+impl std::ops::Deref for Editor {
+    type Target = Document;
+
+    fn deref(&self) -> &Self::Target {
+        &self.document
+    }
+}
+
+impl std::ops::DerefMut for Editor {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.document
+    }
+}
+
+impl Default for Editor {
+    fn default() -> Self {
+        Self {
+            document: Document::default(),
+            cursors: vec![UnifiedCursor::caret(Pos::default())],
+        }
+    }
+}
+
+impl Editor {
+    #[allow(dead_code)]
+    pub fn cursors(&self) -> &[UnifiedCursor] {
+        &self.cursors
+    }
+
     /// 描画など本文の選択だけを見る境界で使う。
+    #[allow(dead_code)]
     pub fn sels(&self) -> Vec<Sel> {
         self.cursors
             .iter()
@@ -130,10 +196,8 @@ impl Editor {
 
     /// ファイルから読み取られたばかりのドキュメントを表示します。
     pub fn load(&mut self, text: Text) {
-        self.text = text;
+        self.document.load(text);
         self.cursors = vec![UnifiedCursor::caret(Pos::default())];
-        self.recorder = Recorder::default();
-        self.clear_modified();
     }
 
     /// 読み込んだ内容をまるごと文書の本体へ届くようにする。本体が
@@ -141,55 +205,36 @@ impl Editor {
     pub fn load_contents(&mut self, text: Text) {
         self.load(text);
         self.record(Step::Other);
-        self.text.mark_all_changed();
+        self.document.text.mark_all_changed();
     }
 
     /// 行数だけ分かっている文書を表示し、行は見えた場所から届く。
+    #[allow(dead_code)]
     pub fn load_pending(&mut self, line_count: usize) {
-        self.load(Text::pending(line_count));
-    }
-
-    /// 走査で確定した行数へ合わせる。
-    pub fn resize_pending(&mut self, line_count: usize) {
-        self.text.resize_pending(line_count);
-    }
-
-    /// 手元に届いた行の数。捨てるかどうかの見分けに使う。
-    pub fn resident_lines(&self) -> usize {
-        self.text.line_count() - self.text.absent_lines()
+        self.document.load_pending(line_count);
+        self.cursors = vec![UnifiedCursor::caret(Pos::default())];
     }
 
     /// `keep` から遠い未編集の行を手放す。選択とキャレットの行は残す。
+    #[allow(dead_code)]
     pub fn evict_far(&mut self, keep: std::ops::Range<usize>) {
         let pinned: Vec<usize> = self
             .cursors
             .iter()
             .flat_map(|sel| [sel.start().line, sel.end().line])
             .collect();
-        self.text.evict_far(keep, &pinned);
-    }
-
-    pub fn forget_range(&mut self, range: std::ops::Range<usize>) {
-        self.text.forget_range(range);
-    }
-
-    /// 届いた行を `from` から順に入れます。既にある行はそのまま。
-    pub fn feed(&mut self, from: usize, lines: Vec<crate::structure::text::SourceLine>) {
-        for (offset, line) in lines.into_iter().enumerate() {
-            self.text.fill_line(from + offset, line);
-        }
+        self.document.evict_far(keep, &pinned);
     }
 
     /// 選択のいずれかが、まだ届いていない行に触れているか。届く前の行は
     /// 空に見えているだけなので、そこへの編集は中身を黙って壊してしまう。
     pub(super) fn touches_absent(&self) -> bool {
-        // 全部届いた文書では行を見に行かない。
-        if self.text.absent_lines() == 0 {
+        if self.document.text.absent_lines() == 0 {
             return false;
         }
         self.cursors.iter().any(|cursor| {
             let (start, end) = (cursor.start().line, cursor.end().line);
-            (start..=end).any(|line| self.text.is_absent(line))
+            (start..=end).any(|line| self.document.text.is_absent(line))
         })
     }
 }

@@ -23,7 +23,9 @@ const TAIL_LINES: usize = 200;
 
 enum Task {
     Fetch(Range<usize>),
-    FetchTail,
+    FetchTail {
+        pane: usize,
+    },
     Edits(editor::FlushBatch),
     Undo {
         redo: bool,
@@ -34,6 +36,7 @@ enum Task {
     Draft,
     Copy(editor::FarCopy),
     Find {
+        pane: usize,
         query: String,
         options: editor::SearchOptions,
         file_size: Option<usize>,
@@ -53,7 +56,7 @@ pub(super) fn install(shell: Shell) {
     editor::set_on_missing(Rc::new(move |pane, range| fetch(shell, pane, range)));
     editor::set_on_tail(Rc::new(move |pane| {
         if let Some(tab) = shell.tab_of(pane) {
-            enqueue(tab, Task::FetchTail);
+            enqueue(tab, Task::FetchTail { pane });
         }
     }));
     editor::set_on_far_copy(Rc::new(move |pane, copy| {
@@ -125,6 +128,7 @@ pub(super) fn draft(tab: Tab) {
 /// 次を検索。手元に届いている行にあればその場で即座にジャンプ、そうでなければ本体の走査で。
 pub(super) fn find(
     shell: Shell,
+    pane: usize,
     query: String,
     options: editor::SearchOptions,
     file_size: Option<usize>,
@@ -136,12 +140,15 @@ pub(super) fn find(
         editor::find_next(&query, options, file_size);
         return;
     }
-    let tab = shell.tab_untracked();
+    let Some(tab) = shell.tab_of(pane) else {
+        return;
+    };
     cancel_running_search(tab);
     shell.status.set("検索しています…".into());
     enqueue(
         tab,
         Task::Find {
+            pane,
             query,
             options,
             file_size,
@@ -152,6 +159,7 @@ pub(super) fn find(
 /// 前を検索。手元に届いている行にあればその場で即座にジャンプ、そうでなければ全体から。
 pub(super) fn find_previous(
     _shell: Shell,
+    _pane: usize,
     query: String,
     options: editor::SearchOptions,
     file_size: Option<usize>,
@@ -167,8 +175,22 @@ fn cancel_running_search(tab: Tab) {
     if !BUSY.with(|busy| busy.borrow().contains(&id)) {
         return;
     }
-    if let Some(handle) = tab.doc.get_untracked() {
-        spawn_local(async move { ipc::cancel_search(handle).await });
+    let task = QUEUES.with(|queues| {
+        let mut queues = queues.borrow_mut();
+        let queue = queues.entry(id).or_default();
+        if let Some(pos) = queue
+            .iter()
+            .position(|(_, task)| matches!(task, Task::Find { .. }))
+        {
+            queue.remove(pos).map(|(_, task)| task)
+        } else {
+            None
+        }
+    });
+    if let Some(Task::Find { .. }) = task {
+        if let Some(handle) = tab.doc.get_untracked() {
+            spawn_local(async move { ipc::cancel_search(handle).await });
+        }
     }
 }
 
@@ -193,6 +215,7 @@ fn enqueue(tab: Tab, task: Task) {
 }
 
 async fn run(id: usize) {
+    let Some(shell) = SHELL.get() else { return; };
     loop {
         let next = QUEUES.with(|queues| {
             queues
@@ -206,17 +229,14 @@ async fn run(id: usize) {
             });
             return;
         };
-        if !execute(tab, task).await {
+        if !execute(shell, tab, task).await {
             return;
         }
     }
 }
 
-/// 1 つの仕事。文書がもう手放されていれば列ごと終わる。
-async fn execute(tab: Tab, task: Task) -> bool {
-    let Some(shell) = SHELL.get() else {
-        return false;
-    };
+/// 1 つの仕事をこなす。失敗したら false を返し、列を止める。
+async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
     let Some(handle) = handle_of(tab).await else {
         return false;
     };
@@ -234,12 +254,10 @@ async fn execute(tab: Tab, task: Task) -> bool {
                 enqueue(tab, Task::Fetch(rest));
             }
         }
-        Task::FetchTail => match ipc::read_tail(handle, TAIL_LINES).await {
+        Task::FetchTail { pane } => match ipc::read_tail(handle, TAIL_LINES).await {
             Ok(lines) => {
-                if let Some(pane) = shell.pane_showing(tab) {
-                    editor::show_tail(pane.editor_pane(), &lines);
-                    shell.status.set("末尾を表示しました（行数確認中）".into());
-                }
+                editor::show_tail(pane, &lines);
+                shell.status.set("末尾を表示しました（行数確認中）".into());
             }
             Err(error) => shell.status.set(error),
         },
@@ -269,7 +287,12 @@ async fn execute(tab: Tab, task: Task) -> bool {
                     restored.touched_from,
                     restored.line_count,
                 );
-                shell.mark_dirty_tab(tab);
+                if restored.clean {
+                    shell.mark_clean_tab(tab);
+                    editor::clear_modified_doc(tab.id.get_untracked());
+                } else {
+                    shell.mark_dirty_tab(tab);
+                }
             }
         }
         Task::Save { path } => match ipc::save_document(handle, &path).await {
@@ -290,10 +313,11 @@ async fn execute(tab: Tab, task: Task) -> bool {
             Err(error) => shell.status.set(error),
         },
         Task::Find {
+            pane,
             query,
             options,
             file_size,
-        } => match find_far(shell, tab, handle, &query, options, file_size).await {
+        } => match find_far(shell, tab, pane, handle, &query, options, file_size).await {
             Ok(Some(true)) => shell.status.set("見つかりました".into()),
             Ok(Some(false)) => shell.status.set("見つかりませんでした".into()),
             Ok(None) => {}
@@ -309,6 +333,7 @@ async fn execute(tab: Tab, task: Task) -> bool {
 async fn find_far(
     shell: Shell,
     tab: Tab,
+    pane: usize,
     handle: u64,
     query: &str,
     options: editor::SearchOptions,
@@ -316,9 +341,6 @@ async fn find_far(
 ) -> Result<Option<bool>, String> {
     use crate::format::document;
     use crate::structure::text::Pos;
-    let Some(pane) = shell.pane_showing(tab).map(|pane| pane.editor_pane()) else {
-        return Ok(Some(false));
-    };
     let Some((after, line_count)) = editor::far_search_start() else {
         return Ok(Some(false));
     };

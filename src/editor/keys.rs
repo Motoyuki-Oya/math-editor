@@ -44,10 +44,7 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
         event.prevent_default();
         return;
     }
-    let did = {
-        let borrowed = session.borrow();
-        let mut editor = borrowed.editor.borrow_mut();
-        let editor = &mut *editor;
+    let did = session.borrow_mut().edit(|editor| {
         match (ctrl, key.as_str()) {
             (_, "ArrowLeft") => editor.move_h(false, shift),
             (_, "ArrowRight") => editor.move_h(true, shift),
@@ -82,7 +79,7 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
             // 印刷可能なキーは入力イベントとして到着し、IME もカバーします。
             (false, _) => Did::Nothing,
         }
-    };
+    });
     match did {
         Did::Nothing => return,
         Did::Moved => redraw(session),
@@ -100,7 +97,7 @@ fn apply_linked_edit(
         return false;
     }
     for session in sessions {
-        let did = edit(&mut session.borrow().editor.borrow_mut());
+        let did = session.borrow_mut().edit(&edit);
         match did {
             Did::Changed => changed(&session),
             Did::Moved => redraw(&session),

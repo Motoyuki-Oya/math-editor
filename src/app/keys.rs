@@ -22,6 +22,11 @@ pub(super) fn install_shortcuts(shell: Shell) {
         if !(event.ctrl_key() || event.meta_key()) {
             if event.key() == "Escape" {
                 crate::editor::clear_search_preview();
+                shell.panes.with_untracked(|panes| {
+                    for pane in panes {
+                        pane.searching.set(false);
+                    }
+                });
                 shell.searching.set(false);
             }
             return;

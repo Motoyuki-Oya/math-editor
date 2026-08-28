@@ -92,6 +92,8 @@ pub(super) struct Pane {
     pub(super) current: RwSignal<usize>,
     /// このペインで構造パレットが表示されているかどうか。
     pub(super) palette: RwSignal<bool>,
+    /// このペインで検索バーが表示されているかどうか。
+    pub(super) searching: RwSignal<bool>,
     /// レンダリング間でペインの要素を保持します。
     pub(super) key: usize,
 }
@@ -105,6 +107,18 @@ impl Pane {
             tabs: RwSignal::new(vec![tab]),
             current: RwSignal::new(0),
             palette: RwSignal::new(false),
+            searching: RwSignal::new(false),
+            key,
+        }
+    }
+
+    pub(super) fn new_with_tab(key: usize, tab: Tab) -> Pane {
+        Pane {
+            editor: StoredValue::new(None),
+            tabs: RwSignal::new(vec![tab]),
+            current: RwSignal::new(0),
+            palette: RwSignal::new(false),
+            searching: RwSignal::new(false),
             key,
         }
     }
@@ -183,6 +197,8 @@ pub(super) enum Field {
 impl Shell {
     /// カーソルが「フィールド」にある状態で検索バーを開きます。これは、Ctrl+F および Ctrl+R で行われることです。
     pub(super) fn find(&self, field: Field) {
+        let pane = self.pane_untracked();
+        pane.searching.set(true);
         self.searching.set(true);
         self.find_focus.set(Some(field));
     }
@@ -193,8 +209,14 @@ impl Shell {
         tab
     }
 
+    #[allow(dead_code)]
     pub(super) fn new_pane(&self, key: usize) -> Pane {
         self.root.with_value(|owner| owner.with(|| Pane::new(key)))
+    }
+
+    pub(super) fn new_pane_with_tab(&self, key: usize, tab: Tab) -> Pane {
+        self.root
+            .with_value(|owner| owner.with(|| Pane::new_with_tab(key, tab)))
     }
 
     pub(super) fn pane(&self) -> Pane {
@@ -275,8 +297,11 @@ impl Shell {
     /// 届いた行をタブの文書へ入れます。タブが画面上ならそのペインへ、
     /// 駐車中ならその文書へ。
     pub(super) fn feed(&self, tab: Tab, from: usize, lines: &[String]) {
-        if let Some(pane) = self.pane_showing(tab) {
-            editor::feed_pane(pane.editor_pane(), from, lines);
+        let panes = self.panes_showing(tab);
+        if !panes.is_empty() {
+            for pane in panes {
+                editor::feed_pane(pane.editor_pane(), from, lines);
+            }
         } else {
             let doc_id = tab.id.get_untracked();
             let doc = editor::get_or_create_doc(doc_id);
@@ -299,10 +324,7 @@ impl Shell {
         line_count: usize,
     ) {
         let doc_id = tab.id.get_untracked();
-        let doc = editor::get_or_create_doc(doc_id);
-        doc.borrow_mut()
-            .apply_restored(state, touched_from, line_count);
-        editor::redraw_doc(doc_id, None);
+        editor::apply_restored(doc_id, state, touched_from, line_count);
     }
 
     pub(super) fn pane_showing(&self, tab: Tab) -> Option<Pane> {
@@ -312,6 +334,17 @@ impl Shell {
                 .iter()
                 .find(|pane| pane.tab_untracked().id.get_untracked() == id)
                 .copied()
+        })
+    }
+
+    pub(super) fn panes_showing(&self, tab: Tab) -> Vec<Pane> {
+        let id = tab.id.get_untracked();
+        self.panes.with_untracked(|panes| {
+            panes
+                .iter()
+                .filter(|pane| pane.tab_untracked().id.get_untracked() == id)
+                .copied()
+                .collect()
         })
     }
 
@@ -364,6 +397,18 @@ impl Shell {
     pub(super) fn index_of(&self, pane: Pane) -> Option<usize> {
         self.panes
             .with_untracked(|panes| panes.iter().position(|other| other.key == pane.key))
+    }
+
+    /// エディター側のペイン番号からシェル側のペインにフォーカスを合わせます。
+    pub(super) fn note_focus_by_editor_pane(&self, editor_pane: usize) {
+        if let Some(pane) = self.panes.with_untracked(|panes| {
+            panes
+                .iter()
+                .find(|p| p.editor.get_value() == Some(editor_pane))
+                .copied()
+        }) {
+            self.note_focus(pane);
+        }
     }
 
     /// クリックまたはフォーカスが置かれたペインが使用中のペインになり、ステータス バーとショートカットがキャレットに従います。
@@ -464,8 +509,14 @@ impl Shell {
                 editor::release_doc(old_doc_id);
             }
             let current = pane.current.get_untracked();
+            let pane_count = shell.panes.with_untracked(Vec::len);
             if pane.tabs.with_untracked(Vec::len) == 1 {
-                // 最後のタブは空のままなので、常にドキュメントが存在します。下書きに関しては、新しいタブになります。
+                if pane_count > 1 {
+                    // 分割状態の場合：最後のタブを閉じたらそのペイン自体を破棄する
+                    shell.close_pane_view(pane);
+                    return;
+                }
+                // 単一ペインの場合：最後のタブは空のままなので、常にドキュメントが存在します。下書きに関しては、新しいタブになります。
                 tab.id.set(next_id());
                 tab.path.set(None);
                 tab.large.set(false);
@@ -494,6 +545,173 @@ impl Shell {
                 shell.sync_dirty();
             }
         });
+    }
+
+    /// 指定したペインを破棄し、残りのペインにフォーカスを移行します。
+    pub(super) fn close_pane_view(&self, pane: Pane) {
+        let count = self.panes.with_untracked(Vec::len);
+        if count < 2 {
+            return;
+        }
+        let Some(index) = self.index_of(pane) else {
+            return;
+        };
+        pane.park();
+        self.panes.update(|panes| {
+            panes.remove(index);
+        });
+        editor::close_pane(pane.editor_pane());
+        let new_count = self.panes.with_untracked(Vec::len);
+        let new_focus = index.min(new_count - 1);
+        self.focused.set(new_focus);
+        if let Some(remaining) = self
+            .panes
+            .with_untracked(|panes| panes.get(new_focus).copied())
+        {
+            editor::focus_pane(remaining.editor_pane());
+        }
+        self.sync_dirty();
+        self.refresh();
+    }
+
+    /// 指定したタブ以外のタブをすべて閉じます。
+    pub(super) fn close_other_tabs(&self, pane: Pane, keep_index: usize) {
+        let shell = *self;
+        spawn_local(async move {
+            let tabs = pane.tabs.get_untracked();
+            if tabs.len() <= 1 || keep_index >= tabs.len() {
+                return;
+            }
+            let keep_tab = tabs[keep_index];
+            let has_dirty = tabs
+                .iter()
+                .enumerate()
+                .any(|(i, t)| i != keep_index && t.dirty.get_untracked());
+            if has_dirty
+                && !ipc::confirm_discard(
+                    "保存されていない変更があるタブが含まれています。破棄しますか？",
+                )
+                .await
+            {
+                return;
+            }
+            for (i, tab) in tabs.iter().enumerate() {
+                if i != keep_index {
+                    drafts::forget(*tab);
+                    tab.release_document();
+                    let doc_id = tab.id.get_untracked();
+                    let other_showing = shell.panes.with_untracked(|panes| {
+                        panes.iter().any(|p| {
+                            p.key != pane.key
+                                && p.tabs.with_untracked(|ts| {
+                                    ts.iter().any(|t| t.id.get_untracked() == doc_id)
+                                })
+                        })
+                    });
+                    if !other_showing && doc_id != keep_tab.id.get_untracked() {
+                        editor::release_doc(doc_id);
+                    }
+                }
+            }
+            pane.tabs.set(vec![keep_tab]);
+            pane.current.set(0);
+            shell.show(pane, keep_tab);
+            shell.sync_dirty();
+            shell.refresh();
+        });
+    }
+
+    /// 指定したタブより右側のタブをすべて閉じます。
+    pub(super) fn close_tabs_to_right(&self, pane: Pane, index: usize) {
+        let shell = *self;
+        spawn_local(async move {
+            let tabs = pane.tabs.get_untracked();
+            if index + 1 >= tabs.len() {
+                return;
+            }
+            let closing = &tabs[index + 1..];
+            let has_dirty = closing.iter().any(|t| t.dirty.get_untracked());
+            if has_dirty
+                && !ipc::confirm_discard(
+                    "保存されていない変更があるタブが含まれています。破棄しますか？",
+                )
+                .await
+            {
+                return;
+            }
+            for tab in closing {
+                drafts::forget(*tab);
+                tab.release_document();
+                let doc_id = tab.id.get_untracked();
+                let other_showing = shell.panes.with_untracked(|panes| {
+                    panes.iter().any(|p| {
+                        p.key != pane.key
+                            && p.tabs.with_untracked(|ts| {
+                                ts.iter().any(|t| t.id.get_untracked() == doc_id)
+                            })
+                    })
+                });
+                if !other_showing {
+                    editor::release_doc(doc_id);
+                }
+            }
+            let current = pane.current.get_untracked();
+            pane.tabs.update(|ts| ts.truncate(index + 1));
+            let last = pane.tabs.with_untracked(|ts| ts.len() - 1);
+            let new_curr = current.min(last);
+            pane.current.set(new_curr);
+            let curr_tab = pane.tabs.with_untracked(|ts| ts[new_curr]);
+            shell.show(pane, curr_tab);
+            shell.sync_dirty();
+            shell.refresh();
+        });
+    }
+
+    /// 任意のタブを右に分割して表示します（MVC共有Document Model）。
+    pub(super) fn split_tab(&self, src_pane: Pane, tab_index: usize) {
+        let Some(src_tab) = src_pane
+            .tabs
+            .with_untracked(|tabs| tabs.get(tab_index).copied())
+        else {
+            return;
+        };
+        let split_tab = Tab {
+            id: src_tab.id,
+            path: src_tab.path,
+            dirty: src_tab.dirty,
+            large: src_tab.large,
+            doc: src_tab.doc,
+        };
+
+        let pane_count = self.panes.with_untracked(Vec::len);
+        if pane_count == 1 {
+            let key = self.next_key.get_untracked();
+            self.next_key.set(key + 1);
+            let new_pane = self.new_pane_with_tab(key, split_tab);
+            self.panes.update(|panes| panes.push(new_pane));
+            let new_idx = self.panes.with_untracked(|panes| panes.len() - 1);
+            self.focus_pane(new_idx);
+        } else {
+            let src_idx = self.index_of(src_pane).unwrap_or(0);
+            let dst_idx = if src_idx == 0 { 1 } else { 0 };
+            let dst_pane = self.panes.with_untracked(|panes| panes[dst_idx]);
+
+            let existing_idx = dst_pane.tabs.with_untracked(|tabs| {
+                tabs.iter()
+                    .position(|t| t.id.get_untracked() == src_tab.id.get_untracked())
+            });
+            if let Some(idx) = existing_idx {
+                self.switch(dst_pane, idx);
+            } else {
+                dst_pane.tabs.update(|tabs| tabs.push(split_tab));
+                let new_current = dst_pane.tabs.with_untracked(|tabs| tabs.len() - 1);
+                dst_pane.current.set(new_current);
+                self.show(dst_pane, split_tab);
+            }
+            self.focus_on(dst_pane);
+        }
+        self.sync_dirty();
+        self.refresh();
     }
 
     /// タブを並べ替えるか、別のペインへ移動します。
@@ -605,11 +823,9 @@ impl Shell {
             self.unsplit();
             return;
         }
-        let key = self.next_key.get_untracked();
-        self.next_key.set(key + 1);
-        let pane = self.new_pane(key);
-        self.panes.update(|panes| panes.push(pane));
-        self.focus_pane(self.panes.with_untracked(|panes| panes.len() - 1));
+        let pane = self.pane_untracked();
+        let current = pane.current.get_untracked();
+        self.split_tab(pane, current);
     }
 
     /// ペインの使用を維持し、他のペインを削除します。タブが移動するため、ドキュメントは閉じられません。

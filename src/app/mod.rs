@@ -14,7 +14,6 @@ use leptos::prelude::*;
 use leptos::reactive::owner::Owner;
 use leptos::task::spawn_local;
 
-use find::FindBar;
 use panes::PaneView;
 use preferences::Preferences;
 use shell::{Pane, Shell};
@@ -42,6 +41,7 @@ pub fn App() -> impl IntoView {
 
     Effect::new(move |_| {
         editor::set_on_change(std::rc::Rc::new(move |pane| shell.mark_dirty(pane)));
+        editor::set_on_focus(std::rc::Rc::new(move |pane| shell.note_focus_by_editor_pane(pane)));
         sync::install(shell);
         keys::install_shortcuts(shell);
         menu::install(shell);
@@ -203,10 +203,6 @@ pub fn App() -> impl IntoView {
 
     view! {
         <div class="app">
-            <Show when=move || shell.searching.get()>
-                <FindBar shell=shell/>
-            </Show>
-
             <Show when=move || shell.preferences.get()>
                 <Preferences open=shell.preferences/>
             </Show>

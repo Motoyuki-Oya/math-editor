@@ -58,45 +58,52 @@ impl std::ops::DerefMut for UnifiedCursor {
     }
 }
 
+pub fn merge_cursors(cursors: &mut Vec<UnifiedCursor>) {
+    if cursors.is_empty() {
+        return;
+    }
+    let primary = cursors.last().expect("at least one cursor").clone();
+    cursors.sort_by_key(|cursor| {
+        (
+            cursor.start(),
+            cursor.inside.as_ref().map(|inside| inside.path.clone()),
+            cursor.end(),
+        )
+    });
+    let mut merged: Vec<UnifiedCursor> = Vec::with_capacity(cursors.len());
+    for cursor in std::mem::take(cursors) {
+        match merged.last_mut() {
+            Some(last)
+                if last.inside.is_none()
+                    && cursor.inside.is_none()
+                    && cursor.start() <= last.end() =>
+            {
+                if cursor.end() > last.end() {
+                    last.sel = Sel::range(last.start(), cursor.end());
+                }
+            }
+            Some(last) if *last == cursor => {}
+            _ => merged.push(cursor),
+        }
+    }
+    // 「プライマリ」がそれを意味し続けるように、フォーカスされた選択範囲は最後に残す。
+    if let Some(index) = merged.iter().position(|cursor| {
+        *cursor == primary
+            || (cursor.inside.is_none()
+                && primary.inside.is_none()
+                && cursor.start() <= primary.start()
+                && primary.end() <= cursor.end())
+    }) {
+        let focused = merged.remove(index);
+        merged.push(focused);
+    }
+    *cursors = merged;
+}
+
 impl Editor {
     /// 選択内容がソートされ、重複がない状態が維持されるため、入力によって同じ編集が 2 回適用されることはありません。
     pub fn merge_sels(&mut self) {
-        let primary = self.primary_cursor().clone();
-        self.cursors.sort_by_key(|cursor| {
-            (
-                cursor.start(),
-                cursor.inside.as_ref().map(|inside| inside.path.clone()),
-                cursor.end(),
-            )
-        });
-        let mut merged: Vec<UnifiedCursor> = Vec::with_capacity(self.cursors.len());
-        for cursor in std::mem::take(&mut self.cursors) {
-            match merged.last_mut() {
-                Some(last)
-                    if last.inside.is_none()
-                        && cursor.inside.is_none()
-                        && cursor.start() <= last.end() =>
-                {
-                    if cursor.end() > last.end() {
-                        last.sel = Sel::range(last.start(), cursor.end());
-                    }
-                }
-                Some(last) if *last == cursor => {}
-                _ => merged.push(cursor),
-            }
-        }
-        // 「プライマリ」がそれを意味し続けるように、フォーカスされた選択範囲は最後に残す。
-        if let Some(index) = merged.iter().position(|cursor| {
-            *cursor == primary
-                || (cursor.inside.is_none()
-                    && primary.inside.is_none()
-                    && cursor.start() <= primary.start()
-                    && primary.end() <= cursor.end())
-        }) {
-            let focused = merged.remove(index);
-            merged.push(focused);
-        }
-        self.cursors = merged;
+        merge_cursors(&mut self.cursors);
     }
 }
 

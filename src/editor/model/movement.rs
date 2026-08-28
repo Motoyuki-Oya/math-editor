@@ -81,9 +81,9 @@ impl Editor {
     }
 
     pub(super) fn map_sels(&mut self, extend: bool, step: impl Fn(&Text, Pos) -> Pos) {
-        self.recorder.cut();
-        for sel in self
-            .cursors
+        let Editor { document, cursors } = self;
+        document.recorder.cut();
+        for sel in cursors
             .iter_mut()
             .filter(|cursor| cursor.inside.is_none())
         {
@@ -93,7 +93,7 @@ impl Editor {
             } else {
                 sel.head.min(sel.anchor).max(sel.start())
             };
-            let head = step(&self.text, from);
+            let head = step(&document.text, from);
             sel.head = head;
             if !extend {
                 sel.anchor = head;
