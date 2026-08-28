@@ -412,6 +412,7 @@ impl View {
     }
 
     fn align_block(&self, block: std::ops::Range<usize>, class_name: &'static str) {
+        let is_pipe = class_name == TABLE_PIPE_CLASS;
         let tabs: Vec<Vec<Element>> = block
             .map(|line| match self.line_row(line) {
                 Some(row) => children_of_class(&row, class_name),
@@ -419,7 +420,9 @@ impl View {
             })
             .collect();
         let columns = tabs.iter().map(Vec::len).max().unwrap_or(0);
-        for column in 0..columns {
+        // パイプの場合は、行頭の最初の | (column 0) は広げず、2個目以降 (column 1..columns) を右寄せで揃える
+        let start_col = if is_pipe { 1 } else { 0 };
+        for column in start_col..columns {
             // 一度に 1 列です。列の幅を広げるとその後の列が移動し、測定値もそれに従う必要があるためです。
             let separators: Vec<&Element> =
                 tabs.iter().filter_map(|line| line.get(column)).collect();
