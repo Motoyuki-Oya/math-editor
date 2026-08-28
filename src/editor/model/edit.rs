@@ -132,15 +132,19 @@ impl Editor {
                 // 1文字の入力
                 (Some(c), None, _) => {
                     if let Some(closing) = matching_bracket(c) {
-                        let any_selected = top_level.iter().any(|&i| !self.cursors[i].sel.is_caret());
+                        let any_selected =
+                            top_level.iter().any(|&i| !self.cursors[i].sel.is_caret());
                         if any_selected {
                             self.wrap_selection_with(c, closing, top_level);
                             return Did::Changed;
-                        } else if (c == '"' || c == '\'') && top_level.iter().all(|&i| {
-                            let head = self.cursors[i].sel.head;
-                            let line = self.document.text.line(head.line);
-                            line.get(head.col).and_then(crate::structure::text::as_char) == Some(c)
-                        }) {
+                        } else if (c == '"' || c == '\'')
+                            && top_level.iter().all(|&i| {
+                                let head = self.cursors[i].sel.head;
+                                let line = self.document.text.line(head.line);
+                                line.get(head.col).and_then(crate::structure::text::as_char)
+                                    == Some(c)
+                            })
+                        {
                             for &i in &top_level {
                                 let head = self.cursors[i].sel.head;
                                 let next = Pos::new(head.line, head.col + 1);
@@ -151,7 +155,10 @@ impl Editor {
                             self.insert_bracket_pair(c, closing, top_level);
                             return Did::Changed;
                         }
-                    } else if matches!(c, ')' | '}' | ']' | '」' | '）' | '』' | '】' | '》' | '〉' | '〕') {
+                    } else if matches!(
+                        c,
+                        ')' | '}' | ']' | '」' | '）' | '』' | '】' | '》' | '〉' | '〕'
+                    ) {
                         let can_overtype = top_level.iter().all(|&i| {
                             if !self.cursors[i].sel.is_caret() {
                                 return false;
@@ -210,8 +217,10 @@ impl Editor {
             self.cursors[i] = UnifiedCursor::range(new_sel_start, new_sel_end);
             for &later in &order[done + 1..] {
                 let s = self.cursors[later].sel;
-                self.cursors[later] =
-                    UnifiedCursor::range(shifted(s.anchor, end, new_end), shifted(s.head, end, new_end));
+                self.cursors[later] = UnifiedCursor::range(
+                    shifted(s.anchor, end, new_end),
+                    shifted(s.head, end, new_end),
+                );
             }
         }
         self.merge_sels();
@@ -386,7 +395,9 @@ impl Editor {
                 let head = sel.head;
                 if head.col > 0 {
                     let line = text.line(head.line);
-                    let char_before = line.get(head.col - 1).and_then(crate::structure::text::as_char);
+                    let char_before = line
+                        .get(head.col - 1)
+                        .and_then(crate::structure::text::as_char);
                     let char_after = line.get(head.col).and_then(crate::structure::text::as_char);
                     if let (Some(before_c), Some(after_c)) = (char_before, char_after) {
                         if matching_bracket(before_c) == Some(after_c) {
@@ -545,7 +556,8 @@ mod tests {
 
     #[test]
     fn word_selection_multilingual() {
-        let mut editor = make_editor("function calculate税込み価格_total(金額) { return 金額 * 1.1; }");
+        let mut editor =
+            make_editor("function calculate税込み価格_total(金額) { return 金額 * 1.1; }");
 
         // English identifier
         editor.select_word_at(Pos::new(0, 2));
@@ -557,25 +569,39 @@ mod tests {
 
         // Japanese Kanji
         editor.select_word_at(Pos::new(0, 21));
-        assert_eq!(editor.primary(), Sel::range(Pos::new(0, 21), Pos::new(0, 23))); // "価格"
+        assert_eq!(
+            editor.primary(),
+            Sel::range(Pos::new(0, 21), Pos::new(0, 23))
+        ); // "価格"
 
         // Katakana with long vowel 'ー' and middle dot '・'
         let mut katakana_editor = make_editor("プレーンテキスト と ユーザー・インターフェース");
         katakana_editor.select_word_at(Pos::new(0, 3)); // 'ー' or 'ン' in "プレーンテキスト"
-        assert_eq!(katakana_editor.primary(), Sel::range(Pos::new(0, 0), Pos::new(0, 8))); // "プレーンテキスト"
+        assert_eq!(
+            katakana_editor.primary(),
+            Sel::range(Pos::new(0, 0), Pos::new(0, 8))
+        ); // "プレーンテキスト"
 
         katakana_editor.select_word_at(Pos::new(0, 15)); // '・' in "ユーザー・インターフェース"
-        assert_eq!(katakana_editor.primary(), Sel::range(Pos::new(0, 11), Pos::new(0, 24))); // "ユーザー・インターフェース"
+        assert_eq!(
+            katakana_editor.primary(),
+            Sel::range(Pos::new(0, 11), Pos::new(0, 24))
+        ); // "ユーザー・インターフェース"
 
         // Whole line selection (Triple click)
         katakana_editor.select_line_at(Pos::new(0, 5));
-        assert_eq!(katakana_editor.primary(), Sel::range(Pos::new(0, 0), Pos::new(0, 24)));
+        assert_eq!(
+            katakana_editor.primary(),
+            Sel::range(Pos::new(0, 0), Pos::new(0, 24))
+        );
     }
 
     #[test]
     fn shift_up_down_extends_selection() {
         let mut doc = Document::default();
-        doc.load(Text::from_lines(nodes_of("first line\nsecond line\nthird line")));
+        doc.load(Text::from_lines(nodes_of(
+            "first line\nsecond line\nthird line",
+        )));
         let mut editor = Editor {
             document: doc,
             cursors: vec![UnifiedCursor::caret(Pos::new(1, 6))], // in "second line" at ' '

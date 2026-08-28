@@ -41,7 +41,9 @@ pub fn App() -> impl IntoView {
 
     Effect::new(move |_| {
         editor::set_on_change(std::rc::Rc::new(move |pane| shell.mark_dirty(pane)));
-        editor::set_on_focus(std::rc::Rc::new(move |pane| shell.note_focus_by_editor_pane(pane)));
+        editor::set_on_focus(std::rc::Rc::new(move |pane| {
+            shell.note_focus_by_editor_pane(pane)
+        }));
         sync::install(shell);
         keys::install_shortcuts(shell);
         menu::install(shell);

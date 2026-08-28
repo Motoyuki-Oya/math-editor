@@ -370,7 +370,8 @@ impl Source {
                 .map_err(|e| format!("{} を読めませんでした: {e}", path.display()))?;
             let (detected_enc, has_bom) = match specified_encoding {
                 Some(enc) => {
-                    let has_bom = enc == FileEncoding::Utf8Bom && chunk.starts_with(b"\xEF\xBB\xBF");
+                    let has_bom =
+                        enc == FileEncoding::Utf8Bom && chunk.starts_with(b"\xEF\xBB\xBF");
                     (enc, has_bom)
                 }
                 None => FileEncoding::detect(chunk),
@@ -379,11 +380,12 @@ impl Source {
             (detected_enc, has_bom, detected_le)
         };
 
-        let initial_offset = if has_bom && (encoding == FileEncoding::Utf8Bom || encoding == FileEncoding::Utf8) {
-            3u64
-        } else {
-            0u64
-        };
+        let initial_offset =
+            if has_bom && (encoding == FileEncoding::Utf8Bom || encoding == FileEncoding::Utf8) {
+                3u64
+            } else {
+                0u64
+            };
 
         let index = Arc::new(ScanIndex {
             state: Mutex::new(ScanState {
@@ -1418,7 +1420,8 @@ impl Document {
             let file = File::create(&tmp).map_err(|e| fail(e.to_string()))?;
             let mut out = BufWriter::with_capacity(CHUNK, file);
             if self.encoding == FileEncoding::Utf8Bom {
-                out.write_all(b"\xEF\xBB\xBF").map_err(|e| fail(e.to_string()))?;
+                out.write_all(b"\xEF\xBB\xBF")
+                    .map_err(|e| fail(e.to_string()))?;
                 written += 3;
             }
             let count = self.count;
@@ -2028,12 +2031,7 @@ mod tests {
         assert_eq!(doc.line_count(), 4);
         assert_eq!(
             doc.read(0, 4).unwrap(),
-            vec![
-                "日本語のテスト",
-                "表・能・構の文字",
-                "半角ｶﾅｱｲｳｴｵ",
-                "12345"
-            ]
+            vec!["日本語のテスト", "表・能・構の文字", "半角ｶﾅｱｲｳｴｵ", "12345"]
         );
 
         // リテラル検索
@@ -2077,7 +2075,10 @@ mod tests {
 
         let (mut doc, _) = Document::open(euc_path.to_str().unwrap()).unwrap();
         assert_eq!(doc.encoding(), FileEncoding::EucJp);
-        assert_eq!(doc.read(0, 2).unwrap(), vec!["EUC-JPの日本語テキスト", "二行目"]);
+        assert_eq!(
+            doc.read(0, 2).unwrap(),
+            vec!["EUC-JPの日本語テキスト", "二行目"]
+        );
         std::fs::remove_file(euc_path).ok();
 
         // ISO-2022-JP テスト
@@ -2088,7 +2089,10 @@ mod tests {
 
         let (mut doc, _) = Document::open(jis_path.to_str().unwrap()).unwrap();
         assert_eq!(doc.encoding(), FileEncoding::Iso2022Jp);
-        assert_eq!(doc.read(0, 2).unwrap(), vec!["JISの日本語テキスト", "二行目"]);
+        assert_eq!(
+            doc.read(0, 2).unwrap(),
+            vec!["JISの日本語テキスト", "二行目"]
+        );
         std::fs::remove_file(jis_path).ok();
     }
 

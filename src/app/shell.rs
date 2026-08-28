@@ -51,7 +51,11 @@ impl Tab {
             large: RwSignal::new(false),
             doc: RwSignal::new(None),
             encoding: RwSignal::new("UTF-8".into()),
-            line_ending: RwSignal::new(if cfg!(windows) { "CRLF".into() } else { "LF".into() }),
+            line_ending: RwSignal::new(if cfg!(windows) {
+                "CRLF".into()
+            } else {
+                "LF".into()
+            }),
         }
     }
 
@@ -926,7 +930,9 @@ impl Shell {
                     tab.line_ending.set(reopened.line_ending);
                     editor::load_pending(reopened.line_count);
                     shell.mark_clean_tab(tab);
-                    shell.status.set(format!("{} で開き直しました", reopened.encoding));
+                    shell
+                        .status
+                        .set(format!("{} で開き直しました", reopened.encoding));
                     shell.refresh();
                 }
                 Err(error) => shell.status.set(error),
@@ -1023,7 +1029,9 @@ impl Shell {
             // 最大印刷行数ガード（巨大ファイルでも安全に印刷可能）
             const MAX_PRINT_LINES: usize = 10_000;
             let Ok(lines) = ipc::read_lines(handle, 0, MAX_PRINT_LINES).await else {
-                shell.status.set("印刷データの読み込みに失敗しました".into());
+                shell
+                    .status
+                    .set("印刷データの読み込みに失敗しました".into());
                 return;
             };
 
@@ -1065,9 +1073,10 @@ impl Shell {
                     let parsed = crate::format::document::read_line(line_text);
                     let row = match parsed {
                         crate::structure::text::SourceLine::Parsed(row) => row,
-                        crate::structure::text::SourceLine::Plain(text) => {
-                            text.chars().map(crate::structure::ast::Node::char).collect()
-                        }
+                        crate::structure::text::SourceLine::Plain(text) => text
+                            .chars()
+                            .map(crate::structure::ast::Node::char)
+                            .collect(),
                     };
                     let rendered_row = renderer.line(&row);
                     let _ = content_el.append_child(&rendered_row);

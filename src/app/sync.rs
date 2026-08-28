@@ -215,7 +215,9 @@ fn enqueue(tab: Tab, task: Task) {
 }
 
 async fn run(id: usize) {
-    let Some(shell) = SHELL.get() else { return; };
+    let Some(shell) = SHELL.get() else {
+        return;
+    };
     loop {
         let next = QUEUES.with(|queues| {
             queues

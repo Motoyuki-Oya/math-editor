@@ -778,12 +778,7 @@ pub fn set_line_count(pane: usize, count: usize) {
     {
         let mut borrowed = session.borrow_mut();
         borrowed.edit(|editor| {
-            apply_line_count(
-                editor,
-                pending_tail,
-                jump_end,
-                count,
-            );
+            apply_line_count(editor, pending_tail, jump_end, count);
         });
     }
     redraw(&session);
@@ -822,7 +817,10 @@ pub fn feed_pane(pane: usize, from: usize, lines: &[String]) {
                     }
                 }
             }
-            doc.evict_far(min_start.saturating_sub(RESIDENT_KEEP)..max_end + RESIDENT_KEEP, &pinned);
+            doc.evict_far(
+                min_start.saturating_sub(RESIDENT_KEEP)..max_end + RESIDENT_KEEP,
+                &pinned,
+            );
         }
     }
     // 描き直すのは届いた行が画面に見えるときだけ。
@@ -936,7 +934,7 @@ pub fn clear_modified_doc(doc_id: usize) {
 pub fn apply_restored(doc_id: usize, state: &str, touched_from: usize, line_count: usize) {
     let sessions = PANES.with(|panes| panes.borrow().clone());
     let mut text_restored = false;
-    
+
     for s in &sessions {
         if s.borrow().doc_id == doc_id {
             s.borrow_mut().edit(|editor| {
@@ -949,7 +947,7 @@ pub fn apply_restored(doc_id: usize, state: &str, touched_from: usize, line_coun
             });
         }
     }
-    
+
     if !text_restored {
         let doc = get_or_create_doc(doc_id);
         let mut editor = Editor {
@@ -959,7 +957,7 @@ pub fn apply_restored(doc_id: usize, state: &str, touched_from: usize, line_coun
         editor.apply_restored(state, touched_from, line_count);
         *doc.borrow_mut() = editor.document;
     }
-    
+
     redraw_doc(doc_id, Some(FOCUSED.get()));
 }
 

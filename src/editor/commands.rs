@@ -78,12 +78,12 @@ fn insert_text_one(session: &Rc<RefCell<Session>>, text: &str) {
         }
     }
     // ドキュメントからコピーされた部分は、元の形状で戻ります。それ以外のテキストは、そのままの文字です。
-    session.borrow_mut().edit(|editor| {
-        match clipboard::pasted(text) {
+    session
+        .borrow_mut()
+        .edit(|editor| match clipboard::pasted(text) {
             Some(clip) => editor.insert_clip(&clip),
             None => editor.insert_text(text),
-        }
-    });
+        });
     changed(session);
 }
 
@@ -130,7 +130,10 @@ pub fn selected_text(session: &Rc<RefCell<Session>>) -> Option<String> {
     let doc = borrowed.document.borrow();
     // 構造内の選択範囲は、構造のその部分をコピーします。クリップボードはどちらの方法でも同じです。
     if let Some(cursor) = borrowed.nested_cursor() {
-        if let Some(row) = crate::structure::ast::row_at(doc.text().line(borrowed.primary().head.line), &cursor.path) {
+        if let Some(row) = crate::structure::ast::row_at(
+            doc.text().line(borrowed.primary().head.line),
+            &cursor.path,
+        ) {
             let start = cursor.start();
             let end = cursor.end();
             if start < end {

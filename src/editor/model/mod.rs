@@ -62,12 +62,7 @@ impl Document {
         self.modified_lines.clear();
     }
 
-    pub fn mark_lines_modified(
-        &mut self,
-        from_line: usize,
-        to_line: usize,
-        end_line: usize,
-    ) {
+    pub fn mark_lines_modified(&mut self, from_line: usize, to_line: usize, end_line: usize) {
         let removed_lines = to_line.saturating_sub(from_line);
         let inserted_lines = end_line.saturating_sub(from_line);
 
@@ -118,7 +113,6 @@ impl Document {
             self.text.fill_line(from + offset, line);
         }
     }
-
 
     #[allow(dead_code)]
     pub fn stats(&self) -> (usize, usize) {

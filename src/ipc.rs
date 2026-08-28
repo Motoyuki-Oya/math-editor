@@ -162,7 +162,9 @@ pub async fn set_document_encoding(handle: u64, encoding: &str) -> Result<(), St
         handle: u64,
         encoding: &'a str,
     }
-    call("set_document_encoding", Args { handle, encoding }).await.map(|_| ())
+    call("set_document_encoding", Args { handle, encoding })
+        .await
+        .map(|_| ())
 }
 
 /// 文書の改行コードを設定します（保存時に使われます）。
@@ -172,7 +174,15 @@ pub async fn set_document_line_ending(handle: u64, line_ending: &str) -> Result<
         handle: u64,
         line_ending: &'a str,
     }
-    call("set_document_line_ending", Args { handle, line_ending }).await.map(|_| ())
+    call(
+        "set_document_line_ending",
+        Args {
+            handle,
+            line_ending,
+        },
+    )
+    .await
+    .map(|_| ())
 }
 
 /// 走査の完了を待ち、確定した行数を返します。

@@ -63,7 +63,7 @@ pub(super) fn PaneView(
             == Some(pane.key)
     };
 
-use std::rc::Rc;
+    use std::rc::Rc;
 
     let url_tooltip = RwSignal::new(None::<editor::UrlTooltip>);
     let check_url = move || {

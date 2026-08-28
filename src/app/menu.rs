@@ -76,7 +76,13 @@ pub(super) fn show_state(shell: Shell) {
     let settings = settings::current();
     let split = shell.panes.with_untracked(Vec::len) > 1;
     spawn_local(async move {
-        ipc::sync_view_menu(settings.wrap, settings.line_numbers, settings.show_whitespace, split).await;
+        ipc::sync_view_menu(
+            settings.wrap,
+            settings.line_numbers,
+            settings.show_whitespace,
+            split,
+        )
+        .await;
     });
 }
 

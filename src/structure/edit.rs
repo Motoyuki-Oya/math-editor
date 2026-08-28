@@ -135,10 +135,7 @@ impl<'a> Editing<'a> {
             col
         };
 
-        let Some(target_char) = row
-            .get(target_idx)
-            .and_then(super::text::as_char)
-        else {
+        let Some(target_char) = row.get(target_idx).and_then(super::text::as_char) else {
             self.cursor.anchor = target_idx;
             self.cursor.index = target_idx + 1;
             return;
@@ -147,9 +144,7 @@ impl<'a> Editing<'a> {
         let kind = super::text::char_kind(target_char);
         let mut start = target_idx;
         while start > 0 {
-            let prev_c = row
-                .get(start - 1)
-                .and_then(super::text::as_char);
+            let prev_c = row.get(start - 1).and_then(super::text::as_char);
             if prev_c.is_some_and(|c| super::text::char_kind(c) == kind) {
                 start -= 1;
             } else {
@@ -158,9 +153,7 @@ impl<'a> Editing<'a> {
         }
         let mut end = target_idx + 1;
         while end < row.len() {
-            let next_c = row
-                .get(end)
-                .and_then(super::text::as_char);
+            let next_c = row.get(end).and_then(super::text::as_char);
             if next_c.is_some_and(|c| super::text::char_kind(c) == kind) {
                 end += 1;
             } else {

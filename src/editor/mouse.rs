@@ -130,7 +130,9 @@ pub fn on_mousemove(session: &Rc<RefCell<Session>>, event: MouseEvent) {
         // 入れ子Rowから外へドラッグした場合は、それを含む構造Node全体を選択します。
         let hit = hit_at(session, x, y);
         if !click_in_structure(session, &hit, true, false, false) {
-            session.borrow_mut().edit(|editor| editor.select_structure());
+            session
+                .borrow_mut()
+                .edit(|editor| editor.select_structure());
         }
         redraw(session);
         return;
@@ -138,11 +140,9 @@ pub fn on_mousemove(session: &Rc<RefCell<Session>>, event: MouseEvent) {
     let pos = {
         let borrowed = session.borrow();
         let doc = borrowed.document.borrow();
-        borrowed.view.pos_at_point(
-            doc.text(),
-            event.client_x() as f64,
-            event.client_y() as f64,
-        )
+        borrowed
+            .view
+            .pos_at_point(doc.text(), event.client_x() as f64, event.client_y() as f64)
     };
     session.borrow_mut().edit(|editor| editor.extend_to(pos));
     redraw(session);

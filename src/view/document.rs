@@ -661,16 +661,7 @@ pub fn find_url_on_line(line_text: &str, col: usize) -> Option<(usize, usize, St
                 !c.is_whitespace()
                     && !matches!(
                         c,
-                        '"' | '\''
-                            | '<'
-                            | '>'
-                            | '`'
-                            | '）'
-                            | '」'
-                            | '』'
-                            | '】'
-                            | '、'
-                            | '。'
+                        '"' | '\'' | '<' | '>' | '`' | '）' | '」' | '』' | '】' | '、' | '。'
                     )
             })
             .collect();

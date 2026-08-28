@@ -283,17 +283,27 @@ pub fn word_at(text: &Text, at: Pos) -> Option<Sel> {
             } else {
                 line.len()
             };
-            return Some(Sel::range(Pos::new(at.line, start_col), Pos::new(at.line, end_col)));
+            return Some(Sel::range(
+                Pos::new(at.line, start_col),
+                Pos::new(at.line, end_col),
+            ));
         }
     }
 
     // フォールバック: 文字種（CharKind）による境界判定
     let col = if at.col >= line.len() {
         line.len().saturating_sub(1)
-    } else if at.col > 0 && line.get(at.col).and_then(as_char).is_some_and(|c| c.is_whitespace() || char_kind(c) == CharKind::Punctuation) {
+    } else if at.col > 0
+        && line
+            .get(at.col)
+            .and_then(as_char)
+            .is_some_and(|c| c.is_whitespace() || char_kind(c) == CharKind::Punctuation)
+    {
         if line.get(at.col - 1).and_then(as_char).is_some_and(is_word) {
             at.col - 1
-        } else if at.col + 1 < line.len() && line.get(at.col + 1).and_then(as_char).is_some_and(is_word) {
+        } else if at.col + 1 < line.len()
+            && line.get(at.col + 1).and_then(as_char).is_some_and(is_word)
+        {
             at.col + 1
         } else {
             at.col
@@ -306,11 +316,21 @@ pub fn word_at(text: &Text, at: Pos) -> Option<Sel> {
     let kind = char_kind(target_char);
     if kind == CharKind::Whitespace {
         let mut start = col;
-        while start > 0 && line.get(start - 1).and_then(as_char).is_some_and(|c| c.is_whitespace()) {
+        while start > 0
+            && line
+                .get(start - 1)
+                .and_then(as_char)
+                .is_some_and(|c| c.is_whitespace())
+        {
             start -= 1;
         }
         let mut end = col + 1;
-        while end < line.len() && line.get(end).and_then(as_char).is_some_and(|c| c.is_whitespace()) {
+        while end < line.len()
+            && line
+                .get(end)
+                .and_then(as_char)
+                .is_some_and(|c| c.is_whitespace())
+        {
             end += 1;
         }
         return Some(Sel::range(Pos::new(at.line, start), Pos::new(at.line, end)));

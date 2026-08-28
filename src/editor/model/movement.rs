@@ -47,7 +47,10 @@ impl Editor {
             } else {
                 head.line.checked_sub(1).unwrap_or(head.line)
             };
-            text.clamp(Pos::new(line.min(text.line_count().saturating_sub(1)), head.col))
+            text.clamp(Pos::new(
+                line.min(text.line_count().saturating_sub(1)),
+                head.col,
+            ))
         });
         Did::Moved
     }
@@ -67,7 +70,10 @@ impl Editor {
             } else {
                 head.line.saturating_sub(20)
             };
-            text.clamp(Pos::new(line.min(text.line_count().saturating_sub(1)), head.col))
+            text.clamp(Pos::new(
+                line.min(text.line_count().saturating_sub(1)),
+                head.col,
+            ))
         });
         Did::Moved
     }
@@ -107,10 +113,7 @@ impl Editor {
     pub(super) fn map_sels(&mut self, extend: bool, step: impl Fn(&Text, Pos) -> Pos) {
         let Editor { document, cursors } = self;
         document.recorder.cut();
-        for sel in cursors
-            .iter_mut()
-            .filter(|cursor| cursor.inside.is_none())
-        {
+        for sel in cursors.iter_mut().filter(|cursor| cursor.inside.is_none()) {
             // 他のエディタと同様に、Shift を使用せずに選択範囲を折りたたむと、近くの端が維持されます。
             let from = if extend || sel.is_caret() {
                 sel.head
