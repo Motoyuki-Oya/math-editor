@@ -76,6 +76,22 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
                     Did::Nothing
                 }
             }
+            (true, "=") | (true, "+") => {
+                crate::settings::zoom_in();
+                Did::Nothing
+            }
+            (true, "-") | (true, "_") => {
+                crate::settings::zoom_out();
+                Did::Nothing
+            }
+            (true, "0") => {
+                crate::settings::zoom_reset();
+                Did::Nothing
+            }
+            (false, "z") if event.alt_key() => {
+                crate::settings::toggle_whitespace();
+                Did::Nothing
+            }
             // 元に戻す、やり直し、およびクリップボードは、テキスト内でも構造内でも同様にウィンドウ ショートカットによって 1 回処理されます。
             (true, _) => Did::Nothing,
             // タブはテキスト内の列区切り文字であり、構造内の次のスロットです。

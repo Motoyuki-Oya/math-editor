@@ -663,13 +663,58 @@ body {
 
 /* 列区切り文字、$(t)。その幅は、隣接する行の 区切り文字が揃うように描画中に設定されます。 */
 .mn-tab {
+  position: relative;
   display: inline-block;
   width: 1em;
   vertical-align: baseline;
+  line-height: inherit;
 }
 
 .mn-tab::after {
   content: "\200B";
+}
+
+/* 空白文字の可視化 */
+.mn-space,
+.mn-zenkaku {
+  position: relative;
+}
+
+.mn-show-whitespace .mn-space::before {
+  content: "·";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--muted);
+  opacity: 0.45;
+  pointer-events: none;
+  font-weight: bold;
+}
+
+.mn-show-whitespace .mn-zenkaku::before {
+  content: "□";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--muted);
+  opacity: 0.4;
+  pointer-events: none;
+  font-size: 0.75em;
+}
+
+.mn-show-whitespace .mn-tab::before {
+  content: "→";
+  position: absolute;
+  left: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  opacity: 0.4;
+  font-size: 0.85em;
+  line-height: 1;
+  pointer-events: none;
 }
 
 /* IME がまだコミットしていないテキストです。 */

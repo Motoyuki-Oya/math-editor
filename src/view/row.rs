@@ -48,6 +48,8 @@ pub fn decode_path(encoded: &str) -> Option<Vec<(usize, usize)>> {
 /// remain individual DOM siblings.
 pub enum Cell<'a> {
     Char(char),
+    Space,
+    ZenkakuSpace,
     Tab,
     Node(&'a Node),
 }
@@ -55,6 +57,8 @@ pub enum Cell<'a> {
 pub fn cells_of_row(row: &[Node]) -> Vec<Cell<'_>> {
     row.iter()
         .map(|node| match &node.kind {
+            NodeKind::Char(' ') => Cell::Space,
+            NodeKind::Char('\u{3000}') => Cell::ZenkakuSpace,
             NodeKind::Char(c) => Cell::Char(*c),
             NodeKind::Tab => Cell::Tab,
             _ => Cell::Node(node),
@@ -189,6 +193,8 @@ impl<'a> Renderer<'a> {
         match cell {
             // 上記の実行によって処理されます。ランは決して独自のセルではありません。
             Cell::Char(c) => self.span(RUN_CLASS, &c.to_string()),
+            Cell::Space => self.span("mn-run mn-space", " "),
+            Cell::ZenkakuSpace => self.span("mn-run mn-zenkaku", "\u{3000}"),
             Cell::Tab => self.el("span", TAB_CLASS),
             Cell::Node(node) => self.node(node, path, index, font_size),
         }

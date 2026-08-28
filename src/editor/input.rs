@@ -121,6 +121,16 @@ pub fn install(session: &Rc<RefCell<Session>>) {
         "wheel",
         session,
         |session, event: web_sys::WheelEvent| {
+            if event.ctrl_key() || event.meta_key() {
+                event.prevent_default();
+                let delta = event.delta_y();
+                if delta < 0.0 {
+                    crate::settings::zoom_in();
+                } else if delta > 0.0 {
+                    crate::settings::zoom_out();
+                }
+                return;
+            }
             let delta = event.delta_y();
             if delta != 0.0 {
                 event.prevent_default();

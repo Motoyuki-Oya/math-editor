@@ -30,12 +30,13 @@ pub fn on_menu(chosen: impl Fn(&str) + 'static) {
 }
 
 /// Tells the system's 表示 menu what is currently on.
-pub async fn sync_view_menu(wrap: bool, line_numbers: bool, split: bool) {
+pub async fn sync_view_menu(wrap: bool, line_numbers: bool, show_whitespace: bool, split: bool) {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct Args {
         wrap: bool,
         line_numbers: bool,
+        show_whitespace: bool,
         split: bool,
     }
     let _ = call(
@@ -43,6 +44,7 @@ pub async fn sync_view_menu(wrap: bool, line_numbers: bool, split: bool) {
         Args {
             wrap,
             line_numbers,
+            show_whitespace,
             split,
         },
     )
