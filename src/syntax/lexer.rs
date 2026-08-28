@@ -201,7 +201,33 @@ pub fn tokenize_line(line: &str, lang: &LanguageDef) -> Vec<TokenSpan> {
             continue;
         }
 
-        // 7. 識別子・キーワード・型の判定
+        // 7. 記号キーワード（Markdownの見出し '#', '##', リスト '-', 等）の判定
+        let mut matched_symbol_kw = false;
+        for kw in &lang.keywords {
+            if !kw
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+                && slice_from_i.starts_with(kw)
+            {
+                let kw_len = kw.chars().count();
+                // 単語境界の確認（英字で続く場合は別単語）
+                if i + kw_len == len || !chars[i + kw_len].is_alphanumeric() {
+                    spans.push(TokenSpan {
+                        start: i,
+                        end: i + kw_len,
+                        kind: TokenKind::Keyword,
+                    });
+                    i += kw_len;
+                    matched_symbol_kw = true;
+                    break;
+                }
+            }
+        }
+        if matched_symbol_kw {
+            continue;
+        }
+
+        // 8. 識別子・キーワード・型の判定
         if chars[i].is_alphabetic() || chars[i] == '_' || chars[i] == '$' {
             let start = i;
             while i < len && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '$') {
@@ -222,8 +248,6 @@ pub fn tokenize_line(line: &str, lang: &LanguageDef) -> Vec<TokenSpan> {
                 TokenKind::Constant
             } else if lang.builtins.contains(&word) || lang.builtins.contains(raw_word) {
                 TokenKind::Builtin
-            } else if lang.name == "Markdown" && word.starts_with('#') {
-                TokenKind::Keyword
             } else {
                 // 通常の識別子は色付けなし（プレーンテキスト）
                 continue;
@@ -346,5 +370,22 @@ mod tests {
         assert!(tokens.iter().any(|t| t.kind == TokenKind::Constant)); // color, font-size
         assert!(tokens.iter().any(|t| t.kind == TokenKind::Type)); // px
         assert!(tokens.iter().any(|t| t.kind == TokenKind::Comment)); // /* style */
+    }
+
+    #[test]
+    fn test_markdown_tokenization() {
+        let langs = built_in_languages();
+        let md = langs.iter().find(|l| l.name == "Markdown").unwrap();
+        let line1 = "# 単なるテキストエディタ";
+        let tokens1 = tokenize_line(line1, md);
+        assert_eq!(tokens1.first().map(|t| t.kind), Some(TokenKind::Keyword));
+
+        let line2 = "## 概要";
+        let tokens2 = tokenize_line(line2, md);
+        assert_eq!(tokens2.first().map(|t| t.kind), Some(TokenKind::Keyword));
+
+        let line3 = "- リスト項目";
+        let tokens3 = tokenize_line(line3, md);
+        assert_eq!(tokens3.first().map(|t| t.kind), Some(TokenKind::Keyword));
     }
 }

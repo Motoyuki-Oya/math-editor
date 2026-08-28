@@ -40,6 +40,7 @@ pub(super) struct Tab {
     pub(super) doc: RwSignal<Option<u64>>,
     pub(super) encoding: RwSignal<String>,
     pub(super) line_ending: RwSignal<String>,
+    pub(super) syntax_override: RwSignal<Option<String>>,
 }
 
 impl Tab {
@@ -56,6 +57,7 @@ impl Tab {
             } else {
                 "LF".into()
             }),
+            syntax_override: RwSignal::new(None),
         }
     }
 
@@ -90,6 +92,18 @@ impl Tab {
             .as_deref()
             .and_then(|path| path.rsplit(['/', '\\']).next().map(str::to_string))
             .unwrap_or_else(|| format!("{UNTITLED}.txt"))
+    }
+
+    pub(super) fn language_name(&self) -> String {
+        if let Some(ref name) = self.syntax_override.get() {
+            return name.clone();
+        }
+        if let Some(ref path) = self.path.get() {
+            if let Some(lang) = crate::syntax::for_path(path) {
+                return lang.name;
+            }
+        }
+        "Plain Text".to_string()
     }
 }
 
@@ -532,8 +546,10 @@ impl Shell {
                 // 単一ペインの場合：最後のタブは空のままなので、常にドキュメントが存在します。下書きに関しては、新しいタブになります。
                 tab.id.set(next_id());
                 tab.path.set(None);
+                tab.syntax_override.set(None);
                 tab.large.set(false);
                 tab.assign_document();
+                editor::set_doc_path(tab.id.get_untracked(), None);
                 editor::bind_doc(pane.editor_pane(), tab.id.get_untracked());
                 tab.dirty.set(false);
                 shell.sync_dirty();
@@ -696,6 +712,7 @@ impl Shell {
             doc: src_tab.doc,
             encoding: src_tab.encoding,
             line_ending: src_tab.line_ending,
+            syntax_override: src_tab.syntax_override,
         };
 
         let pane_count = self.panes.with_untracked(Vec::len);
@@ -970,6 +987,38 @@ impl Shell {
             });
         }
         self.mark_dirty_tab(tab);
+    }
+
+    /// 現在のタブの構文ハイライト言語（構文モード）を手動設定または自動判定に戻します。
+    pub(super) fn set_language(&self, language: Option<&str>) {
+        let tab = self.tab_untracked();
+        tab.syntax_override.set(language.map(str::to_string));
+        let doc_id = tab.id.get_untracked();
+        let path = if let Some(lang_name) = language {
+            let ext = match lang_name {
+                "Rust" => "rs",
+                "Kotlin" => "kt",
+                "TypeScript" => "ts",
+                "JavaScript" => "js",
+                "Python" => "py",
+                "TOML" => "toml",
+                "JSON" => "json",
+                "HTML" => "html",
+                "CSS" => "css",
+                "Markdown" => "md",
+                "LaTeX" => "tex",
+                _ => "txt",
+            };
+            Some(format!("virtual.{ext}"))
+        } else {
+            tab.path.get_untracked()
+        };
+        editor::set_doc_path(doc_id, path);
+        editor::redraw_all();
+    }
+
+    pub(super) fn tab_language_name(&self) -> String {
+        self.tab().language_name()
     }
 
     /// アプリケーションが最後に停止したときに画面に表示されていたものを開きます。ドラフトは未保存のタブとして返され、番号が保持されるため、2 番目のストップで同じドラフトが上書きされます。
