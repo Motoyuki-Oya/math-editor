@@ -90,6 +90,8 @@ pub struct Renderer<'a> {
     preedit: Option<&'a Preedit<'a>>,
     active: Option<&'a Path>,
     font_size: f64,
+    language: Option<&'a crate::syntax::lang::LanguageDef>,
+    ghost_text: Option<(&'a str, usize)>,
 }
 
 /// 待機中の文字1 つのスパンとして描画されます。これにより、テキストの間隔と形状が維持されます。
@@ -97,6 +99,48 @@ struct Run {
     start: usize,
     class: &'static str,
     text: String,
+    kind: Option<crate::syntax::TokenKind>,
+}
+
+fn run_class_for(kind: Option<crate::syntax::TokenKind>) -> &'static str {
+    match kind {
+        None => RUN_CLASS,
+        Some(crate::syntax::TokenKind::Keyword) => "mn-run mn-syn-keyword",
+        Some(crate::syntax::TokenKind::Type) => "mn-run mn-syn-type",
+        Some(crate::syntax::TokenKind::String) => "mn-run mn-syn-string",
+        Some(crate::syntax::TokenKind::Number) => "mn-run mn-syn-number",
+        Some(crate::syntax::TokenKind::Comment) => "mn-run mn-syn-comment",
+        Some(crate::syntax::TokenKind::Builtin) => "mn-run mn-syn-builtin",
+        Some(crate::syntax::TokenKind::Constant) => "mn-run mn-syn-constant",
+        Some(crate::syntax::TokenKind::Operator) => "mn-run mn-syn-operator",
+        Some(crate::syntax::TokenKind::Punctuation) => "mn-run mn-syn-punct",
+    }
+}
+
+fn cells_to_plain(cells: &[Cell<'_>]) -> String {
+    let mut s = String::with_capacity(cells.len());
+    for cell in cells {
+        match cell {
+            Cell::Char(c) => s.push(*c),
+            Cell::Space => s.push(' '),
+            Cell::ZenkakuSpace => s.push('\u{3000}'),
+            Cell::Tab => s.push('\t'),
+            Cell::Node(_) => s.push(' '),
+        }
+    }
+    s
+}
+
+fn token_kind_at(
+    spans: &[crate::syntax::TokenSpan],
+    index: usize,
+) -> Option<crate::syntax::TokenKind> {
+    for span in spans {
+        if index >= span.start && index < span.end {
+            return Some(span.kind);
+        }
+    }
+    None
 }
 
 impl<'a> Renderer<'a> {
@@ -106,6 +150,8 @@ impl<'a> Renderer<'a> {
             preedit: None,
             active: None,
             font_size: settings::current().font_size,
+            language: None,
+            ghost_text: None,
         }
     }
 
@@ -116,6 +162,19 @@ impl<'a> Renderer<'a> {
 
     pub fn with_active_path(mut self, active: Option<&'a Path>) -> Renderer<'a> {
         self.active = active;
+        self
+    }
+
+    pub fn with_language(
+        mut self,
+        language: Option<&'a crate::syntax::lang::LanguageDef>,
+    ) -> Renderer<'a> {
+        self.language = language;
+        self
+    }
+
+    pub fn with_ghost_text(mut self, ghost_text: Option<(&'a str, usize)>) -> Renderer<'a> {
+        self.ghost_text = ghost_text;
         self
     }
 
@@ -133,23 +192,62 @@ impl<'a> Renderer<'a> {
         if cells.is_empty() {
             container.append_child(&self.empty(nested)).ok();
         }
+
+        let token_spans = if path.is_empty() {
+            self.language
+                .map(|lang| {
+                    let plain = cells_to_plain(cells);
+                    crate::syntax::tokenize_line(&plain, lang)
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
         let mut run: Option<Run> = None;
         for (index, cell) in cells.iter().enumerate() {
             if let Some(preedit) = self.preedit_at(path, index) {
                 self.flush(&container, &mut run);
                 container.append_child(&preedit).ok();
             }
+
+            if let Some((ghost, col)) = self.ghost_text {
+                if index == col && path.is_empty() {
+                    self.flush(&container, &mut run);
+                    let ghost_el = self.span("mn-ghost-text", ghost);
+                    container.append_child(&ghost_el).ok();
+                }
+            }
+
+            let kind = if path.is_empty() {
+                token_kind_at(&token_spans, index)
+            } else {
+                None
+            };
+
             match cell {
-                Cell::Char(c) => match run.as_mut() {
-                    Some(run) => run.text.push(*c),
-                    None => {
+                Cell::Char(c) => {
+                    if let Some(r) = run.as_mut() {
+                        if r.kind == kind {
+                            r.text.push(*c);
+                        } else {
+                            self.flush(&container, &mut run);
+                            run = Some(Run {
+                                start: index,
+                                class: run_class_for(kind),
+                                text: c.to_string(),
+                                kind,
+                            });
+                        }
+                    } else {
                         run = Some(Run {
                             start: index,
-                            class: RUN_CLASS,
+                            class: run_class_for(kind),
                             text: c.to_string(),
+                            kind,
                         });
                     }
-                },
+                }
                 cell => {
                     self.flush(&container, &mut run);
                     let element = self.cell(cell, path, index, font_size);
@@ -161,6 +259,12 @@ impl<'a> Renderer<'a> {
         self.flush(&container, &mut run);
         if let Some(preedit) = self.preedit_at(path, cells.len()) {
             container.append_child(&preedit).ok();
+        }
+        if let Some((ghost, col)) = self.ghost_text {
+            if col >= cells.len() && path.is_empty() {
+                let ghost_el = self.span("mn-ghost-text", ghost);
+                container.append_child(&ghost_el).ok();
+            }
         }
         container
     }

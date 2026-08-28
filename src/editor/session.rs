@@ -46,6 +46,8 @@ pub struct Session {
     pub jump_end: Option<bool>,
     /// 行数未確定中にEOFから読んだ末尾行。仮位置と再配置用の元文字列。
     pending_tail: Option<(usize, Vec<String>)>,
+    /// インライン補完（ゴーストテキスト）の現在候補。
+    pub ghost: Option<super::suggest::GhostText>,
 }
 
 impl Session {
@@ -104,6 +106,8 @@ pub type OnRedraw = Rc<dyn Fn(usize)>;
 thread_local! {
     /// 全ての開いているドキュメントの Model (M)。タブID（doc_id）ごとに 1 つ保持される。
     static DOCUMENTS: RefCell<HashMap<usize, Rc<RefCell<Document>>>> = RefCell::new(HashMap::new());
+    /// ドキュメントのファイルパス（拡張子からの構文判定に使用）。
+    static DOC_PATHS: RefCell<HashMap<usize, String>> = RefCell::new(HashMap::new());
     /// ペインごとに 1 つのセッション画面 (V)。分割ビューはリストを作成します。
     static PANES: RefCell<Vec<Rc<RefCell<Session>>>> = const { RefCell::new(Vec::new()) };
     /// 入力を行うペイン。
@@ -134,10 +138,30 @@ pub fn get_or_create_doc(id: usize) -> Rc<RefCell<Document>> {
     })
 }
 
+/// ドキュメントのファイルパスを登録または更新します。
+pub fn set_doc_path(doc_id: usize, path: Option<String>) {
+    DOC_PATHS.with(|paths| {
+        if let Some(p) = path {
+            paths.borrow_mut().insert(doc_id, p);
+        } else {
+            paths.borrow_mut().remove(&doc_id);
+        }
+    });
+    redraw_doc(doc_id, Some(FOCUSED.get()));
+}
+
+/// ドキュメントのファイルパスを取得します。
+pub fn doc_path(doc_id: usize) -> Option<String> {
+    DOC_PATHS.with(|paths| paths.borrow().get(&doc_id).cloned())
+}
+
 /// タブがすべてのペインから破棄された際に、Document Model を解放します。
 pub fn release_doc(id: usize) {
     DOCUMENTS.with(|docs| {
         docs.borrow_mut().remove(&id);
+    });
+    DOC_PATHS.with(|paths| {
+        paths.borrow_mut().remove(&id);
     });
 }
 
@@ -211,6 +235,7 @@ pub fn init(root: &HtmlElement) -> Option<usize> {
         counting: false,
         jump_end: None,
         pending_tail: None,
+        ghost: None,
     }));
     input::install(&session);
     PANES.with(|panes| panes.borrow_mut().push(session.clone()));
@@ -471,6 +496,8 @@ fn redraw_preview_overlay(session: &Rc<RefCell<Session>>) {
     let modified = doc.modified_lines();
     let sels = session.sels();
     let line_count = doc.text().line_count();
+    let path = doc_path(session.doc_id);
+    let lang = path.as_deref().and_then(crate::syntax::for_path);
     session.view.redraw_overlay(
         line_count,
         &Overlay {
@@ -482,6 +509,8 @@ fn redraw_preview_overlay(session: &Rc<RefCell<Session>>) {
             focused: session.focused,
             linked: session.linked,
             show_numbers: !session.counting,
+            language: lang.as_ref(),
+            ghost: session.ghost.as_ref(),
         },
     );
 }
@@ -558,9 +587,68 @@ pub fn redraw_doc(doc_id: usize, origin_pane: Option<usize>) {
     }
 }
 
+/// キャレット位置のゴーストテキスト候補を再計算します。
+pub fn update_ghost_text(session: &mut Session) {
+    if !session.focused || !session.preedit.is_empty() || session.cursors.len() != 1 {
+        session.ghost = None;
+        return;
+    }
+    let primary = session.primary();
+    if !primary.is_caret() || session.primary_cursor().inside.is_some() {
+        session.ghost = None;
+        return;
+    }
+    let pos = primary.head;
+    let doc = session.document.borrow();
+    let line_row = doc.text().line(pos.line).to_vec();
+    let plain_line = crate::structure::plain::row(&line_row);
+    let path = doc_path(session.doc_id);
+    let lang = path.as_deref().and_then(crate::syntax::for_path);
+    let buffer_words = super::suggest::collect_buffer_words(doc.text(), 300);
+    session.ghost = super::suggest::find_suggestion(
+        pos.line,
+        pos.col,
+        &plain_line,
+        lang.as_ref(),
+        Some(&buffer_words),
+    );
+}
+
+/// ゴーストテキスト候補を確定挿入します。
+pub fn accept_suggestion(session: &Rc<RefCell<Session>>) -> bool {
+    let ghost = {
+        let mut borrowed = session.borrow_mut();
+        borrowed.ghost.take()
+    };
+    let Some(ghost) = ghost else {
+        return false;
+    };
+    {
+        let mut borrowed = session.borrow_mut();
+        borrowed.edit(|editor| {
+            editor.insert_text(&ghost.suffix);
+        });
+    }
+    changed(session);
+    true
+}
+
+/// 現在ゴーストテキスト候補が存在するか判定します。
+pub fn has_ghost_text(session: &Session) -> bool {
+    session.ghost.is_some()
+}
+
+/// ゴーストテキスト候補を消去します。
+pub fn clear_ghost_text(session: &mut Session) -> bool {
+    let had = session.ghost.is_some();
+    session.ghost = None;
+    had
+}
+
 /// 描き直してキャレットの行を見せ、隠しの入力欄をキャレットの場所についていかせます (IME の候補窓がそこに出ます)。
 pub fn redraw(session: &Rc<RefCell<Session>>) {
     {
+        update_ghost_text(&mut session.borrow_mut());
         let session = session.borrow();
         let doc = session.document.borrow();
         let caret = caret_of(&session);
@@ -568,6 +656,8 @@ pub fn redraw(session: &Rc<RefCell<Session>>) {
         let highlights = preview_highlights(&session);
         let modified = doc.modified_lines();
         let sels = session.sels();
+        let path = doc_path(session.doc_id);
+        let lang = path.as_deref().and_then(crate::syntax::for_path);
         session.view.draw(
             doc.text(),
             &Overlay {
@@ -579,6 +669,8 @@ pub fn redraw(session: &Rc<RefCell<Session>>) {
                 focused: session.focused,
                 linked: session.linked,
                 show_numbers: !session.counting,
+                language: lang.as_ref(),
+                ghost: session.ghost.as_ref(),
             },
         );
         if let Some(rect) = session.view.reveal(&caret) {
@@ -616,6 +708,8 @@ pub fn scrolled(session: &Rc<RefCell<Session>>) {
         let highlights = preview_highlights(&session);
         let modified = doc.modified_lines();
         let sels = session.sels();
+        let path = doc_path(session.doc_id);
+        let lang = path.as_deref().and_then(crate::syntax::for_path);
         session.view.repaint(
             doc.text(),
             &Overlay {
@@ -627,6 +721,8 @@ pub fn scrolled(session: &Rc<RefCell<Session>>) {
                 focused: session.focused,
                 linked: session.linked,
                 show_numbers: !session.counting,
+                language: lang.as_ref(),
+                ghost: session.ghost.as_ref(),
             },
         );
     }
