@@ -8,6 +8,15 @@
   --font-text: "Segoe UI", "Yu Gothic", "Meiryo", "Hiragino Sans", "Noto Sans JP", -apple-system, BlinkMacSystemFont, sans-serif;
   --font-math: "Cambria Math", "STIX Two Math", "Latin Modern Math", Georgia, "Times New Roman",
     serif;
+  --syn-keyword: #a626a4;
+  --syn-type: #c18401;
+  --syn-string: #50a14f;
+  --syn-number: #986801;
+  --syn-comment: #a0a1a7;
+  --syn-builtin: #0184bc;
+  --syn-constant: #e45649;
+  --syn-operator: #4078f2;
+  --syn-punct: #383a42;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -18,7 +27,60 @@
     --line: #34343c;
     --panel: #26262c;
     --accent: #6ea0ff;
+    --syn-keyword: #c678dd;
+    --syn-type: #e5c07b;
+    --syn-string: #98c379;
+    --syn-number: #d19a66;
+    --syn-comment: #7f848e;
+    --syn-builtin: #61afef;
+    --syn-constant: #e06c75;
+    --syn-operator: #56b6c2;
+    --syn-punct: #abb2bf;
   }
+}
+
+/* ステータスバー: 画面幅が狭くても絶対に改行しない */
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 12px;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.statusbar > span {
+  flex-shrink: 0;
+}
+
+.status-clickable {
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+
+.status-clickable:hover {
+  background: var(--bg);
+  border-color: var(--line);
+  color: var(--fg);
+}
+
+.status-message {
+  margin-left: auto;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+  min-width: 0;
 }
 
 * {
@@ -563,14 +625,16 @@ body {
   grid-template-columns: var(--setting-gutter, 0px) minmax(0, 1fr);
   position: relative;
   min-height: 100%;
-  /* コンテンツは折り返されない場合、最も長い行と同じ幅になります。これは、 エディターに横にスクロールする機能を提供します。 */
   width: 100%;
-  min-width: 100%;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .mn-content.mn-nowrap {
   grid-template-columns: var(--setting-gutter, 0px) max-content;
   width: max-content;
+  max-width: none;
+  overflow: visible;
 }
 
 .mn-gutter {
@@ -586,7 +650,15 @@ body {
   grid-column: 2;
   grid-row: 1;
   min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
   padding: 0 18px 18px 10px;
+  box-sizing: border-box;
+}
+
+.mn-nowrap .mn-document {
+  max-width: none;
+  overflow-x: visible;
 }
 
 .mn-line {
@@ -597,9 +669,47 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* 連続する整列ブロック（Tab整列行またはMarkdownテーブル）を包むラッパーコンテナ */
+.mn-aligned-block {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  scrollbar-width: thin;
+}
+
+.mn-aligned-block::-webkit-scrollbar {
+  height: 6px;
+}
+
+.mn-aligned-block::-webkit-scrollbar-thumb {
+  background: rgba(100, 100, 100, 0.35);
+  border-radius: 3px;
+}
+
+/* 整列行（Tab区切りまたはMarkdownテーブル）は折り返さずに自然な幅で右へ展開 */
+.mn-line.mn-aligned-row,
+.mn-line.mn-table-row {
+  white-space: pre !important;
+  overflow-wrap: normal !important;
+  min-width: max-content;
+  width: max-content;
+}
+
+.mn-nowrap .mn-aligned-block {
+  max-width: none;
+  overflow-x: visible;
+  width: max-content;
+}
+
 .mn-nowrap .mn-line {
-  white-space: pre;
-  overflow-wrap: normal;
+  white-space: pre !important;
+  overflow-wrap: normal !important;
+  min-width: max-content;
+  width: max-content;
 }
 
 /* スクロールバー上の Overview Ruler (変更行・検索ヒット等のマーカー) */
@@ -674,6 +784,17 @@ body {
   content: "\200B";
 }
 
+/* Markdown テーブルの | 縦線自動列揃え */
+.mn-table-pipe {
+  position: relative;
+  display: inline-block;
+  vertical-align: baseline;
+  line-height: inherit;
+  text-align: right;
+  font-weight: inherit;
+  color: inherit;
+}
+
 /* 空白文字の可視化 */
 .mn-space,
 .mn-zenkaku {
@@ -722,6 +843,69 @@ body {
   text-decoration: underline;
   text-underline-offset: 2px;
   background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+/* 構文ハイライト */
+.mn-syn-keyword {
+  color: var(--syn-keyword);
+  font-weight: 500;
+}
+.mn-syn-type {
+  color: var(--syn-type);
+}
+.mn-syn-string {
+  color: var(--syn-string);
+}
+.mn-syn-number {
+  color: var(--syn-number);
+}
+.mn-syn-comment {
+  color: var(--syn-comment);
+  font-style: italic;
+}
+.mn-syn-builtin {
+  color: var(--syn-builtin);
+}
+.mn-syn-constant {
+  color: var(--syn-constant);
+}
+.mn-syn-operator {
+  color: var(--syn-operator);
+}
+.mn-syn-punct {
+  color: var(--syn-punct);
+}
+
+/* インライン補完（ゴーストテキスト / Phantom Text / ルビ補完） */
+.mn-ghost-text {
+  color: var(--muted);
+  opacity: 0.45;
+  pointer-events: none;
+  user-select: none;
+  font-style: normal;
+  display: inline;
+}
+
+.mn-ghost-ruby-target {
+  position: relative;
+  display: inline;
+}
+
+.mn-ghost-ruby {
+  position: absolute;
+  top: -0.85em;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 0.62em;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  font-feature-settings: "palt" 1;
+  color: var(--muted);
+  opacity: 0.65;
+  pointer-events: none;
+  user-select: none;
+  font-style: normal;
+  white-space: nowrap;
 }
 
 /* テキストの下のここに選択範囲とキャレットが描画されます。 */
@@ -1028,8 +1212,10 @@ body {
 }
 
 .mn-limit {
-  font-size: 0.68em;
+  font-size: 0.62em;
   line-height: 1.1;
+  letter-spacing: -0.03em;
+  font-feature-settings: "palt" 1;
 }
 
 .mn-limit-empty:not(:focus-within) .mn-placeholder {

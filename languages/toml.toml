@@ -1,0 +1,20 @@
+name = "TOML"
+extensions = ["toml"]
+line_comments = ["#"]
+block_comments = []
+string_delimiters = ["\"", "'", "\"\"\"", "'''"]
+keywords = []
+types = []
+builtins = []
+constants = ["true", "false", "nan", "inf"]
+operators = ["="]
+
+[[enclosures]]
+open = "[["
+close = "]]"
+kind = "Type"
+
+[[enclosures]]
+open = "["
+close = "]"
+kind = "Type"

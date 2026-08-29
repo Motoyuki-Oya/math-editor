@@ -183,7 +183,7 @@ impl LineEnding {
             LineEnding::CrLf
         } else if lf_only >= cr_only && lf_only > 0 {
             LineEnding::Lf
-        } else if cr_only > 0 {
+        } else if cr_only > crlf && cr_only > 0 {
             LineEnding::Cr
         } else {
             #[cfg(windows)]
@@ -200,19 +200,19 @@ impl LineEnding {
 
 /// チャンク内の改行を数え、STRIDE 行ごとの行頭バイト位置を `marks` へ足す。
 /// `line` は通し行数、`offset` はチャンク先頭のファイル内バイト位置。
-fn index_chunk(chunk: &[u8], offset: u64, line: &mut usize, marks: &mut Vec<u64>) {
+fn index_chunk(chunk: &[u8], offset: u64, line: &mut usize, marks: &mut Vec<u64>, delimiter: u8) {
     // memchrのcountはSIMD実装を持つ。4KBごとに改行数だけ先に数え、STRIDEの
     // 境界を含む小区間だけ位置を列挙することで、debugでも全改行をRust側で
     // 1件ずつ反復しない。
     const BLOCK: usize = 4 << 10;
     for (block_index, block) in chunk.chunks(BLOCK).enumerate() {
-        let count = memchr::memchr_iter(b'\n', block).count();
+        let count = memchr::memchr_iter(delimiter, block).count();
         let next_mark = (*line / STRIDE + 1) * STRIDE;
         if *line + count < next_mark {
             *line += count;
             continue;
         }
-        for at in memchr::memchr_iter(b'\n', block) {
+        for at in memchr::memchr_iter(delimiter, block) {
             *line += 1;
             if (*line).is_multiple_of(STRIDE) {
                 marks.push(offset + (block_index * BLOCK + at) as u64 + 1);
@@ -319,6 +319,7 @@ pub struct BackgroundScan {
     path: PathBuf,
     offset: u64,
     line: usize,
+    delimiter: u8,
 }
 
 impl BackgroundScan {
@@ -338,7 +339,13 @@ impl BackgroundScan {
                 return Ok(Some(index.lines));
             }
             let mut marks = Vec::new();
-            index_chunk(chunk, self.offset, &mut self.line, &mut marks);
+            index_chunk(
+                chunk,
+                self.offset,
+                &mut self.line,
+                &mut marks,
+                self.delimiter,
+            );
             let len = chunk.len();
             self.offset += len as u64;
             self.reader.consume(len);
@@ -350,6 +357,13 @@ impl BackgroundScan {
 }
 
 impl Source {
+    pub fn delimiter(&self) -> u8 {
+        match self.line_ending {
+            LineEnding::Cr => b'\r',
+            _ => b'\n',
+        }
+    }
+
     fn open_with_encoding(
         path: &Path,
         specified_encoding: Option<FileEncoding>,
@@ -395,6 +409,10 @@ impl Source {
                 broken: None,
             }),
         });
+        let delimiter = match line_ending {
+            LineEnding::Cr => b'\r',
+            _ => b'\n',
+        };
         let mut marks = vec![initial_offset];
         let mut line = 0usize;
         let mut offset = 0u64;
@@ -407,7 +425,7 @@ impl Source {
             } else {
                 chunk_buf
             };
-            index_chunk(chunk, initial_offset, &mut line, &mut marks);
+            index_chunk(chunk, initial_offset, &mut line, &mut marks, delimiter);
             let len = chunk_buf.len();
             offset += len as u64;
             reader.consume(len);
@@ -442,6 +460,7 @@ impl Source {
                 path: path.to_path_buf(),
                 offset,
                 line,
+                delimiter,
             })
         };
 
@@ -475,6 +494,7 @@ impl Source {
         self.check()?;
         const TAIL_CHUNK: u64 = 64 << 10;
         const MAX_TAIL_BYTES: u64 = 8 << 20;
+        let delimiter = self.delimiter();
         let mut at = self.bytes;
         let mut chunks = Vec::new();
         let mut newlines = 0usize;
@@ -488,7 +508,7 @@ impl Source {
             self.file
                 .read_exact(&mut chunk)
                 .map_err(|e| format!("{} を読めませんでした: {e}", self.path.display()))?;
-            newlines += memchr::memchr_iter(b'\n', &chunk).count();
+            newlines += memchr::memchr_iter(delimiter, &chunk).count();
             read_bytes += chunk.len() as u64;
             chunks.push(chunk);
             at = from;
@@ -498,13 +518,13 @@ impl Source {
         }
         chunks.reverse();
         let bytes: Vec<u8> = chunks.into_iter().flatten().collect();
-        let lines: Vec<&[u8]> = bytes.split(|byte| *byte == b'\n').collect();
+        let lines: Vec<&[u8]> = bytes.split(|byte| *byte == delimiter).collect();
         let first = lines.len().saturating_sub(count);
         lines[first..]
             .iter()
             .map(|raw_line| {
                 let mut line = *raw_line;
-                if line.last() == Some(&b'\r') {
+                while line.last() == Some(&b'\r') || line.last() == Some(&b'\n') {
                     line = &line[..line.len() - 1];
                 }
                 Ok(self.encoding.decode_line(line))
@@ -572,7 +592,8 @@ impl Source {
         if match_bytes.is_empty() && marker_bytes.is_empty() {
             return Ok(Vec::new());
         }
-        let newlines: Vec<usize> = memchr::memchr_iter(b'\n', &bytes).collect();
+        let delimiter = self.delimiter();
+        let newlines: Vec<usize> = memchr::memchr_iter(delimiter, &bytes).collect();
         let line_at = |byte: usize| base + newlines.partition_point(|newline| *newline < byte);
         let mut marked = std::collections::HashSet::new();
         for byte in marker_bytes {
@@ -596,7 +617,7 @@ impl Source {
                 continue;
             }
             let end_byte = byte + query_bytes.len();
-            if bytes[byte..end_byte].contains(&b'\n') {
+            if bytes[byte..end_byte].contains(&delimiter) {
                 continue;
             }
             let line_start = (line - base)
@@ -644,19 +665,17 @@ impl Source {
         self.file.seek(SeekFrom::Start(mark)).map_err(broken)?;
         let mut reader = BufReader::with_capacity(CHUNK, &self.file);
         let mut buffer = Vec::new();
+        let delimiter = self.delimiter();
         // 遅延索引が目的行へまだ届いていなければ、最後にある印から正しく読む。
         for _ in 0..from - mark_index * STRIDE {
             buffer.clear();
-            reader.read_until(b'\n', &mut buffer).map_err(broken)?;
+            reader.read_until(delimiter, &mut buffer).map_err(broken)?;
         }
         let to = (from + count).min(lines);
         for line in from..to {
             buffer.clear();
-            reader.read_until(b'\n', &mut buffer).map_err(broken)?;
-            if buffer.last() == Some(&b'\n') {
-                buffer.pop();
-            }
-            if buffer.last() == Some(&b'\r') {
+            reader.read_until(delimiter, &mut buffer).map_err(broken)?;
+            while buffer.last() == Some(&b'\n') || buffer.last() == Some(&b'\r') {
                 buffer.pop();
             }
             let text = self.encoding.decode_line(&buffer);
@@ -984,7 +1003,11 @@ impl Document {
         if from > to || to > self.count {
             return Err("置き換えの範囲が文書の外です".to_string());
         }
-        let edit = self.splice(from, to, lines)?;
+        let clean_lines = lines
+            .into_iter()
+            .map(|l| l.trim_end_matches(['\r', '\n']).to_string())
+            .collect();
+        let edit = self.splice(from, to, clean_lines)?;
         self.redo.clear();
         match self.undo.last_mut() {
             Some(step) if step.group == group => {
@@ -1384,7 +1407,8 @@ impl Document {
                 if i > 0 {
                     out.write_all(line_ending_bytes)?;
                 }
-                let encoded = encoding.encode_str(line);
+                let clean_line = line.trim_end_matches(['\r', '\n']);
+                let encoded = encoding.encode_str(clean_line);
                 out.write_all(&encoded)
             };
             match write(out) {
@@ -1437,7 +1461,8 @@ impl Document {
                             marks.push(written);
                         }
                     }
-                    let encoded = encoding.encode_str(line);
+                    let clean_line = line.trim_end_matches(['\r', '\n']);
+                    let encoded = encoding.encode_str(clean_line);
                     out.write_all(&encoded)?;
                     written += encoded.len() as u64;
                     Ok(())
@@ -2113,6 +2138,18 @@ mod tests {
         let saved = std::fs::read(&crlf_path).unwrap();
         assert_eq!(saved, b"line1\nline2\nline3");
         std::fs::remove_file(crlf_path).ok();
+
+        // CR 単独改行ファイルの読み込みと各行の分解テスト
+        let cr_path = dir.join("planetext-cr-test.txt");
+        std::fs::write(&cr_path, b"cr_line1\rcr_line2\rcr_line3").unwrap();
+        let (mut cr_doc, _) = Document::open(cr_path.to_str().unwrap()).unwrap();
+        assert_eq!(cr_doc.line_ending(), LineEnding::Cr);
+        assert_eq!(cr_doc.line_count(), 3);
+        assert_eq!(
+            cr_doc.read(0, 3).unwrap(),
+            vec!["cr_line1", "cr_line2", "cr_line3"]
+        );
+        std::fs::remove_file(cr_path).ok();
     }
 
     #[test]

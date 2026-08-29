@@ -1,0 +1,29 @@
+name = "JavaScript"
+extensions = ["js", "jsx", "mjs", "cjs"]
+line_comments = ["//"]
+block_comments = [["/*", "*/"]]
+string_delimiters = ["\"", "'", "`"]
+
+keywords = [
+  "async", "await", "break", "case", "catch", "class", "const", "continue", "debugger",
+  "default", "delete", "do", "else", "export", "extends", "finally", "for", "function",
+  "if", "import", "in", "instanceof", "let", "new", "return", "static", "super", "switch",
+  "this", "throw", "try", "typeof", "var", "void", "while", "with", "yield", "from", "of"
+]
+
+types = [
+  "Object", "Function", "Boolean", "Symbol", "Number", "BigInt", "Math", "Date", "String",
+  "RegExp", "Array", "Map", "Set", "WeakMap", "WeakSet", "Promise"
+]
+
+builtins = [
+  "console", "window", "document", "parseInt", "parseFloat", "isNaN", "isFinite",
+  "setTimeout", "setInterval", "clearTimeout", "clearInterval"
+]
+
+constants = ["true", "false", "null", "undefined", "NaN", "Infinity"]
+
+operators = [
+  "+", "-", "*", "/", "%", "=", "==", "===", "!=", "!==", "<", ">", "<=", ">=", "&&",
+  "||", "!", "??", "?.", "=>", "++", "--", "+=", "-=", "*=", "/="
+]

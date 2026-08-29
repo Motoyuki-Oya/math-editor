@@ -16,7 +16,8 @@
         "label": "main",
         "title": "Planetext",
         "width": 1000,
-        "height": 720
+        "height": 720,
+        "zoomHotkeysEnabled": false
       }
     ],
     "security": {

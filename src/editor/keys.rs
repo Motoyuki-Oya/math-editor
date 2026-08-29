@@ -44,6 +44,20 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
         event.prevent_default();
         return;
     }
+
+    // ゴーストテキストが表示中の場合、Tab で確定挿入、Escape で消去
+    if session::has_ghost_text(&session.borrow()) {
+        if !ctrl && !event.alt_key() && key == "Tab" {
+            if session::accept_suggestion(session) {
+                event.prevent_default();
+                return;
+            }
+        } else if key == "Escape" && session::clear_ghost_text(&mut session.borrow_mut()) {
+            session::redraw(session);
+            event.prevent_default();
+            return;
+        }
+    }
     let did = session.borrow_mut().edit(|editor| {
         match (ctrl, key.as_str()) {
             (_, "ArrowLeft") => editor.move_h(false, shift),

@@ -1,0 +1,10 @@
+name = "JSON"
+extensions = ["json", "jsonc"]
+line_comments = ["//"]
+block_comments = [["/*", "*/"]]
+string_delimiters = ["\""]
+keywords = []
+types = []
+builtins = []
+constants = ["true", "false", "null"]
+operators = [":", ","]

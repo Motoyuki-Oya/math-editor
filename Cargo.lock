@@ -3047,6 +3047,7 @@ dependencies = [
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
+ "toml 0.8.2",
  "unicode-normalization",
  "wasm-bindgen",
  "wasm-bindgen-futures",

@@ -71,6 +71,8 @@ pub struct Overlay<'a> {
     pub linked: bool,
     /// 行数確定前は仮の行番号を表示しない。
     pub show_numbers: bool,
+    pub language: Option<&'a crate::syntax::lang::LanguageDef>,
+    pub ghost: Option<&'a crate::syntax::GhostText>,
 }
 
 #[derive(Default)]
@@ -208,6 +210,7 @@ impl View {
             index,
             text,
         });
+        let is_markdown = state.language.is_some_and(|l| l.name == "Markdown");
         let draw_line = |doc: &Document, line: usize| {
             // キャレットがある行のみ、構成内容が表示されます。
             let here = preedit
@@ -219,10 +222,31 @@ impl View {
                     text: preedit.text,
                 });
             let active = (caret.at.line == line).then_some(path.as_slice());
-            self.draw_line(doc, text, line, here.as_ref(), active)
+            let ghost_on_line = state.ghost.filter(|g| g.line == line && active.is_some());
+            let row_nodes = text.line(line);
+            let is_aligned =
+                has_tab(row_nodes) || (is_markdown && is_markdown_table_line(row_nodes));
+            let class_name = if is_aligned {
+                "mn-line mn-aligned-row"
+            } else {
+                LINE_CLASS
+            };
+            let holder = element(doc, "div", class_name)?;
+            holder.set_attribute(LINE_ATTR, &line.to_string()).ok();
+            let line_lang = state
+                .language
+                .and_then(|lang| embedded_block_lang_for_line(text, line, lang))
+                .or_else(|| state.language.cloned());
+            let renderer = Renderer::new(doc)
+                .with_preedit(here.as_ref())
+                .with_active_path(active)
+                .with_language(line_lang.as_ref())
+                .with_ghost_text(ghost_on_line);
+            append(&holder, &renderer.line(row_nodes));
+            Some(holder)
         };
         let finish = |window: &Range<usize>| {
-            self.align_columns(text, window);
+            self.align_columns(text, window, is_markdown);
             self.rebuild_numbers(window, state.modified, state.show_numbers);
             if let Some(doc) = self.overlay.owner_document() {
                 self.draw_overlay(&doc, state);
@@ -362,49 +386,52 @@ impl View {
         };
     }
 
-    fn draw_line(
-        &self,
-        doc: &Document,
-        text: &Text,
-        line: usize,
-        preedit: Option<&Preedit<'_>>,
-        active: Option<&crate::view::row::Path>,
-    ) -> Option<Element> {
-        let holder = element(doc, "div", LINE_CLASS)?;
-        holder.set_attribute(LINE_ATTR, &line.to_string()).ok();
-        let renderer = Renderer::new(doc)
-            .with_preedit(preedit)
-            .with_active_path(active);
-        append(&holder, &renderer.line(text.line(line)));
-        Some(holder)
-    }
-
-    /// 隣接する行の列区切り文字を揃えます。これは、構造内の行になく行にできることの 1 つです。一度に数行行われますが、これは文書だけが持つことです。
-    fn align_columns(&self, text: &Text, window: &Range<usize>) {
+    /// 隣接する行の列区切り文字（タブまたは Markdown のテーブル縦線 '|'）を揃えます。
+    fn align_columns(&self, text: &Text, window: &Range<usize>, is_markdown: bool) {
         let mut line = window.start;
         while line < window.end {
-            if !has_tab(text.line(line)) {
+            let row = text.line(line);
+            let has_t = has_tab(row);
+            let is_tbl = is_markdown && is_markdown_table_line(row);
+            if !has_t && !is_tbl {
                 line += 1;
                 continue;
             }
+            let is_table = is_tbl;
             let mut end = line;
-            while end < window.end && has_tab(text.line(end)) {
+            while end < window.end
+                && (if is_table {
+                    is_markdown_table_line(text.line(end))
+                } else {
+                    has_tab(text.line(end))
+                })
+            {
                 end += 1;
             }
-            self.align_block(line..end);
+            self.align_block(
+                line..end,
+                if is_table {
+                    TABLE_PIPE_CLASS
+                } else {
+                    TAB_CLASS
+                },
+            );
             line = end;
         }
     }
 
-    fn align_block(&self, block: std::ops::Range<usize>) {
+    fn align_block(&self, block: std::ops::Range<usize>, class_name: &'static str) {
+        let is_pipe = class_name == TABLE_PIPE_CLASS;
         let tabs: Vec<Vec<Element>> = block
             .map(|line| match self.line_row(line) {
-                Some(row) => children_of_class(&row, TAB_CLASS),
+                Some(row) => children_of_class(&row, class_name),
                 None => Vec::new(),
             })
             .collect();
         let columns = tabs.iter().map(Vec::len).max().unwrap_or(0);
-        for column in 0..columns {
+        // パイプの場合は、行頭の最初の | (column 0) は広げず、2個目以降 (column 1..columns) を右寄せで揃える
+        let start_col = if is_pipe { 1 } else { 0 };
+        for column in start_col..columns {
             // 一度に 1 列です。列の幅を広げるとその後の列が移動し、測定値もそれに従う必要があるためです。
             let separators: Vec<&Element> =
                 tabs.iter().filter_map(|line| line.get(column)).collect();
@@ -687,6 +714,8 @@ fn set_box(element: &Element, rect: Box2, origin: &web_sys::DomRect) {
     element.set_attribute("style", &style).ok();
 }
 
+const TABLE_PIPE_CLASS: &str = "mn-table-pipe";
+
 pub(super) fn has_tab(nodes: &[Node]) -> bool {
     nodes.iter().any(|node| matches!(node.kind, NodeKind::Tab))
 }
@@ -707,4 +736,65 @@ pub(super) fn element(doc: &Document, tag: &str, class: &str) -> Option<Element>
     let element = doc.create_element(tag).ok()?;
     element.set_class_name(class);
     Some(element)
+}
+
+pub fn is_markdown_table_line(nodes: &[Node]) -> bool {
+    let plain = crate::structure::plain::row(nodes);
+    let trimmed = plain.trim();
+    if trimmed.starts_with('#') || trimmed.starts_with("```") || trimmed.starts_with('`') {
+        return false;
+    }
+    trimmed.starts_with('|') && trimmed.chars().filter(|&c| c == '|').count() >= 2
+}
+
+pub fn embedded_block_lang_for_line(
+    text: &Text,
+    target_line: usize,
+    lang: &crate::syntax::lang::LanguageDef,
+) -> Option<crate::syntax::lang::LanguageDef> {
+    if lang.embedded_languages.is_empty() {
+        return None;
+    }
+    let start_scan = target_line.saturating_sub(1000);
+    for rule in &lang.embedded_languages {
+        let mut in_block = false;
+        let mut inner_lang_name = String::new();
+        for line_idx in start_scan..=target_line {
+            let plain = crate::structure::plain::row(text.line(line_idx));
+            let trimmed = plain.trim();
+            if trimmed.starts_with(&rule.open) {
+                if in_block && rule.open == rule.close {
+                    if line_idx == target_line {
+                        return None; // 終了行自身はルート言語
+                    }
+                    in_block = false;
+                    inner_lang_name.clear();
+                } else {
+                    in_block = true;
+                    if rule.dynamic {
+                        inner_lang_name = trimmed.trim_start_matches(&rule.open).trim().to_string();
+                    } else if let Some(fixed) = &rule.language {
+                        inner_lang_name = fixed.clone();
+                    }
+                    if line_idx == target_line {
+                        return None; // 開始行自身はルート言語
+                    }
+                }
+            } else if in_block && trimmed.starts_with(&rule.close) {
+                if line_idx == target_line {
+                    return None; // 終了行自身はルート言語
+                }
+                in_block = false;
+                inner_lang_name.clear();
+            }
+        }
+        if in_block && !inner_lang_name.is_empty() {
+            if let Some(found) = crate::syntax::for_name(&inner_lang_name)
+                .or_else(|| crate::syntax::for_path(&format!("virtual.{}", inner_lang_name)))
+            {
+                return Some(found);
+            }
+        }
+    }
+    None
 }

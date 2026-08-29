@@ -291,8 +291,9 @@ impl Text {
             for (offset, line) in chunk.iter().enumerate() {
                 let (l, len) = match line {
                     SourceLine::Plain(source) => {
-                        let len = source.chars().count();
-                        (Line::raw(source.clone()), len)
+                        let clean = source.trim_end_matches(['\r', '\n']).to_string();
+                        let len = clean.chars().count();
+                        (Line::raw(clean), len)
                     }
                     SourceLine::Parsed(row) => {
                         let len = row.len();
@@ -565,14 +566,18 @@ impl Text {
         if !matches!(page[offset].as_ref(), Line::Absent) {
             return;
         }
-        let added = match &source {
-            SourceLine::Plain(source) => source.chars().count(),
-            SourceLine::Parsed(row) => row.len(),
+        let (l, added) = match source {
+            SourceLine::Plain(source) => {
+                let clean = source.trim_end_matches(['\r', '\n']).to_string();
+                let len = clean.chars().count();
+                (Line::raw(clean), len)
+            }
+            SourceLine::Parsed(row) => {
+                let len = row.len();
+                (Line::Rows(row), len)
+            }
         };
-        page[offset] = Rc::new(match source {
-            SourceLine::Plain(source) => Line::raw(source),
-            SourceLine::Parsed(row) => Line::Rows(row),
-        });
+        page[offset] = Rc::new(l);
         self.absent = self.absent.saturating_sub(1);
         if let Some(c) = self.total_chars.get() {
             self.total_chars.set(Some(c + added));
@@ -895,7 +900,9 @@ pub fn before_col(at: Pos) -> Option<Pos> {
 }
 
 pub fn nodes_of(text: &str) -> Vec<Row> {
-    text.split('\n')
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    normalized
+        .split('\n')
         .map(|line| line.chars().map(Node::char).collect())
         .collect()
 }

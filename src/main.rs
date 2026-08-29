@@ -4,6 +4,7 @@ mod format;
 mod ipc;
 mod settings;
 mod structure;
+pub mod syntax;
 mod view;
 
 use leptos::prelude::*;

@@ -608,7 +608,7 @@ pub(crate) mod tests {
         );
         editor.insert_text("X");
         assert_eq!(
-            crate::structure::plain::row(&editor.text().line(0).to_vec()),
+            crate::structure::plain::row(editor.text().line(0)),
             "aXbc^n"
         );
     }
@@ -758,6 +758,6 @@ pub(crate) mod tests {
     }
 
     fn plain_line(editor: &Editor, line: usize) -> String {
-        crate::structure::plain::row(&editor.text().line(line).to_vec())
+        crate::structure::plain::row(editor.text().line(line))
     }
 }

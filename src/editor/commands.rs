@@ -70,6 +70,7 @@ pub fn insert_text(session: &Rc<RefCell<Session>>, text: &str) {
 }
 
 fn insert_text_one(session: &Rc<RefCell<Session>>, text: &str) {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
     // 単一の文字で構造を開始することもできます。
     let mut chars = text.chars();
     if let (Some(c), None) = (chars.next(), chars.next()) {
@@ -80,9 +81,9 @@ fn insert_text_one(session: &Rc<RefCell<Session>>, text: &str) {
     // ドキュメントからコピーされた部分は、元の形状で戻ります。それ以外のテキストは、そのままの文字です。
     session
         .borrow_mut()
-        .edit(|editor| match clipboard::pasted(text) {
+        .edit(|editor| match clipboard::pasted(&text) {
             Some(clip) => editor.insert_clip(&clip),
-            None => editor.insert_text(text),
+            None => editor.insert_text(&text),
         });
     changed(session);
 }
@@ -200,9 +201,9 @@ fn far_copy(session: &Session) -> Option<FarCopy> {
         return None;
     }
     // まだ届いていない行の長さは 0 なので、切り出しのある端の行は必ず手元にある。
-    let first = (from.col > 0).then(|| plain::row(&text.line(from.line)[from.col..].to_vec()));
-    let last = (to.col > 0 || !text.is_absent(to.line))
-        .then(|| plain::row(&text.line(to.line)[..to.col].to_vec()));
+    let first = (from.col > 0).then(|| plain::row(&text.line(from.line)[from.col..]));
+    let last =
+        (to.col > 0 || !text.is_absent(to.line)).then(|| plain::row(&text.line(to.line)[..to.col]));
     let mut overrides = Vec::new();
     for line in from.line..=to.line {
         if (line == from.line && first.is_some()) || (line == to.line && last.is_some()) {
@@ -211,7 +212,7 @@ fn far_copy(session: &Session) -> Option<FarCopy> {
         // 手元で編集や解析を経た行は、本体の記法の文字列と同じとは限らないので
         // 読み下したものを添える。素のままの行と届いていない行はそのまま。
         if !text.is_absent(line) && text.raw_line(line).is_none() {
-            overrides.push((line, plain::row(&text.line(line).to_vec())));
+            overrides.push((line, plain::row(text.line(line))));
         }
     }
     Some(FarCopy {

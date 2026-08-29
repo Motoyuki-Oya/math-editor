@@ -1,0 +1,32 @@
+name = "CSS"
+extensions = ["css", "scss", "less"]
+line_comments = ["//"]
+block_comments = [["/*", "*/"]]
+string_delimiters = ["\"", "'"]
+
+keywords = [
+  "@import", "@media", "@keyframes", "@font-face", "@supports", "@charset",
+  "important", "from", "to"
+]
+
+types = [
+  "px", "em", "rem", "vh", "vw", "%", "deg", "s", "ms", "fr", "auto", "none",
+  "inherit", "initial", "unset"
+]
+
+builtins = [
+  "var", "calc", "rgb", "rgba", "hsl", "hsla", "color-mix", "linear-gradient",
+  "radial-gradient", "url", "min", "max", "clamp"
+]
+
+constants = [
+  "display", "position", "top", "right", "bottom", "left", "width", "height",
+  "min-width", "max-width", "min-height", "max-height", "margin", "padding",
+  "border", "background", "color", "font", "font-size", "font-family", "font-weight",
+  "line-height", "text-align", "text-decoration", "flex", "grid", "align-items",
+  "justify-content", "gap", "opacity", "overflow", "z-index", "cursor",
+  "pointer-events", "user-select", "box-sizing", "border-radius", "box-shadow",
+  "transition", "animation", "transform"
+]
+
+operators = [":", ";", "{", "}", ",", ">", "+", "~"]

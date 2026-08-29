@@ -477,6 +477,7 @@ fn read_settings(app: tauri::AppHandle) -> String {
 
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_zoom(1.0);
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
@@ -790,7 +791,10 @@ fn set_dirty(state: State<'_, AppState>, dirty: bool) {
 
 /// `PLANETEXT_STARTUP_LOG` が設定されている場合、プロセスの開始から最初のフロントエンド ペイントまでの時間を報告します。起動コストを監視するために使用されます。
 #[tauri::command]
-fn frontend_ready(state: State<'_, AppState>) {
+fn frontend_ready(app: tauri::AppHandle, state: State<'_, AppState>) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_zoom(1.0);
+    }
     if std::env::var_os("PLANETEXT_STARTUP_LOG").is_some() {
         eprintln!(
             "planetext startup: {} ms",

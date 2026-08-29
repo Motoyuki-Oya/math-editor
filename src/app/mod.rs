@@ -179,6 +179,32 @@ pub fn App() -> impl IntoView {
             },
         );
 
+        let on_wheel = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::WheelEvent)>::new(
+            move |ev: web_sys::WheelEvent| {
+                if ev.ctrl_key() || ev.meta_key() {
+                    ev.prevent_default();
+                }
+            },
+        );
+        window
+            .add_event_listener_with_callback("wheel", on_wheel.as_ref().unchecked_ref())
+            .ok();
+        on_wheel.forget();
+
+        let on_keydown = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
+            move |ev: web_sys::KeyboardEvent| {
+                if (ev.ctrl_key() || ev.meta_key())
+                    && (ev.key() == "=" || ev.key() == "+" || ev.key() == "-" || ev.key() == "0")
+                {
+                    ev.prevent_default();
+                }
+            },
+        );
+        window
+            .add_event_listener_with_callback("keydown", on_keydown.as_ref().unchecked_ref())
+            .ok();
+        on_keydown.forget();
+
         window
             .add_event_listener_with_callback(
                 "pointermove",
@@ -205,6 +231,7 @@ pub fn App() -> impl IntoView {
 
     let encoding_menu = RwSignal::new(None::<(f64, f64)>);
     let line_ending_menu = RwSignal::new(None::<(f64, f64)>);
+    let language_menu = RwSignal::new(None::<(f64, f64)>);
 
     view! {
         <div class="app" on:contextmenu=move |ev| ev.prevent_default()>
@@ -285,6 +312,7 @@ pub fn App() -> impl IntoView {
                         let y = ev.client_y() as f64;
                         line_ending_menu.set(Some((x, y)));
                         encoding_menu.set(None);
+                        language_menu.set(None);
                     }
                 >
                     {move || shell.tab().line_ending.get()}
@@ -297,9 +325,23 @@ pub fn App() -> impl IntoView {
                         let y = ev.client_y() as f64;
                         encoding_menu.set(Some((x, y)));
                         line_ending_menu.set(None);
+                        language_menu.set(None);
                     }
                 >
                     {move || shell.tab().encoding.get()}
+                </span>
+                <span
+                    class="status-clickable"
+                    title="構文モード（言語）を変更"
+                    on:click=move |ev: web_sys::MouseEvent| {
+                        let x = ev.client_x() as f64;
+                        let y = ev.client_y() as f64;
+                        language_menu.set(Some((x, y)));
+                        encoding_menu.set(None);
+                        line_ending_menu.set(None);
+                    }
+                >
+                    {move || shell.tab_language_name()}
                 </span>
                 <span class="status-message">{move || shell.status.get()}</span>
             </div>
@@ -393,6 +435,62 @@ pub fn App() -> impl IntoView {
                                             on:click=move |_| {
                                                 shell.set_line_ending(le_id);
                                                 line_ending_menu.set(None);
+                                            }
+                                        >
+                                            {label}
+                                        </button>
+                                    }
+                                }).collect::<Vec<_>>()}
+                            </div>
+                        </div>
+                    })
+                }}
+            </Show>
+
+            <Show when=move || language_menu.get().is_some()>
+                {move || {
+                    let (x, y) = language_menu.get()?;
+                    let languages = [
+                        ("auto", "自動判定 (拡張子から)"),
+                        ("Plain Text", "Plain Text"),
+                        ("Markdown", "Markdown"),
+                        ("Rust", "Rust"),
+                        ("Kotlin", "Kotlin"),
+                        ("TypeScript", "TypeScript"),
+                        ("JavaScript", "JavaScript"),
+                        ("Python", "Python"),
+                        ("TOML", "TOML"),
+                        ("JSON", "JSON"),
+                        ("HTML", "HTML"),
+                        ("CSS", "CSS"),
+                        ("LaTeX", "LaTeX"),
+                    ];
+                    Some(view! {
+                        <div
+                            class="tab-context-menu-backdrop"
+                            on:mousedown=move |_| language_menu.set(None)
+                            on:contextmenu=move |ev| {
+                                ev.prevent_default();
+                                language_menu.set(None);
+                            }
+                        >
+                            <div
+                                class="tab-context-menu"
+                                style=format!("left: {}px; bottom: {}px; max-height: 360px; overflow-y: auto;", x.max(8.0), (web_sys::window().and_then(|w| w.inner_height().ok()).and_then(|h| h.as_f64()).unwrap_or(600.0) - y + 6.0).max(24.0))
+                                on:mousedown=move |ev| ev.stop_propagation()
+                            >
+                                <div class="status-menu-header">"構文モード（言語）を選択"</div>
+                                {languages.iter().map(|&(lang_id, label)| {
+                                    view! {
+                                        <button
+                                            class="context-menu-item"
+                                            on:click=move |_| {
+                                                if lang_id == "auto" {
+                                                    shell.set_language(None);
+                                                } else {
+                                                    shell.set_language(Some(lang_id));
+                                                }
+                                                language_menu.set(None);
                                             }
                                         >
                                             {label}

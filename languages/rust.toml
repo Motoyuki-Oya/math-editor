@@ -1,0 +1,30 @@
+name = "Rust"
+extensions = ["rs"]
+line_comments = ["//"]
+block_comments = [["/*", "*/"]]
+string_delimiters = ["\"", "r#\""]
+
+keywords = [
+  "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
+  "extern", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move",
+  "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super", "trait",
+  "type", "unsafe", "use", "where", "while", "yield"
+]
+
+types = [
+  "bool", "char", "str", "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32",
+  "i64", "i128", "isize", "f32", "f64", "String", "Vec", "Option", "Result", "Box",
+  "Rc", "Arc", "RefCell", "Mutex"
+]
+
+builtins = [
+  "println", "eprintln", "print", "eprint", "format", "vec", "panic", "assert",
+  "assert_eq", "assert_ne", "todo", "unimplemented", "unreachable", "dbg"
+]
+
+constants = ["true", "false", "Some", "None", "Ok", "Err"]
+
+operators = [
+  "+", "-", "*", "/", "%", "=", "==", "!=", "<", ">", "<=", ">=", "&&", "||", "!", "&",
+  "|", "^", "<<", ">>", "=>", "->", "::"
+]
