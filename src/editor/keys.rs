@@ -45,9 +45,9 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
         return;
     }
 
-    // ゴーストテキストが表示中の場合、Tab または Shift で確定挿入、Escape で消去
+    // ゴーストテキストが表示中の場合、Tab で確定挿入、Escape で消去
     if session::has_ghost_text(&session.borrow()) {
-        if !ctrl && !event.alt_key() && (key == "Tab" || key == "Shift") {
+        if !ctrl && !event.alt_key() && key == "Tab" {
             if session::accept_suggestion(session) {
                 event.prevent_default();
                 return;

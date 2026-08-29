@@ -780,9 +780,7 @@ pub fn embedded_block_lang_for_line(
                         return None; // 開始行自身はルート言語
                     }
                 }
-            } else if in_block
-                && (trimmed.starts_with(&rule.close) || trimmed.contains(&rule.close))
-            {
+            } else if in_block && trimmed.starts_with(&rule.close) {
                 if line_idx == target_line {
                     return None; // 終了行自身はルート言語
                 }

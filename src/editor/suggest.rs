@@ -143,6 +143,26 @@ pub fn is_kanji(c: char) -> bool {
     matches!(c, '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}')
 }
 
+/// キャレット直前が漢字であるか判定（単語の途中は除く）
+pub fn is_kanji_preceding(nodes: &[crate::structure::ast::Node], col: usize) -> bool {
+    let col = col.min(nodes.len());
+    if col == 0 {
+        return false;
+    }
+    if col < nodes.len() {
+        if let crate::structure::ast::NodeKind::Char(c) = nodes[col].kind {
+            if is_kanji(c) {
+                return false;
+            }
+        }
+    }
+    if let crate::structure::ast::NodeKind::Char(c) = nodes[col - 1].kind {
+        is_kanji(c)
+    } else {
+        false
+    }
+}
+
 pub const COMMON_RUBY_DICT: &[(&str, &str)] = &[
     ("機能一覧", "きのういちらん"),
     ("日本語", "にほんご"),

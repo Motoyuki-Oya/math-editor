@@ -136,7 +136,10 @@ fn token_kind_at(
     index: usize,
 ) -> Option<crate::syntax::TokenKind> {
     for span in spans {
-        if index >= span.start && index < span.end {
+        if index < span.start {
+            break;
+        }
+        if index < span.end {
             return Some(span.kind);
         }
     }

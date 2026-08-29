@@ -602,25 +602,46 @@ pub fn update_ghost_text(session: &mut Session) {
     let doc = session.document.borrow();
     let line_row = doc.text().line(pos.line).to_vec();
     let plain_line = crate::structure::plain::row(&line_row);
+
+    let prefix = super::suggest::extract_prefix(&plain_line, pos.col);
+    let has_kanji = super::suggest::is_kanji_preceding(&line_row, pos.col);
+
+    if prefix.is_none() && !has_kanji {
+        session.ghost = None;
+        return;
+    }
+
     let path = doc_path(session.doc_id);
     let mut lang = path.as_deref().and_then(crate::syntax::for_path);
     if lang.as_ref().is_some_and(|l| l.name == "Markdown") {
         if let Some(Some(name)) = super::suggest::markdown_code_block_lang(doc.text(), pos.line) {
-            if let Some(resolved) = crate::syntax::for_name(&name) {
+            if let Some(resolved) = crate::syntax::for_name(&name)
+                .or_else(|| crate::syntax::for_path(&format!("virtual.{name}")))
+            {
                 lang = Some(resolved);
             }
         }
     }
-    let buffer_words = super::suggest::collect_buffer_words(doc.text(), 300);
-    let buffer_rubies = super::suggest::collect_buffer_rubies(doc.text(), 300);
+
+    let buffer_words = if prefix.is_some() {
+        Some(super::suggest::collect_buffer_words(doc.text(), 300))
+    } else {
+        None
+    };
+    let buffer_rubies = if has_kanji {
+        Some(super::suggest::collect_buffer_rubies(doc.text(), 300))
+    } else {
+        None
+    };
+
     session.ghost = super::suggest::find_suggestion(
         pos.line,
         pos.col,
         &line_row,
         &plain_line,
         lang.as_ref(),
-        Some(&buffer_words),
-        Some(&buffer_rubies),
+        buffer_words.as_ref(),
+        buffer_rubies.as_ref(),
     );
 }
 
