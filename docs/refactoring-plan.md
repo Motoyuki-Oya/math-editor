@@ -3,6 +3,15 @@
 この文書は、設計点検でAsIsとのギャップが確認され、リファクタリング対象として
 合意された項目だけを記録する。ToBeの規範は`docs/architecture.md`に記載する。
 
+## 現在のディレクトリと役割
+
+| 場所 | 役割 |
+| --- | --- |
+| `crates/planetext-ui/` | 画面・編集を行う WebView 側 Application |
+| `crates/planetext-ui/src/framework/` | WebView 側の GUI フレームワーク接続コード |
+| `src-tauri/` | Tauri 接続コードと起動処理 |
+| `crates/planetext-document/` | 文書の本体を扱う文書エンジン |
+
 ## 現在確定している対象
 
 ### GUIフレームワークとアプリケーションの分離
@@ -35,7 +44,7 @@ GUIフレームワーク接続として残すもの:
 
 - Tauri Builderとplugin登録
 - Window eventの受信とwindow操作
-- native menu
+- OS menu
 - tray
 - file / save / confirm dialog
 - global shortcut
@@ -58,30 +67,30 @@ GUIフレームワーク接続として残すもの:
 - draftの内容と保存判断
 - settingsの内容と適用判断
 
-### `src-tauri/src/store.rs`
+### `crates/planetext-document/src/store.rs`
 
-Tauri APIへ直接依存していないが、Tauri用crateの内部に置かれている。
-GUIフレームワーク非依存のネイティブアプリケーションとして分離する対象とする。
-中のアルゴリズムを変更することは、この分離作業の目的ではない。
+GUIフレームワーク非依存の文書エンジンであり、文書の本体・行読み・編集・検索・保存を
+担当する。Phase 1 で `src-tauri` から移動済みで、今回の配置変更では中のアルゴリズムを
+変更しない。
 
 ### `src-tauri/src/menu.rs`
 
-native menuを構築し、選択イベントをアプリケーションへ渡す処理なので、基本的に
+OS menuを構築し、選択イベントをアプリケーションへ渡す処理なので、基本的に
 GUIフレームワーク接続コードとして残す。
 メニュー項目が実行する機能判断はアプリケーション側に置く。
 
-### `src/ipc.rs`
+### `crates/planetext-ui/src/framework/tauri.rs`
 
 現在は次が一つのモジュールに混在している。
 
 - Tauriの`invoke` / `listen`
-- native GUI呼び出し
+- OS GUI呼び出し
 - Document操作
 - 検索
 - draft
 - settings
 
-Tauriの`invoke` / `listen`とnative GUI呼び出しは、WebView側のGUIフレームワーク
+Tauriの`invoke` / `listen`とOS GUI呼び出しは、WebView側のGUIフレームワーク
 接続コードとして分離する。
 Document操作等はアプリケーションのAPIとして扱い、アプリケーションの各所に
 Tauri command名や`window.__TAURI__`を見せない。
@@ -91,7 +100,7 @@ Tauri command名や`window.__TAURI__`を見せない。
 - ファイル選択ダイアログ
 - 保存先ダイアログ
 - 確認ダイアログ
-- native menu
+- OS menu
 - tray
 - global shortcut
 - windowの表示・非表示・focus
@@ -112,13 +121,13 @@ Tauri command名や`window.__TAURI__`を見せない。
 - clipboard
 - 行数走査
 
-ネイティブで動作するという理由だけではGUIフレームワークの責務にしない。
+OS上で動作するという理由だけではGUIフレームワークの責務にしない。
 
 ## 文書ストア(最下層ストレージ)
 
-ToBe は `docs/architecture.md` の「文書ストア(ネイティブ側の最下層)」を参照。
+ToBe は `docs/architecture.md` の「文書ストア(文書エンジン側の最下層)」を参照。
 
-### AsIs とのギャップ(`src-tauri/src/store.rs`)
+### AsIs とのギャップ(`crates/planetext-document/src/store.rs`)
 
 - `Vec<Piece>` の線形走査 → ピースツリー(行数・バイト長を持つ平衡木)へ置き換える。
 - `Piece::Fresh(Vec<String>)` が行の実体を直接持つ → 編集バッファ参照へ置き換える。
@@ -190,13 +199,13 @@ ToBe は `docs/architecture.md` の「MVC(1つのファイルモデルと複数�
 
 ## 全体点検で確認したその他の対象
 
-### `src/app/sync.rs` の同期キュー
+### `crates/planetext-ui/src/app/sync.rs` の同期キュー
 
-現在はタブごとのキューで native と同期している。合意した設計では
+現在はタブごとのキューで文書エンジンと同期している。合意した設計では
 「操作ログ + revision 通知」がこの役割を吸収するため、sync.rs のキュー方式は
 その実装に合わせて置き換える。
 
-### `src/app/shell.rs` の責務混在
+### `crates/planetext-ui/src/app/shell.rs` の責務混在
 
 タブ・ペイン管理、ファイル手続き、IPC 呼び出し、画面組み立てが 1 ファイル
 (1,000 行超)に同居している。MVC の所有関係整理(ファイルモデル・スライス・View)
@@ -240,22 +249,23 @@ ToBe は `docs/architecture.md` の「入力規則は深さで変えない」を
 
 ### Phase 1: フレームワーク分離(挙動不変)
 
-1. WebView 側: `src/ipc.rs` を「Tauri 接続コード(invoke / listen のみ)」と
+1. WebView 側: `crates/planetext-ui/src/framework/tauri.rs` を「Tauri 接続コード(invoke / listen のみ)」と
    「アプリケーション API」に分離し、`app` 各所から command 名と
-   `window.__TAURI__` を隠す。
-2. ネイティブ側: `store.rs` 等を Tauri 非依存の module/crate へ移し、`lib.rs` の
-   アプリケーションロジックを分離。`#[tauri::command]` は変換だけの薄い層にする。
+   `window.__TAURI__` を隠す(完了)。
+2. 文書エンジン側: `crates/planetext-document/src/store.rs` 等を Tauri 非依存の
+   crate へ移し、`src-tauri/src/lib.rs` のアプリケーションロジックを分離。
+   `#[tauri::command]` は変換だけの薄い層にする(完了)。
 3. `GuiFramework` API + `GuiEvent` を導入し、dialog・menu・tray・shortcut・
-   window 操作を接続コード経由にする。`menu.rs` は接続コードとして整理する。
+   window 操作を接続コード経由にする。`menu.rs` は接続コードとして整理する(完了)。
 
 チェック項目:
 
-- [ ] アプリケーションコードに Tauri の型・command 名・`window.__TAURI__` が
+- [x] アプリケーションコードに Tauri の型・command 名・`window.__TAURI__` が
       残っていない(接続コードだけが知る)
-- [ ] 接続コードにエディタ機能・文書状態・保存判断が入っていない(変換と
+- [x] 接続コードにエディタ機能・文書状態・保存判断が入っていない(変換と
       dispatch のみ)
-- [ ] `GuiFramework` にネイティブ UI とウィンドウ管理以外の機能を足していない
-- [ ] 挙動が一切変わっていない(機能追加・修正を混ぜていない)
+- [x] `GuiFramework` に OS UI とウィンドウ管理以外の機能を足していない
+- [x] 挙動が一切変わっていない(機能追加・修正を混ぜていない)
 
 ### Phase 2: 入力規則統一(モデル層のみで完結)
 
@@ -317,17 +327,15 @@ ToBe は `docs/architecture.md` の「入力規則は深さで変えない」を
 - [ ] 1 コミット 1 意味単位を守っている
 - [ ] 修正対象は実環境(GUI / WebView)で確認している
 
-## 実装前に確定が必要な事項
+## 今後の詳細設計で確定が必要な事項
 
-- `GuiFramework` APIの正確なメソッドとデータ型
-- GUIフレームワークからApplicationへ通知するイベント型
-- Applicationの公開入口
-- WebView側接続コードの配置
-- ネイティブアプリケーションのcrateまたはmodule境界
-- Tauri接続コードに残す初期化と終了処理
-- raw Wry / GPUIで提供できない機能の扱い
+- raw Wry / GPUI を選択した場合の接続コード実装と、提供できない機能の扱い
+- `GuiFramework` APIを拡張する場合のメソッドとデータ型
+- GUIフレームワークからApplicationへ通知するイベントを追加する場合の型
+- 文書エンジンと WebView 側 Application の間の公開APIの拡張
 
-これらが設計資料で確定するまで、実装コードの移動やリファクタリングは開始しない。
+Phase 1 でディレクトリ境界と現在の Tauri 接続コードの位置は確定した。次の Phase の
+実装は、この境界を変えずに行う。
 
 ## 現時点で対象に含めないもの
 

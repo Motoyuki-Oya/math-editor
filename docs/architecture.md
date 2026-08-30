@@ -29,6 +29,31 @@ flowchart LR
     Connector <--> Application
 ```
 
+実際のディレクトリとの対応は次の通りとする。現在選択している GUI フレームワークは
+Tauri であり、Wry や GPUI はこの位置に入る代替実装である。
+
+```mermaid
+flowchart LR
+    UI[画面・編集<br/>crates/planetext-ui]
+    WebConnector[WebView側接続コード<br/>crates/planetext-ui/src/framework]
+    Tauri[Tauri<br/>選択中のGUIフレームワーク]
+    TauriConnector[Tauri接続コード<br/>src-tauri]
+    Document[文書の本体<br/>crates/planetext-document]
+
+    UI <--> WebConnector
+    WebConnector <--> Tauri
+    Tauri <--> TauriConnector
+    TauriConnector <--> Document
+```
+
+| 場所 | 図の役割 |
+| --- | --- |
+| `crates/planetext-ui/` | Planetext Application の画面・編集(WebView側) |
+| `crates/planetext-ui/src/framework/` | GUIフレームワーク接続コード(WebView側) |
+| `src-tauri/` | GUIフレームワーク接続コード(OS側)と起動処理 |
+| `crates/planetext-document/` | 文書の本体。保存・検索・下書き・設定を扱う |
+| `src-tauri/src/platform.rs` | OS clipboard の platform adapter |
+
 依存関係は次の通りとする。
 
 ```mermaid
@@ -51,7 +76,7 @@ flowchart TB
 
 ### GUIフレームワークAPI
 
-抽象化するのは、アプリケーションからネイティブUIを呼び出す少数の機能だけとする。
+抽象化するのは、アプリケーションからOS UIを呼び出す少数の機能だけとする。
 文書操作、検索、保存処理、編集処理をGUIフレームワークAPIへ含めない。
 
 ```rust
@@ -73,7 +98,7 @@ trait GuiFramework {
 ```
 
 これは概念上のAPIであり、Rustのtrait構文やasyncの実装方法は詳細設計時に確定する。
-機能を増やす場合も、ネイティブUIまたはウィンドウ管理に該当するかを確認する。
+機能を増やす場合も、OS UIまたはウィンドウ管理に該当するかを確認する。
 
 フレームワークからアプリケーションへ届く通知も少数の共通イベントへ変換する。
 
@@ -93,7 +118,7 @@ enum GuiEvent {
 - アプリケーションはどの実装が選択されているかを知らない。
 
 設定ディレクトリ、文書ファイルI/O、Document Store、検索job、clipboard等は、必要なら
-別の責務として扱う。ネイティブで動くという理由だけで`GuiFramework`へ入れない。
+別の責務として扱う。OS上で動くという理由だけで`GuiFramework`へ入れない。
 
 ### WebView の位置付け
 
@@ -111,7 +136,7 @@ WebView への依存はアプリケーション内にあってよい。Planetext
 
 ---
 
-**文書の本体はGUIフレームワーク接続コードではなく、ネイティブ側のアプリケーションにある。**
+**文書の本体はGUIフレームワーク接続コードではなく、文書エンジン(`crates/planetext-document`)にある。**
 本体(ファイルモデル)は内容・操作ログ・保存・走査を持つ。webview 側が持つのは
 見えている窓の写し(スライス)で、行は見えた場所から取り寄せられ、まだ届いて
 いない行は空に見える(`docs/large-files.md`)。編集は手元のスライスへ同期的に
@@ -135,7 +160,7 @@ flowchart TB
     View[view<br/>表示]
     Editor[editor<br/>操作]
     App[application<br/>画面の組み立て・ファイル手続き]
-    Native[ネイティブアプリケーション<br/>文書本体]
+    DocumentEngine[文書エンジン<br/>crates/planetext-document]
 
     Format --> Structure
     View --> Structure
@@ -143,7 +168,7 @@ flowchart TB
     Editor --> Format
     Editor --> View
     App --> Editor
-    App --> Native
+    App --> DocumentEngine
 ```
 
 各層が何であって、何に依存してはいけないか。中身（どのファイルが何をするか）は
@@ -155,11 +180,11 @@ flowchart TB
 | `format` | ファイルの読み書き。記法を知る唯一の層 | `structure` |
 | `view` | 意味を画面に描き、描いたものを測る | `structure` |
 | `editor` | 操作。カーソル・選択・入力・IME・検索・クリップボード | 上のすべて |
-| application | 画面の組み立て、タブとペイン、ファイル手続き、本体との同期 | `editor`、ネイティブアプリケーション |
-| ネイティブアプリケーション | 文書の本体、行・履歴・保存・走査 | GUIフレームワークを知らない |
-| GUIフレームワーク接続コード | ネイティブUIとアプリケーションの相互変換 | 選択したGUIフレームワーク、アプリケーションの公開API |
+| application (`crates/planetext-ui`) | 画面の組み立て、タブとペイン、ファイル手続き、本体との同期 | `editor`、文書エンジン |
+| 文書エンジン (`crates/planetext-document`) | 文書の本体、行・履歴・保存・走査 | GUIフレームワークを知らない |
+| GUIフレームワーク接続コード | WebViewまたはOSのGUIとApplicationの相互変換 | 選択したGUIフレームワーク、Applicationの公開API |
 
-ネイティブ側は記法の意味を知らない。`$` が特別なのは format 層だけの知識で、
+文書エンジンは記法の意味を知らない。`$` が特別なのは format 層だけの知識で、
 本体の走査は「この文字を含む行は読み替えが要る」と教わって印を返すだけ、
 記法を含む行の検索や読み下しは webview 側が行う。
 
@@ -177,7 +202,7 @@ flowchart TB
 
 ## この分離を壊さないための仕掛け
 
-`tests/layering.rs` がソースを読んで、次を機械的に落とす。
+`crates/planetext-ui/tests/layering.rs` がソースを読んで、次を機械的に落とす。
 
 - `structure` が `view` / `editor` / DOM に触れている
 - `format` が `view` / `editor` / DOM に触れている
@@ -188,7 +213,7 @@ flowchart TB
 例外は 1 つだけで、`structure` の**テストのフィクスチャ**は記法で書いてよい
 （構造をベタ書きするより読みやすいため）。製品コードでは禁止。
 
-## 文書ストア(ネイティブ側の最下層)
+## 文書ストア(文書エンジンの最下層)
 
 本文はメモリに置かず、**seek による部分読みを基盤とする**。走査完了前でも EOF から
 tail を読めることを常に保証する。mmap は同じ読み出し界面の内部的な最適化オプション
@@ -296,7 +321,7 @@ flowchart TB
 MVC の原則どおり、1 つの Model に複数の View/Controller が付く。モデルは 3 層に
 分かれるが、ファイルの真実は常に 1 つとする。
 
-- **ファイルモデル**: 1 ファイルに 1 つ(ネイティブ側の文書本体)。内容、操作ログ
+- **ファイルモデル**: 1 ファイルに 1 つ(文書エンジン側の文書本体)。内容、操作ログ
   (revision)、dirty 判定、保存はここだけが持つ。
 - **文書モデル**: webview 側に doc_id ごとに 1 つ。内容を持たない。既知の
   revision、送信待ちの操作列、参加スライスの台帳だけを持ち、同じ文書の全スライス
@@ -313,7 +338,7 @@ MVC の原則どおり、1 つの Model に複数の View/Controller が付く�
 
 ```mermaid
 flowchart TB
-    File[ファイルモデル: native、1ファイルに1つ<br/>内容・操作ログ・dirty・保存]
+    File[ファイルモデル: 文書エンジン側、1ファイルに1つ<br/>内容・操作ログ・dirty・保存]
     Doc[文書モデル: doc_idごとに1つ<br/>内容なし。revision・送信列・スライス台帳]
     S1[スライスモデル: ビューAの窓<br/>写し+編集操作・カーソル]
     S2[スライスモデル: ビューBの窓<br/>写し+編集操作・カーソル]

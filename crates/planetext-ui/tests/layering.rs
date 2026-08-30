@@ -191,16 +191,17 @@ fn framework_specific_apis_stop_at_the_connectors() {
         }
     }
 
-    let core = root.join("../planetext-document");
-    let manifest = fs::read_to_string(core.join("Cargo.toml")).expect("the core manifest");
+    let document = root.join("../planetext-document");
+    let manifest =
+        fs::read_to_string(document.join("Cargo.toml")).expect("the document manifest");
     for name in ["tauri", "wry", "gpui", "arboard", "tokio"] {
         assert!(
             !manifest.to_ascii_lowercase().contains(name),
             "planetext-document depends on {name}",
         );
     }
-    for file in sources(&core.join("src")) {
-        let source = fs::read_to_string(&file).expect("a core source file");
+    for file in sources(&document.join("src")) {
+        let source = fs::read_to_string(&file).expect("a document source file");
         for name in ["tauri", "wry", "gpui", "arboard", "tokio"] {
             assert!(
                 !without_comments(&source)

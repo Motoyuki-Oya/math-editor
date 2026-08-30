@@ -1,3 +1,5 @@
+//! Tauri接続コード(OS側)。変換とdispatchのみ。
+
 mod menu;
 mod platform;
 

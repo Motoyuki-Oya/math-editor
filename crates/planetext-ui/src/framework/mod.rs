@@ -1,3 +1,5 @@
+//! WebView側接続コードの共通界面。Tauriの詳細はtauri.rsだけが知る。
+
 mod tauri;
 
 pub(crate) use tauri::{

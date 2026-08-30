@@ -1,3 +1,5 @@
+//! 文書エンジン。GUIフレームワークを知らない。
+
 mod store;
 
 use std::collections::HashMap;
