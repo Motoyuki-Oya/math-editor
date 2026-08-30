@@ -192,8 +192,7 @@ fn framework_specific_apis_stop_at_the_connectors() {
     }
 
     let document = root.join("../planetext-document");
-    let manifest =
-        fs::read_to_string(document.join("Cargo.toml")).expect("the document manifest");
+    let manifest = fs::read_to_string(document.join("Cargo.toml")).expect("the document manifest");
     for name in ["tauri", "wry", "gpui", "arboard", "tokio"] {
         assert!(
             !manifest.to_ascii_lowercase().contains(name),
