@@ -146,6 +146,29 @@ fn token_kind_at(
     None
 }
 
+fn token_spans(
+    cells: &[Cell<'_>],
+    language: Option<&crate::syntax::lang::LanguageDef>,
+    nested: bool,
+) -> Vec<crate::syntax::TokenSpan> {
+    if nested {
+        return Vec::new();
+    }
+    language
+        .map(|lang| crate::syntax::tokenize_line(&cells_to_plain(cells), lang))
+        .unwrap_or_default()
+}
+
+fn cell_token_kind(
+    spans: &[crate::syntax::TokenSpan],
+    cell: &Cell<'_>,
+    index: usize,
+) -> Option<crate::syntax::TokenKind> {
+    (!matches!(cell, Cell::Node(_)))
+        .then(|| token_kind_at(spans, index))
+        .flatten()
+}
+
 impl<'a> Renderer<'a> {
     pub fn new(doc: &'a Document) -> Renderer<'a> {
         Renderer {
@@ -199,13 +222,7 @@ impl<'a> Renderer<'a> {
             container.append_child(&self.empty(nested)).ok();
         }
 
-        let token_spans = self
-            .language
-            .map(|lang| {
-                let plain = cells_to_plain(cells);
-                crate::syntax::tokenize_line(&plain, lang)
-            })
-            .unwrap_or_default();
+        let token_spans = token_spans(cells, self.language, nested);
 
         let is_table_row = path.is_empty()
             && self.language.is_some_and(|l| l.name == "Markdown")
@@ -226,7 +243,7 @@ impl<'a> Renderer<'a> {
                 }
             }
 
-            let kind = token_kind_at(&token_spans, index);
+            let kind = cell_token_kind(&token_spans, cell, index);
 
             match cell {
                 Cell::Char('|') if is_table_row => {
@@ -845,6 +862,27 @@ mod tests {
         );
         let nested_scale = limit_font * SCRIPT_SCALE;
         assert!(stack_axis_shift(&plain, &Between::Rule, nested_scale) < limit_font);
+    }
+
+    #[test]
+    fn nested_rows_and_structure_nodes_do_not_inherit_document_tokens() {
+        let language = crate::syntax::for_path("sample.rs").expect("Rust language");
+        let number_row = vec![Node::char('1')];
+        let number_cells = cells_of_row(&number_row);
+        assert_eq!(
+            token_spans(&number_cells, Some(&language), false)[0].kind,
+            crate::syntax::TokenKind::Number
+        );
+        assert!(token_spans(&number_cells, Some(&language), true).is_empty());
+
+        let structure_row = vec![Node::sqrt(None, vec![Node::char('1')])];
+        let structure_cells = cells_of_row(&structure_row);
+        let inherited = crate::syntax::TokenSpan {
+            start: 0,
+            end: 1,
+            kind: crate::syntax::TokenKind::Number,
+        };
+        assert_eq!(cell_token_kind(&[inherited], &structure_cells[0], 0), None);
     }
 
     #[test]

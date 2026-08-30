@@ -1013,6 +1013,10 @@ body {
   display: inline;
 }
 
+.mn-row[data-path]:not([data-path=""]) {
+  color: var(--fg);
+}
+
 .mn-placeholder {
   display: inline-block;
   width: 0.55em;
