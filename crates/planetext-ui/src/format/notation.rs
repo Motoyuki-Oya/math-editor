@@ -348,13 +348,9 @@ fn node_at(chars: &[char], i: usize) -> Option<(Node, usize)> {
         let inner = content(&chars[i + 2..end]);
         let node = match inner.len() {
             1 => inner.into_iter().next()?,
-            _ => Node::group(Delim::Paren, inner),
+            _ => Node::container(inner),
         };
         return Some((node, end + 1));
-    }
-    if c == '(' {
-        let end = closing(chars, i)?;
-        return Some((Node::group(Delim::Paren, row(&chars[i + 1..end])), end + 1));
     }
     if c == '[' {
         let end = closing(chars, i)?;
@@ -430,9 +426,13 @@ fn text(row: &Row) -> String {
 
 /// A
 fn bare(node: &Node) -> String {
-    if !node.upper.is_empty() || !node.lower.is_empty() {
+    if matches!(&node.kind, NodeKind::BigOp(_) | NodeKind::Container(_))
+        || !node.upper.is_empty()
+        || !node.lower.is_empty()
+    {
         let base = match &node.kind {
             NodeKind::Container(body) => text(body),
+            NodeKind::BigOp(name) => name.clone(),
             _ => {
                 let mut base = node.clone();
                 base.upper.clear();
@@ -485,9 +485,60 @@ fn bare(node: &Node) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::structure::ast;
 
     fn roundtrip(src: &str) -> String {
         island_text(&parse_island(src))
+    }
+
+    fn assert_model_roundtrip(row: Row) {
+        let written = island_text(&row);
+        assert_eq!(parse_island(&written), row, "written as {written:?}");
+    }
+
+    #[test]
+    fn every_editable_structure_survives_the_notation_roundtrip() {
+        let nested = vec![Node::sqrt(
+            None,
+            vec![Node::char('x'), Node::char('+'), Node::char('1')],
+        )];
+        let mut annotated = Node::container(vec![Node::char('a'), Node::char('b')]);
+        annotated.upper = vec![Node::char('u')];
+        let rows = [
+            vec![Node::stack(nested.clone(), vec![Node::char('2')], Between::Rule)],
+            vec![Node::stack(
+                vec![Node::char('a')],
+                vec![Node::char('b')],
+                Between::Nothing,
+            )],
+            vec![Node::stack(
+                vec![Node::char('a')],
+                vec![Node::char('b')],
+                Between::Arrow('→'),
+            )],
+            nested,
+            vec![Node::sqrt(Some(vec![Node::char('3')]), vec![Node::char('x')])],
+            vec![Node::sup(vec![Node::char('n')])],
+            vec![Node::sub(vec![Node::char('i')])],
+            vec![Node::big_op("∑".into())],
+            vec![annotated],
+            vec![ast::matrix(MatrixKind::Grid, 2, 2)],
+            vec![ast::matrix(MatrixKind::Cases, 2, 1)],
+        ];
+        for row in rows {
+            assert_model_roundtrip(row);
+        }
+    }
+
+    #[test]
+    fn ordinary_parentheses_stay_characters() {
+        assert_model_roundtrip("a(x+1)b".chars().map(Node::char).collect());
+    }
+
+    #[test]
+    fn multiple_nodes_inside_an_island_use_an_invisible_container() {
+        let source = vec![Node::container(vec![Node::char('a'), Node::char('b')])];
+        assert_model_roundtrip(source);
     }
 
     #[test]
@@ -561,12 +612,15 @@ mod tests {
     }
 
     #[test]
-    fn a_bracketed_chunk_goes_under_the_root_whole() {
+    fn ordinary_parentheses_stay_in_the_root_body() {
         match parse_island("√ (x+1)").as_slice() {
             [Node {
                 kind: NodeKind::Sqrt { body, .. },
                 ..
-            }] => assert_eq!(body.len(), 1),
+            }] => assert_eq!(
+                body,
+                &"(x+1)".chars().map(Node::char).collect::<Vec<_>>()
+            ),
             other => panic!("unexpected {other:?}"),
         }
     }
