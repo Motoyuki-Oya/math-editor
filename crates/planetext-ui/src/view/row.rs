@@ -108,7 +108,6 @@ fn run_class_for(kind: Option<crate::syntax::TokenKind>) -> &'static str {
         Some(crate::syntax::TokenKind::Keyword) => "mn-run mn-syn-keyword",
         Some(crate::syntax::TokenKind::Type) => "mn-run mn-syn-type",
         Some(crate::syntax::TokenKind::String) => "mn-run mn-syn-string",
-        Some(crate::syntax::TokenKind::Number) => "mn-run mn-syn-number",
         Some(crate::syntax::TokenKind::Comment) => "mn-run mn-syn-comment",
         Some(crate::syntax::TokenKind::Builtin) => "mn-run mn-syn-builtin",
         Some(crate::syntax::TokenKind::Constant) => "mn-run mn-syn-constant",
@@ -125,7 +124,7 @@ fn cells_to_plain(cells: &[Cell<'_>]) -> String {
             Cell::Space => s.push(' '),
             Cell::ZenkakuSpace => s.push('\u{3000}'),
             Cell::Tab => s.push('\t'),
-            Cell::Node(_) => s.push(' '),
+            Cell::Node(_) => s.push('\u{fffc}'),
         }
     }
     s
@@ -157,16 +156,6 @@ fn token_spans(
     language
         .map(|lang| crate::syntax::tokenize_line(&cells_to_plain(cells), lang))
         .unwrap_or_default()
-}
-
-fn cell_token_kind(
-    spans: &[crate::syntax::TokenSpan],
-    cell: &Cell<'_>,
-    index: usize,
-) -> Option<crate::syntax::TokenKind> {
-    (!matches!(cell, Cell::Node(_)))
-        .then(|| token_kind_at(spans, index))
-        .flatten()
 }
 
 impl<'a> Renderer<'a> {
@@ -243,7 +232,7 @@ impl<'a> Renderer<'a> {
                 }
             }
 
-            let kind = cell_token_kind(&token_spans, cell, index);
+            let kind = token_kind_at(&token_spans, index);
 
             match cell {
                 Cell::Char('|') if is_table_row => {
@@ -403,7 +392,7 @@ impl<'a> Renderer<'a> {
                 frac.append_child(&num).ok();
                 match between {
                     Between::Rule => frac
-                        .append_child(&self.el("span", "mn-frac-rule mn-syn-operator"))
+                        .append_child(&self.el("span", "mn-frac-rule"))
                         .ok(),
                     Between::Arrow(arrow) => frac.append_child(&self.arrow(*arrow)).ok(),
                     Between::Nothing => None,
@@ -429,7 +418,7 @@ impl<'a> Renderer<'a> {
                 }
                 // 記号は本体の上に配置され、テキスト内に本体が残ります。つまり、ルートはその周囲にあるものと同じベースライン上にあります。キック、下降、および長い上昇ストローク。直立ではなく傾斜しています。この傾斜により、記号は括弧ではなく部首として読み取られます。
                 sqrt.append_child(&self.svg(
-                    "mn-radical mn-syn-operator",
+                    "mn-radical",
                     "0 0 26 100",
                     "M0 58 L5 60 L11 96 L25 3",
                 ))
@@ -464,9 +453,9 @@ impl<'a> Renderer<'a> {
             }
             NodeKind::BigOp(glyph) => {
                 let class = if glyph.chars().count() > 1 {
-                    "mn-bigop-symbol mn-bigop-word mn-syn-operator"
+                    "mn-bigop-symbol mn-bigop-word"
                 } else {
-                    "mn-bigop-symbol mn-syn-operator"
+                    "mn-bigop-symbol"
                 };
                 self.span(class, glyph)
             }
@@ -507,21 +496,6 @@ impl<'a> Renderer<'a> {
             }
         };
 
-        if let Some(k) = kind {
-            let syn_class = match k {
-                crate::syntax::TokenKind::Keyword => "mn-syn-keyword",
-                crate::syntax::TokenKind::Type => "mn-syn-type",
-                crate::syntax::TokenKind::String => "mn-syn-string",
-                crate::syntax::TokenKind::Number => "mn-syn-number",
-                crate::syntax::TokenKind::Comment => "mn-syn-comment",
-                crate::syntax::TokenKind::Builtin => "mn-syn-builtin",
-                crate::syntax::TokenKind::Constant => "mn-syn-constant",
-                crate::syntax::TokenKind::Operator => "mn-syn-operator",
-                crate::syntax::TokenKind::Punctuation => "mn-syn-punct",
-            };
-            base.class_list().add_1(syn_class).ok();
-        }
-
         let lower_slot = node.lower_slot();
         let upper_slot = node.upper_slot();
         let is_active = |slot| {
@@ -535,6 +509,7 @@ impl<'a> Renderer<'a> {
             if matches!(&node.kind, NodeKind::BigOp(_)) {
                 base.class_list().add_1("mn-bigop").ok();
             }
+            self.apply_token_class(&base, kind);
             return base;
         }
         if matches!(&node.kind, NodeKind::BigOp(_)) {
@@ -566,6 +541,7 @@ impl<'a> Renderer<'a> {
                     .ok();
                 container.append_child(&lower).ok();
             }
+            self.apply_token_class(&container, kind);
             return container;
         }
         let container = self.el("span", "mn-annotated");
@@ -596,12 +572,28 @@ impl<'a> Renderer<'a> {
                 .ok();
             container.append_child(&lower).ok();
         }
+        self.apply_token_class(&container, kind);
         container
+    }
+
+    fn apply_token_class(&self, element: &Element, kind: Option<crate::syntax::TokenKind>) {
+        let Some(kind) = kind else { return };
+        let class = match kind {
+            crate::syntax::TokenKind::Keyword => "mn-syn-keyword",
+            crate::syntax::TokenKind::Type => "mn-syn-type",
+            crate::syntax::TokenKind::String => "mn-syn-string",
+            crate::syntax::TokenKind::Comment => "mn-syn-comment",
+            crate::syntax::TokenKind::Builtin => "mn-syn-builtin",
+            crate::syntax::TokenKind::Constant => "mn-syn-constant",
+            crate::syntax::TokenKind::Operator => "mn-syn-operator",
+            crate::syntax::TokenKind::Punctuation => "mn-syn-punct",
+        };
+        element.class_list().add_1(class).ok();
     }
 
     /// スタックの 2 行間の矢印。シャフトは柔軟な線なので、ルールと同様に、矢印は幅の広い行と同じ幅になります。
     fn arrow(&self, arrow: char) -> Element {
-        let holder = self.el("span", "mn-arrow mn-syn-operator");
+        let holder = self.el("span", "mn-arrow");
         let shaft = || self.el("span", "mn-arrow-shaft");
         let glyph = self.span("mn-arrow-head", &arrow.to_string());
         match arrow {
@@ -658,7 +650,7 @@ impl<'a> Renderer<'a> {
         } else {
             "mn-delim-close"
         };
-        self.svg(&format!("mn-delim mn-syn-punct {side}"), view_box, path)
+        self.svg(&format!("mn-delim {side}"), view_box, path)
     }
 
     fn el(&self, tag: &str, class: &str) -> Element {
@@ -865,24 +857,38 @@ mod tests {
     }
 
     #[test]
-    fn nested_rows_and_structure_nodes_do_not_inherit_document_tokens() {
+    fn nested_rows_inherit_the_outer_token_without_being_reparsed() {
         let language = crate::syntax::for_path("sample.rs").expect("Rust language");
-        let number_row = vec![Node::char('1')];
-        let number_cells = cells_of_row(&number_row);
-        assert_eq!(
-            token_spans(&number_cells, Some(&language), false)[0].kind,
-            crate::syntax::TokenKind::Number
-        );
-        assert!(token_spans(&number_cells, Some(&language), true).is_empty());
+        let keyword_row: Row = "let".chars().map(Node::char).collect();
+        let keyword_cells = cells_of_row(&keyword_row);
+        let outer = token_spans(&keyword_cells, Some(&language), false);
+        assert_eq!(outer[0].kind, crate::syntax::TokenKind::Keyword);
+        assert!(token_spans(&keyword_cells, Some(&language), true).is_empty());
 
-        let structure_row = vec![Node::sqrt(None, vec![Node::char('1')])];
-        let structure_cells = cells_of_row(&structure_row);
         let inherited = crate::syntax::TokenSpan {
             start: 0,
             end: 1,
-            kind: crate::syntax::TokenKind::Number,
+            kind: crate::syntax::TokenKind::Keyword,
         };
-        assert_eq!(cell_token_kind(&[inherited], &structure_cells[0], 0), None);
+        assert_eq!(
+            token_kind_at(&[inherited], 0),
+            Some(crate::syntax::TokenKind::Keyword)
+        );
+    }
+
+    #[test]
+    fn a_structure_before_plus_does_not_make_plus_a_markdown_list_marker() {
+        let language = crate::syntax::for_path("sample.md").expect("Markdown language");
+        let row = vec![
+            Node::sqrt(None, vec![Node::char('4')]),
+            Node::char(' '),
+            Node::char('+'),
+            Node::char(' '),
+            Node::sqrt(None, vec![Node::char('8')]),
+        ];
+        let cells = cells_of_row(&row);
+        assert_eq!(cells_to_plain(&cells), "\u{fffc} + \u{fffc}");
+        assert!(token_spans(&cells, Some(&language), false).is_empty());
     }
 
     #[test]

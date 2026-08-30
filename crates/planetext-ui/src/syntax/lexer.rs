@@ -7,7 +7,6 @@ pub enum TokenKind {
     Keyword,
     Type,
     String,
-    Number,
     Comment,
     Builtin,
     Constant,
@@ -21,7 +20,6 @@ impl TokenKind {
             TokenKind::Keyword => "mn-syn-keyword",
             TokenKind::Type => "mn-syn-type",
             TokenKind::String => "mn-syn-string",
-            TokenKind::Number => "mn-syn-number",
             TokenKind::Comment => "mn-syn-comment",
             TokenKind::Builtin => "mn-syn-builtin",
             TokenKind::Constant => "mn-syn-constant",
@@ -35,7 +33,6 @@ impl TokenKind {
             "keyword" => TokenKind::Keyword,
             "type" => TokenKind::Type,
             "string" => TokenKind::String,
-            "number" => TokenKind::Number,
             "comment" => TokenKind::Comment,
             "builtin" => TokenKind::Builtin,
             "constant" => TokenKind::Constant,
@@ -207,47 +204,6 @@ pub fn tokenize_line(line: &str, lang: &LanguageDef) -> Vec<TokenSpan> {
             continue;
         }
 
-        // 5. 数値リテラルの判定
-        if chars[i].is_ascii_digit()
-            || (chars[i] == '.'
-                && i + 1 < len
-                && chars[i + 1].is_ascii_digit()
-                && (i == 0 || !chars[i - 1].is_alphanumeric()))
-        {
-            let start = i;
-            if chars[i] == '0'
-                && i + 1 < len
-                && matches!(chars[i + 1], 'x' | 'X' | 'b' | 'B' | 'o' | 'O')
-            {
-                i += 2;
-                while i < len && (chars[i].is_ascii_hexdigit() || chars[i] == '_') {
-                    i += 1;
-                }
-            } else {
-                while i < len
-                    && (chars[i].is_ascii_digit()
-                        || chars[i] == '.'
-                        || chars[i] == '_'
-                        || matches!(chars[i], 'e' | 'E' | 'f' | 'u' | 'i'))
-                {
-                    if (chars[i] == 'e' || chars[i] == 'E')
-                        && i + 1 < len
-                        && (chars[i + 1] == '+' || chars[i + 1] == '-')
-                    {
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
-                }
-            }
-            spans.push(TokenSpan {
-                start,
-                end: i,
-                kind: TokenKind::Number,
-            });
-            continue;
-        }
-
         // 6. LaTeX コマンド (\frac, \alpha 等)
         if chars[i] == '\\' && i + 1 < len && chars[i + 1].is_alphabetic() {
             let start = i;
@@ -353,6 +309,17 @@ mod tests {
     use crate::syntax::lang::built_in_languages;
 
     #[test]
+    fn numbers_are_not_highlighted_in_any_language() {
+        for language in built_in_languages() {
+            assert!(
+                tokenize_line("42 3.14 0xff", &language).is_empty(),
+                "{} highlighted a number",
+                language.name
+            );
+        }
+    }
+
+    #[test]
     fn test_rust_tokenization() {
         let langs = built_in_languages();
         let rust = langs.iter().find(|l| l.name == "Rust").unwrap();
@@ -420,7 +387,10 @@ mod tests {
         let tokens = tokenize_line(line, json);
         assert!(tokens.iter().any(|t| t.kind == TokenKind::String));
         assert!(tokens.iter().any(|t| t.kind == TokenKind::Constant)); // true
-        assert!(tokens.iter().any(|t| t.kind == TokenKind::Number)); // 42
+        let number = line.find("42").unwrap();
+        assert!(!tokens
+            .iter()
+            .any(|token| token.start <= number && number < token.end));
     }
 
     #[test]
@@ -461,6 +431,11 @@ mod tests {
         let tokens3 = tokenize_line(line3, md);
         assert_eq!(tokens3.len(), 1);
         assert_eq!(tokens3[0].kind, TokenKind::Builtin);
+
+        let list = tokenize_line("- item", md);
+        assert_eq!(list.len(), 1);
+        assert_eq!((list[0].start, list[0].end), (0, 2));
+        assert!(tokenize_line("49 + 81", md).is_empty());
     }
 
     #[test]

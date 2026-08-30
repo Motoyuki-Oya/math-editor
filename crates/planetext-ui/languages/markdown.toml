@@ -4,11 +4,11 @@ line_comments = []
 block_comments = [["<!--", "-->"]]
 string_delimiters = ["`"]
 
-keywords = ["-", "*", "+", ">"]
+keywords = []
 types = []
 builtins = []
 constants = []
-operators = ["[", "]", "(", ")", "!", "*", "_", "`", "|"]
+operators = []
 
 [[line_rules]]
 prefix = "#"
@@ -19,6 +19,26 @@ kind = "Keyword"
 prefix = "```"
 whole_line = true
 kind = "Builtin"
+
+[[line_rules]]
+prefix = "- "
+whole_line = false
+kind = "Keyword"
+
+[[line_rules]]
+prefix = "* "
+whole_line = false
+kind = "Keyword"
+
+[[line_rules]]
+prefix = "+ "
+whole_line = false
+kind = "Keyword"
+
+[[line_rules]]
+prefix = "> "
+whole_line = false
+kind = "Keyword"
 
 [[embedded_languages]]
 open = "```"

@@ -11,7 +11,6 @@
   --syn-keyword: #a626a4;
   --syn-type: #c18401;
   --syn-string: #50a14f;
-  --syn-number: #986801;
   --syn-comment: #a0a1a7;
   --syn-builtin: #0184bc;
   --syn-constant: #e45649;
@@ -30,7 +29,6 @@
     --syn-keyword: #c678dd;
     --syn-type: #e5c07b;
     --syn-string: #98c379;
-    --syn-number: #d19a66;
     --syn-comment: #7f848e;
     --syn-builtin: #61afef;
     --syn-constant: #e06c75;
@@ -856,9 +854,6 @@ body {
 .mn-syn-string {
   color: var(--syn-string);
 }
-.mn-syn-number {
-  color: var(--syn-number);
-}
 .mn-syn-comment {
   color: var(--syn-comment);
   font-style: italic;
@@ -1011,10 +1006,6 @@ body {
 /* 行は、あらゆる深さの通常のインライン テキストです。その中にあるものは、テキストと同じように ベースラインに並び、構造は、必要なボックスの中央に配置されるのではなく、独自のベースラインがどこにあるのかを示します。 */
 .mn-row {
   display: inline;
-}
-
-.mn-row[data-path]:not([data-path=""]) {
-  color: var(--fg);
 }
 
 .mn-placeholder {
