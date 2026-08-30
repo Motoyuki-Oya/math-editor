@@ -14,7 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-planetext-core = { path = "../crates/planetext-core" }
+planetext-document = { path = "../crates/planetext-document" }
 tauri = { version = "2", features = ["tray-icon", "image-png", "image-ico"] }
 
 tauri-plugin-dialog = "2"

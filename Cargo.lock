@@ -3020,7 +3020,7 @@ name = "planetext"
 version = "0.1.0"
 dependencies = [
  "arboard",
- "planetext-core",
+ "planetext-document",
  "serde_json",
  "tauri",
  "tauri-build",
@@ -3031,7 +3031,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "planetext-core"
+name = "planetext-document"
 version = "0.1.0"
 dependencies = [
  "chardetng",

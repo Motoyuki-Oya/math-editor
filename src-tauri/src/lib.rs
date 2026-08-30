@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;
 
-use planetext_core::{
+use planetext_document::{
     global_shortcut_settings, Application, Draft, GlobalShortcutSettings, GuiAction, GuiEvent,
     OpenedDocument, ReopenedDocument, RestoredLines, SearchPage, TrayAction,
 };
@@ -109,7 +109,7 @@ async fn set_document_line_ending(
 }
 
 /// 走査の完了を待ち、文書の行数を確定させる。
-async fn wait_scanned(job: planetext_core::FinishDocumentJob) -> Result<usize, String> {
+async fn wait_scanned(job: planetext_document::FinishDocumentJob) -> Result<usize, String> {
     loop {
         if let Some(line_count) = job.poll()? {
             return Ok(line_count);

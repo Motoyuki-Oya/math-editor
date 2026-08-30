@@ -191,12 +191,12 @@ fn framework_specific_apis_stop_at_the_connectors() {
         }
     }
 
-    let core = root.join("crates/planetext-core");
+    let core = root.join("crates/planetext-document");
     let manifest = fs::read_to_string(core.join("Cargo.toml")).expect("the core manifest");
     for name in ["tauri", "wry", "gpui", "arboard", "tokio"] {
         assert!(
             !manifest.to_ascii_lowercase().contains(name),
-            "planetext-core depends on {name}",
+            "planetext-document depends on {name}",
         );
     }
     for file in sources(&core.join("src")) {
