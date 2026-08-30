@@ -14,16 +14,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+planetext-core = { path = "../crates/planetext-core" }
 tauri = { version = "2", features = ["tray-icon", "image-png", "image-ico"] }
 
 tauri-plugin-dialog = "2"
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-memchr = "2.8.3"
 arboard = { version = "3.6.1", default-features = false, features = ["windows-sys"] }
-regex = "1.13.1"
 tauri-plugin-single-instance = "2"
 tauri-plugin-global-shortcut = "2"
 tokio = { version = "1", features = ["time"] }
-encoding_rs = "0.8"
-chardetng = "0.1"

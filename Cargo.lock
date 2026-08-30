@@ -3020,11 +3020,7 @@ name = "planetext"
 version = "0.1.0"
 dependencies = [
  "arboard",
- "chardetng",
- "encoding_rs",
- "memchr",
- "regex",
- "serde",
+ "planetext-core",
  "serde_json",
  "tauri",
  "tauri-build",
@@ -3032,6 +3028,17 @@ dependencies = [
  "tauri-plugin-global-shortcut",
  "tauri-plugin-single-instance",
  "tokio",
+]
+
+[[package]]
+name = "planetext-core"
+version = "0.1.0"
+dependencies = [
+ "chardetng",
+ "encoding_rs",
+ "memchr",
+ "regex",
+ "serde",
 ]
 
 [[package]]

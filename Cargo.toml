@@ -63,4 +63,4 @@ panic = "abort"
 strip = true
 
 [workspace]
-members = ["src-tauri"]
+members = ["crates/planetext-core", "src-tauri"]
