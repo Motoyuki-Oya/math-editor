@@ -1,4 +1,4 @@
-//! Tauri バックエンド (ファイル ダイアログとディスク アクセス) を呼び出します。
+//! WebView Host bridge (ファイル ダイアログとディスク アクセス) を呼び出します。
 
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -7,15 +7,15 @@ use super::{GuiError, GuiEvent, GuiFramework, MenuState};
 
 #[wasm_bindgen]
 extern "C" {
-    #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"], catch)]
+    #[wasm_bindgen(js_namespace = ["window", "__PLANETEXT_HOST__", "core"], catch)]
     async fn invoke(cmd: &str, args: JsValue) -> Result<JsValue, JsValue>;
 
-    #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "event"], catch)]
+    #[wasm_bindgen(js_namespace = ["window", "__PLANETEXT_HOST__", "event"], catch)]
     async fn listen(event: &str, handler: &JsValue) -> Result<JsValue, JsValue>;
 }
 
-pub(super) struct TauriFramework;
-pub(super) static GUI: TauriFramework = TauriFramework;
+pub(super) struct HostFramework;
+pub(super) static GUI: HostFramework = HostFramework;
 
 async fn call<T: Serialize>(command: &str, args: T) -> Result<JsValue, GuiError> {
     let args = serde_wasm_bindgen::to_value(&args).map_err(|e| e.to_string())?;
@@ -54,7 +54,7 @@ struct MessageArg<'a> {
     message: &'a str,
 }
 
-impl GuiFramework for TauriFramework {
+impl GuiFramework for HostFramework {
     async fn pick_open_file(&self) -> Result<Option<String>, GuiError> {
         Ok(call("pick_open_path", NoArgs {}).await?.as_string())
     }

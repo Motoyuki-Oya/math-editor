@@ -30,13 +30,14 @@ flowchart LR
 ```
 
 実際のディレクトリとの対応は次の通りとする。現在選択している GUI フレームワークは
-Tauri であり、Wry や GPUI はこの位置に入る代替実装である。
+Tauri であり、Wry や GPUI はこの位置に入る代替実装である。WebView側の接続コードは
+特定のフレームワークを知らず、選択したHostが共通のHost bridgeを提供する。
 
 ```mermaid
 flowchart LR
     UI[画面・編集<br/>crates/planetext-ui]
-    WebConnector[WebView側接続コード<br/>crates/planetext-ui/src/framework]
-    Tauri[Tauri<br/>選択中のGUIフレームワーク]
+    WebConnector[共通WebView接続コード<br/>crates/planetext-ui/src/framework]
+    Tauri[Tauri Host<br/>選択中のGUIフレームワーク]
     TauriConnector[Tauri接続コード<br/>src-tauri]
     Document[文書の本体<br/>crates/planetext-document]
 
@@ -53,6 +54,21 @@ flowchart LR
 | `src-tauri/` | GUIフレームワーク接続コード(OS側)と起動処理 |
 | `crates/planetext-document/` | 文書の本体。保存・検索・下書き・設定を扱う |
 | `src-tauri/src/platform.rs` | OS clipboard の platform adapter |
+
+### Host差し替えの完了条件
+
+`src-tauri` を `src-wry` または `src-gpui` に差し替えても、次の 2 つの crate に
+コード変更を加えずに動くことを Phase 1 の完了条件とする。
+
+- `crates/planetext-ui` は Tauri、Wry、GPUI の API・型・名前を知らない。
+- `crates/planetext-document` は GUI フレームワークを知らない。
+- WebView側は共通の Host bridge(`window.__PLANETEXT_HOST__`)だけを呼び、各 Host が
+  その bridge を実装する。bridge は command の実行とイベント購読だけを提供する。
+- Tauri固有のIPC、起動、window、menu、tray、dialog、shortcut、Host設定は
+  `src-tauri` の中だけに置く。`src-wry` / `src-gpui` は同じ bridge 契約を実装する。
+- DOM操作は `crates/planetext-ui` に残してよい。DOM操作とTauri IPCを同一視しない。
+- Tauri専用の `.taurignore` は Tauri Host のディレクトリに置き、他の Host に
+  影響を与えない。
 
 依存関係は次の通りとする。
 

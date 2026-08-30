@@ -1,8 +1,8 @@
-//! WebView側接続コードの共通界面。Tauriの詳細はtauri.rsだけが知る。
+//! WebView側接続コードの共通界面。Host固有の詳細はhost.rsだけが知る。
 
-mod tauri;
+mod host;
 
-pub(crate) use tauri::{
+pub(crate) use host::{
     cancel_search, close_document, copy_range, create_document, estimate_matches, file_size,
     finish_document, lines_containing, open_document, read_drafts, read_lines, read_settings,
     read_tail, remove_draft, reopen_document_encoding, replace_lines, save_document, save_draft,
@@ -34,5 +34,5 @@ pub(crate) trait GuiFramework {
 }
 
 pub(crate) fn gui() -> &'static impl GuiFramework {
-    &tauri::GUI
+    &host::GUI
 }

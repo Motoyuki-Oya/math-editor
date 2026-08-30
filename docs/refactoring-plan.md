@@ -12,6 +12,14 @@
 | `src-tauri/` | Tauri 接続コードと起動処理 |
 | `crates/planetext-document/` | 文書の本体を扱う文書エンジン |
 
+## Phase 1 の完了条件(改訂)
+
+`src-tauri` を `src-wry` または `src-gpui` に差し替えても、
+`crates/planetext-ui` と `crates/planetext-document` を変更せずに動くこと。
+そのため、UI 側には Tauri 固有 bridge を置かず、`window.__PLANETEXT_HOST__` という
+Host 共通の bridge 契約だけを置く。Tauri 固有の bridge 実装と `.taurignore` は
+`src-tauri` に閉じ込める。
+
 ## 現在確定している対象
 
 ### GUIフレームワークとアプリケーションの分離
@@ -243,29 +251,33 @@ ToBe は `docs/architecture.md` の「入力規則は深さで変えない」を
 
 ## 移行順序
 
-各ステップは 1 コミット単位で行い、テストと GUI での挙動確認を付ける。
+各ステップは 1 コミット単位で行い、自動テストと build で確認する。GUI起動が必要な
+変更では別途確認するが、Phase 1 の配置変更では UI を起動しない。
 各 Phase の完了時に、下のチェック項目で `docs/architecture.md` からの逸脱が
 ないことを確認する。
 
 ### Phase 1: フレームワーク分離(挙動不変)
 
-1. WebView 側: `crates/planetext-ui/src/framework/tauri.rs` を「Tauri 接続コード(invoke / listen のみ)」と
-   「アプリケーション API」に分離し、`app` 各所から command 名と
-   `window.__TAURI__` を隠す(完了)。
+1. WebView 側: `crates/planetext-ui/src/framework/` を特定フレームワーク非依存の
+   Host bridge 契約とし、`app` 各所から command 名と Host の実装詳細を隠す。
+   Tauri bridge は `src-tauri` 側から提供する(完了)。
 2. 文書エンジン側: `crates/planetext-document/src/store.rs` 等を Tauri 非依存の
    crate へ移し、`src-tauri/src/lib.rs` のアプリケーションロジックを分離。
    `#[tauri::command]` は変換だけの薄い層にする(完了)。
-3. `GuiFramework` API + `GuiEvent` を導入し、dialog・menu・tray・shortcut・
-   window 操作を接続コード経由にする。`menu.rs` は接続コードとして整理する(完了)。
+3. `GuiFramework` API + `GuiEvent` を共通 Host bridge の上に置き、dialog・menu・
+   tray・shortcut・window 操作を接続コード経由にする。Tauri固有の実装と
+   `.taurignore` は `src-tauri` に閉じ込める(完了)。
 
 チェック項目:
 
-- [x] アプリケーションコードに Tauri の型・command 名・`window.__TAURI__` が
-      残っていない(接続コードだけが知る)
+- [x] `crates/planetext-ui` の製品コードに Tauri、Wry、GPUI の API・型・名前が残っていない
+- [x] `crates/planetext-document` に GUI フレームワークの API・型・名前が残っていない
+- [x] Host bridge の実装選択と Tauri 固有処理が `src-tauri` 側に閉じている
+- [x] `src-tauri` を別 Host に差し替えても 2 つの crate を変更せず動く構成になっている
 - [x] 接続コードにエディタ機能・文書状態・保存判断が入っていない(変換と
       dispatch のみ)
 - [x] `GuiFramework` に OS UI とウィンドウ管理以外の機能を足していない
-- [x] 挙動が一切変わっていない(機能追加・修正を混ぜていない)
+- [x] 自動テストと build で既存の挙動に変更がないことを確認した(UI起動テストは未実施)
 
 ### Phase 2: 入力規則統一(モデル層のみで完結)
 

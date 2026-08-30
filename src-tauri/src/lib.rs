@@ -606,6 +606,13 @@ fn confirm_discard_on_close(window: &tauri::WebviewWindow) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry>::new("planetext-host")
+                .js_init_script(
+                    "window.__PLANETEXT_HOST__ = { core: { invoke: (command, args) => window.__TAURI__.core.invoke(command, args) }, event: { listen: (name, handler) => window.__TAURI__.event.listen(name, handler) } };",
+                )
+                .build(),
+        )
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             dispatch_gui_event(app, GuiEvent::SecondInstance);
         }))

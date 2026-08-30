@@ -170,25 +170,30 @@ fn only_the_format_knows_the_notation() {
 fn framework_specific_apis_stop_at_the_connectors() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let frontend = root.join("src");
-    let connector = frontend.join("framework/tauri.rs");
     for file in sources(&frontend) {
         let source = without_comments(
             &fs::read_to_string(&file).unwrap_or_else(|_| panic!("cannot read {}", file.display())),
         );
-        if file != connector {
-            assert!(
-                !source.contains("__TAURI__"),
-                "{} reaches through the framework connector",
-                file.display(),
-            );
-        }
+        assert!(
+            !source.contains("__TAURI__"),
+            "{} reaches into Tauri directly",
+            file.display(),
+        );
         if file.starts_with(frontend.join("app")) {
             assert!(
-                !source.contains("framework::tauri"),
+                !source.contains("framework::host"),
                 "{} selects a concrete framework implementation",
                 file.display(),
             );
         }
+    }
+
+    let ui_manifest = fs::read_to_string(root.join("Cargo.toml")).expect("the UI manifest");
+    for name in ["tauri", "wry", "gpui"] {
+        assert!(
+            !ui_manifest.to_ascii_lowercase().contains(name),
+            "planetext-ui depends on {name}",
+        );
     }
 
     let document = root.join("../planetext-document");
