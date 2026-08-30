@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
+use super::{GuiError, GuiEvent, GuiFramework, MenuState};
+
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = ["window", "__TAURI__", "core"], catch)]
@@ -12,46 +14,10 @@ extern "C" {
     async fn listen(event: &str, handler: &JsValue) -> Result<JsValue, JsValue>;
 }
 
-/// システムのメニューから選択した項目の名前で `chosen` を呼び出します。
-pub fn on_menu(chosen: impl Fn(&str) + 'static) {
-    let handler = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
-        let name = js_sys::Reflect::get(&event, &JsValue::from_str("payload"))
-            .ok()
-            .and_then(|payload| payload.as_string());
-        if let Some(name) = name {
-            chosen(&name);
-        }
-    });
-    wasm_bindgen_futures::spawn_local(async move {
-        let _ = listen("menu", handler.as_ref()).await;
-        // 維持します: リスナーはウィンドウが存続する限り存続します。
-        handler.forget();
-    });
-}
+pub(super) struct TauriFramework;
+pub(super) static GUI: TauriFramework = TauriFramework;
 
-/// Tells the system's 表示 menu what is currently on.
-pub async fn sync_view_menu(wrap: bool, line_numbers: bool, show_whitespace: bool, split: bool) {
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Args {
-        wrap: bool,
-        line_numbers: bool,
-        show_whitespace: bool,
-        split: bool,
-    }
-    let _ = call(
-        "sync_view_menu",
-        Args {
-            wrap,
-            line_numbers,
-            show_whitespace,
-            split,
-        },
-    )
-    .await;
-}
-
-async fn call<T: Serialize>(command: &str, args: T) -> Result<JsValue, String> {
+async fn call<T: Serialize>(command: &str, args: T) -> Result<JsValue, GuiError> {
     let args = serde_wasm_bindgen::to_value(&args).map_err(|e| e.to_string())?;
     invoke(command, args)
         .await
@@ -88,24 +54,79 @@ struct MessageArg<'a> {
     message: &'a str,
 }
 
-/// 未保存の作業を破棄してもよいかどうかをユーザーに尋ねます。
-pub async fn confirm_discard(message: &str) -> bool {
-    call("confirm_discard", MessageArg { message })
-        .await
-        .ok()
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-}
+impl GuiFramework for TauriFramework {
+    async fn pick_open_file(&self) -> Result<Option<String>, GuiError> {
+        Ok(call("pick_open_path", NoArgs {}).await?.as_string())
+    }
 
-pub async fn pick_open_path() -> Option<String> {
-    call("pick_open_path", NoArgs {}).await.ok()?.as_string()
-}
+    async fn pick_save_file(&self, default_name: &str) -> Result<Option<String>, GuiError> {
+        Ok(call("pick_save_path", DefaultName { default_name })
+            .await?
+            .as_string())
+    }
 
-pub async fn pick_save_path(default_name: &str) -> Option<String> {
-    call("pick_save_path", DefaultName { default_name })
+    /// 未保存の作業を破棄してもよいかどうかをユーザーに尋ねます。
+    async fn confirm(&self, message: &str) -> Result<bool, GuiError> {
+        Ok(call("confirm_discard", MessageArg { message })
+            .await?
+            .as_bool()
+            .unwrap_or(false))
+    }
+
+    /// Tells the system's 表示 menu what is currently on.
+    async fn set_menu(&self, state: MenuState) -> Result<(), GuiError> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Args {
+            wrap: bool,
+            line_numbers: bool,
+            show_whitespace: bool,
+            split: bool,
+        }
+        call(
+            "sync_view_menu",
+            Args {
+                wrap: state.wrap,
+                line_numbers: state.line_numbers,
+                show_whitespace: state.show_whitespace,
+                split: state.split,
+            },
+        )
         .await
-        .ok()?
-        .as_string()
+        .map(|_| ())
+    }
+
+    async fn open_external(&self, target: &str) -> Result<(), GuiError> {
+        #[derive(Serialize)]
+        struct Args<'a> {
+            url: &'a str,
+        }
+        call("open_external_url", Args { url: target })
+            .await
+            .map(|_| ())
+    }
+
+    async fn ready(&self) -> Result<(), GuiError> {
+        call("frontend_ready", NoArgs {}).await.map(|_| ())
+    }
+
+    /// システムのメニューから選択した項目の名前で `chosen` を呼び出します。
+    fn on_event(&self, handler: Box<dyn Fn(GuiEvent) + 'static>) -> Result<(), GuiError> {
+        let callback = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
+            let name = js_sys::Reflect::get(&event, &JsValue::from_str("payload"))
+                .ok()
+                .and_then(|payload| payload.as_string());
+            if let Some(name) = name {
+                handler(GuiEvent::MenuSelected(name));
+            }
+        });
+        wasm_bindgen_futures::spawn_local(async move {
+            let _ = listen("menu", callback.as_ref()).await;
+            // 維持します: リスナーはウィンドウが存続する限り存続します。
+            callback.forget();
+        });
+        Ok(())
+    }
 }
 
 /// 範囲読みで開いた文書。行は [`read_lines`] で取り寄せる。
@@ -552,16 +573,4 @@ pub async fn file_size(path: Option<&str>, id: usize) -> Option<usize> {
     .await
     .ok()?;
     value.as_f64().map(|n| n as usize)
-}
-
-pub async fn frontend_ready() {
-    let _ = call("frontend_ready", NoArgs {}).await;
-}
-
-pub async fn open_external_url(url: &str) {
-    #[derive(Serialize)]
-    struct Args<'a> {
-        url: &'a str,
-    }
-    let _ = call("open_external_url", Args { url }).await;
 }

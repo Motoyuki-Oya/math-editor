@@ -20,7 +20,7 @@ use preferences::Preferences;
 use shell::{Pane, Shell};
 
 use crate::editor;
-use crate::framework::tauri;
+use crate::framework::{gui, GuiFramework};
 use crate::settings;
 
 #[component]
@@ -54,7 +54,7 @@ pub fn App() -> impl IntoView {
             // 保存された設定がある場所にメニューのチェック マークが付けられます。
             menu::show_state(shell);
             shell.restore_drafts(api::read_drafts().await);
-            tauri::frontend_ready().await;
+            let _ = gui().ready().await;
         });
     });
 

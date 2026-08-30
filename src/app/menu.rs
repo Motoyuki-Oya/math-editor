@@ -8,13 +8,15 @@ use leptos::task::spawn_local;
 use super::preferences::change;
 use super::shell::{Field, Shell};
 use crate::editor;
-use crate::framework::tauri;
+use crate::framework::{gui, GuiEvent, GuiFramework, MenuState};
 use crate::settings;
 use crate::settings::Settings;
 
 /// メニュー バーから選択された内容のリッスンを開始し、現在何がオンであるかをメニューに伝えます。
 pub(super) fn install(shell: Shell) {
-    tauri::on_menu(move |name| choose(shell, name, From::Menu));
+    let _ = gui().on_event(Box::new(move |event| match event {
+        GuiEvent::MenuSelected(name) => choose(shell, &name, From::Menu),
+    }));
     show_state(shell);
 }
 
@@ -76,13 +78,14 @@ pub(super) fn show_state(shell: Shell) {
     let settings = settings::current();
     let split = shell.panes.with_untracked(Vec::len) > 1;
     spawn_local(async move {
-        tauri::sync_view_menu(
-            settings.wrap,
-            settings.line_numbers,
-            settings.show_whitespace,
-            split,
-        )
-        .await;
+        let _ = gui()
+            .set_menu(MenuState {
+                wrap: settings.wrap,
+                line_numbers: settings.line_numbers,
+                show_whitespace: settings.show_whitespace,
+                split,
+            })
+            .await;
     });
 }
 

@@ -6,8 +6,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use planetext_core::{
-    global_shortcut_settings, Application, Draft, GlobalShortcutSettings, OpenedDocument,
-    ReopenedDocument, RestoredLines, SearchPage,
+    global_shortcut_settings, Application, Draft, GlobalShortcutSettings, GuiAction, GuiEvent,
+    OpenedDocument, ReopenedDocument, RestoredLines, SearchPage, TrayAction,
 };
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -325,6 +325,27 @@ fn toggle_main_window(app: &tauri::AppHandle) {
     }
 }
 
+fn dispatch_gui_event(app: &tauri::AppHandle, event: GuiEvent) {
+    match app.state::<Application>().handle_gui_event(event) {
+        GuiAction::ShowWindow => show_main_window(app),
+        GuiAction::HideWindow => {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.hide();
+            }
+        }
+        GuiAction::ToggleWindow => toggle_main_window(app),
+        GuiAction::Exit => app.exit(0),
+        GuiAction::ConfirmExit => {
+            if let Some(window) = app.get_webview_window("main") {
+                show_main_window(app);
+                confirm_discard_on_close(&window);
+            } else {
+                app.exit(0);
+            }
+        }
+    }
+}
+
 fn sync_global_shortcut(app: &tauri::AppHandle, settings: GlobalShortcutSettings) {
     debug_log(&format!(
         "[SHORTCUT] Checking shortcut: enabled={}, key={}",
@@ -387,19 +408,8 @@ fn setup_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> 
         .show_menu_on_left_click(true)
         .tooltip("Planetext")
         .on_menu_event(|app, event| match event.id().as_ref() {
-            "open" => {
-                show_main_window(app);
-            }
-            "quit" => {
-                if is_dirty(app) {
-                    if let Some(window) = app.get_webview_window("main") {
-                        show_main_window(app);
-                        confirm_discard_on_close(&window);
-                        return;
-                    }
-                }
-                app.exit(0);
-            }
+            "open" => dispatch_gui_event(app, GuiEvent::TraySelected(TrayAction::Open)),
+            "quit" => dispatch_gui_event(app, GuiEvent::TraySelected(TrayAction::Quit)),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| match event {
@@ -412,7 +422,7 @@ fn setup_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> 
                 button: MouseButton::Left,
                 ..
             } => {
-                show_main_window(tray.app_handle());
+                dispatch_gui_event(tray.app_handle(), GuiEvent::TraySelected(TrayAction::Open));
             }
             _ => {}
         })
@@ -568,10 +578,6 @@ async fn confirm_discard(app: tauri::AppHandle, message: String) -> bool {
     rx.recv().unwrap_or(false)
 }
 
-fn is_dirty(app: &tauri::AppHandle) -> bool {
-    app.state::<Application>().is_dirty()
-}
-
 fn confirm_discard_on_close(window: &tauri::WebviewWindow) {
     let target = window.clone();
     window
@@ -599,7 +605,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            show_main_window(app);
+            dispatch_gui_event(app, GuiEvent::SecondInstance);
         }))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -609,7 +615,7 @@ pub fn run() {
                         event.state()
                     ));
                     if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                        toggle_main_window(app);
+                        dispatch_gui_event(app, GuiEvent::GlobalShortcut(format!("{shortcut:?}")));
                     }
                 })
                 .build(),
@@ -644,7 +650,7 @@ pub fn run() {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 save_window_size(window);
                 api.prevent_close();
-                let _ = window.hide();
+                dispatch_gui_event(window.app_handle(), GuiEvent::CloseRequested);
             }
         })
         .invoke_handler(tauri::generate_handler![

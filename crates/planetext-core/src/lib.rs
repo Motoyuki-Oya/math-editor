@@ -125,6 +125,26 @@ pub struct GlobalShortcutSettings {
     pub key: String,
 }
 
+pub enum GuiEvent {
+    CloseRequested,
+    TraySelected(TrayAction),
+    GlobalShortcut(String),
+    SecondInstance,
+}
+
+pub enum TrayAction {
+    Open,
+    Quit,
+}
+
+pub enum GuiAction {
+    ShowWindow,
+    HideWindow,
+    ToggleWindow,
+    Exit,
+    ConfirmExit,
+}
+
 pub fn global_shortcut_settings(settings_text: &str) -> GlobalShortcutSettings {
     let enabled = !settings_text.lines().any(|line| {
         let Some((key, value)) = line.split_once('=') else {
@@ -420,6 +440,18 @@ impl Application {
         })
     }
 
+    pub fn handle_gui_event(&self, event: GuiEvent) -> GuiAction {
+        match event {
+            GuiEvent::CloseRequested => GuiAction::HideWindow,
+            GuiEvent::TraySelected(TrayAction::Open) | GuiEvent::SecondInstance => {
+                GuiAction::ShowWindow
+            }
+            GuiEvent::TraySelected(TrayAction::Quit) if self.is_dirty() => GuiAction::ConfirmExit,
+            GuiEvent::TraySelected(TrayAction::Quit) => GuiAction::Exit,
+            GuiEvent::GlobalShortcut(_) => GuiAction::ToggleWindow,
+        }
+    }
+
     pub fn read_settings(&self, config_dir: Option<PathBuf>) -> String {
         settings_path(config_dir)
             .and_then(|path| std::fs::read_to_string(path).ok())
@@ -564,7 +596,7 @@ fn draft_name(id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::global_shortcut_settings;
+    use super::{global_shortcut_settings, Application, GuiAction, GuiEvent, TrayAction};
 
     #[test]
     fn global_shortcut_settings_keep_defaults() {
@@ -580,5 +612,37 @@ mod tests {
         );
         assert!(!settings.enabled);
         assert_eq!(settings.key, "Ctrl+Alt+P");
+    }
+
+    #[test]
+    fn tray_quit_asks_before_discarding_dirty_work() {
+        let application = Application::default();
+        application.set_dirty(true);
+        assert!(matches!(
+            application.handle_gui_event(GuiEvent::TraySelected(TrayAction::Quit)),
+            GuiAction::ConfirmExit
+        ));
+        application.set_dirty(false);
+        assert!(matches!(
+            application.handle_gui_event(GuiEvent::TraySelected(TrayAction::Quit)),
+            GuiAction::Exit
+        ));
+    }
+
+    #[test]
+    fn framework_events_produce_framework_neutral_actions() {
+        let application = Application::default();
+        assert!(matches!(
+            application.handle_gui_event(GuiEvent::CloseRequested),
+            GuiAction::HideWindow
+        ));
+        assert!(matches!(
+            application.handle_gui_event(GuiEvent::SecondInstance),
+            GuiAction::ShowWindow
+        ));
+        assert!(matches!(
+            application.handle_gui_event(GuiEvent::GlobalShortcut("toggle".into())),
+            GuiAction::ToggleWindow
+        ));
     }
 }

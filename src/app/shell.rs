@@ -8,7 +8,7 @@ use super::api;
 use super::drafts;
 use super::sync;
 use crate::editor;
-use crate::framework::tauri;
+use crate::framework::{gui, GuiFramework};
 
 const UNTITLED: &str = "無題";
 
@@ -516,7 +516,10 @@ impl Shell {
                 return;
             };
             if tab.dirty.get_untracked()
-                && !tauri::confirm_discard("保存されていない変更があります。破棄しますか？").await
+                && !gui()
+                    .confirm("保存されていない変更があります。破棄しますか？")
+                    .await
+                    .unwrap_or(false)
             {
                 return;
             }
@@ -618,10 +621,10 @@ impl Shell {
                 .enumerate()
                 .any(|(i, t)| i != keep_index && t.dirty.get_untracked());
             if has_dirty
-                && !tauri::confirm_discard(
-                    "保存されていない変更があるタブが含まれています。破棄しますか？",
-                )
-                .await
+                && !gui()
+                    .confirm("保存されていない変更があるタブが含まれています。破棄しますか？")
+                    .await
+                    .unwrap_or(false)
             {
                 return;
             }
@@ -662,10 +665,10 @@ impl Shell {
             let closing = &tabs[index + 1..];
             let has_dirty = closing.iter().any(|t| t.dirty.get_untracked());
             if has_dirty
-                && !tauri::confirm_discard(
-                    "保存されていない変更があるタブが含まれています。破棄しますか？",
-                )
-                .await
+                && !gui()
+                    .confirm("保存されていない変更があるタブが含まれています。破棄しますか？")
+                    .await
+                    .unwrap_or(false)
             {
                 return;
             }
@@ -900,7 +903,7 @@ impl Shell {
     pub(super) fn open(&self) {
         let shell = *self;
         spawn_local(async move {
-            let Some(path) = tauri::pick_open_path().await else {
+            let Some(path) = gui().pick_open_file().await.ok().flatten() else {
                 return;
             };
             match api::open_document(&path).await {
@@ -1053,7 +1056,7 @@ impl Shell {
         spawn_local(async move {
             let path = match current {
                 Some(path) if !force_dialog => path,
-                _ => match tauri::pick_save_path(&default_name).await {
+                _ => match gui().pick_save_file(&default_name).await.ok().flatten() {
                     Some(path) => path,
                     None => return,
                 },

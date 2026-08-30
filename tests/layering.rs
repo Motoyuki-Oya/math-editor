@@ -165,3 +165,50 @@ fn only_the_format_knows_the_notation() {
         }
     }
 }
+
+#[test]
+fn framework_specific_apis_stop_at_the_connectors() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let frontend = root.join("src");
+    let connector = frontend.join("framework/tauri.rs");
+    for file in sources(&frontend) {
+        let source = without_comments(
+            &fs::read_to_string(&file).unwrap_or_else(|_| panic!("cannot read {}", file.display())),
+        );
+        if file != connector {
+            assert!(
+                !source.contains("__TAURI__"),
+                "{} reaches through the framework connector",
+                file.display(),
+            );
+        }
+        if file.starts_with(frontend.join("app")) {
+            assert!(
+                !source.contains("framework::tauri"),
+                "{} selects a concrete framework implementation",
+                file.display(),
+            );
+        }
+    }
+
+    let core = root.join("crates/planetext-core");
+    let manifest = fs::read_to_string(core.join("Cargo.toml")).expect("the core manifest");
+    for name in ["tauri", "wry", "gpui", "arboard", "tokio"] {
+        assert!(
+            !manifest.to_ascii_lowercase().contains(name),
+            "planetext-core depends on {name}",
+        );
+    }
+    for file in sources(&core.join("src")) {
+        let source = fs::read_to_string(&file).expect("a core source file");
+        for name in ["tauri", "wry", "gpui", "arboard", "tokio"] {
+            assert!(
+                !without_comments(&source)
+                    .to_ascii_lowercase()
+                    .contains(name),
+                "{} reaches into {name}",
+                file.display(),
+            );
+        }
+    }
+}
