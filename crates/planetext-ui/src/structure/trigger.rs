@@ -1,6 +1,6 @@
 //! どの深さのRowでも同じ「文字列 + トリガー文字 + スペース」判定。
 //!
-//! `/` `^` `_` や括弧は通常文字のまま入り、スペースで初めて構造へ移る。
+//! `/` `^` `_`、矢印や括弧は通常文字のまま入り、スペースで初めて構造へ移る。
 
 use super::ast::{self, Between, Node, NodeKind, Row};
 use super::vocabulary;
@@ -28,29 +28,24 @@ fn trailing(row: &[Node], index: usize) -> Option<(usize, Conversion)> {
 
 fn trailing_typed(row: &[Node], index: usize) -> Option<(usize, Conversion)> {
     let trigger = as_char(row.get(index.checked_sub(1)?)?)?;
+    if trigger == '/' || ast::is_arrow(trigger) {
+        let before = index - 1;
+        let (start, taken) = preceding(row, before)?;
+        let between = if trigger == '/' {
+            Between::Rule
+        } else {
+            Between::Arrow(trigger)
+        };
+        let node = Node::stack(taken, Row::new(), between);
+        return Some((
+            index - start,
+            Conversion::Structure {
+                nodes: vec![node],
+                enter: Some((0, 1)),
+            },
+        ));
+    }
     let node = match trigger {
-        '/' => {
-            let before = index - 1;
-            let (start, taken) = match trailing_group(row, before) {
-                Some(group) => group,
-                None => {
-                    let start = run_start(row, before);
-                    (start, row[start..before].to_vec())
-                }
-            };
-            if taken.is_empty() {
-                return None;
-            }
-            let consume = index - start;
-            let node = Node::stack(taken, Row::new(), Between::Rule);
-            return Some((
-                consume,
-                Conversion::Structure {
-                    nodes: vec![node],
-                    enter: Some((0, 1)),
-                },
-            ));
-        }
         // `^` `_` は直前の文字を構造へ移さない。トリガー文字だけを空のスロットに替える。
         '^' => Node::sup(Row::new()),
         '_' => Node::sub(Row::new()),
@@ -64,6 +59,20 @@ fn trailing_typed(row: &[Node], index: usize) -> Option<(usize, Conversion)> {
             enter,
         },
     ))
+}
+
+fn preceding(row: &[Node], before: usize) -> Option<(usize, Row)> {
+    if let Some(group) = trailing_group(row, before) {
+        return Some(group);
+    }
+    let start = text_start(row, before);
+    if start < before {
+        return Some((start, row[start..before].to_vec()));
+    }
+    let start = before.checked_sub(1)?;
+    let node = row.get(start)?;
+    (!matches!(node.kind, NodeKind::Char(_) | NodeKind::Tab))
+        .then(|| (start, vec![node.clone()]))
 }
 
 /// `(x+1)/` の括弧は文字なので、スペースで分数にするときに中身を持ち上げる。
@@ -86,7 +95,7 @@ fn trailing_group(row: &[Node], before: usize) -> Option<(usize, Row)> {
     None
 }
 
-fn run_start(row: &[Node], before: usize) -> usize {
+fn text_start(row: &[Node], before: usize) -> usize {
     let mut start = before;
     while start > 0 {
         match as_char(&row[start - 1]) {
@@ -225,6 +234,37 @@ mod tests {
         assert_eq!(kind_of(' ', "abc/"), Some("stack".into()));
         assert_eq!(kind_of(' ', "日本/"), Some("stack".into()));
         assert_eq!(kind_of(' ', "(x+1)/"), Some("stack".into()));
+    }
+
+    #[test]
+    fn arrows_use_the_same_space_trigger_as_a_fraction() {
+        assert!(kind_of('→', "abc").is_none());
+        assert_eq!(kind_of(' ', "abc→"), Some("stack".into()));
+    }
+
+    #[test]
+    fn slash_takes_the_preceding_structure_as_its_upper_row() {
+        let root = Node::sqrt(
+            None,
+            "x+1".chars().map(Node::char).collect(),
+        );
+        let row = vec![root.clone(), Node::char('/')];
+        let Some((consume, Conversion::Structure { nodes, enter })) =
+            conversion_for(&row, row.len(), ' ')
+        else {
+            panic!("expected a fraction conversion");
+        };
+        assert_eq!(consume, 2);
+        assert_eq!(enter, Some((0, 1)));
+        match &nodes[0].kind {
+            NodeKind::Stack { above, .. } => assert_eq!(above, &vec![root]),
+            other => panic!("expected a fraction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slash_after_punctuation_stays_text() {
+        assert!(kind_of(' ', "+/").is_none());
     }
 
     #[test]

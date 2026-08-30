@@ -611,6 +611,31 @@ mod tests {
     }
 
     #[test]
+    fn structure_before_slash_converts_inside_another_structure() {
+        let inner = Node::sqrt(
+            None,
+            "x+1".chars().map(Node::char).collect(),
+        );
+        let mut editor = with_rows(vec![vec![Node::sqrt(
+            None,
+            vec![inner.clone(), Node::char('/')],
+        )]]);
+        let cursor = Cursor {
+            path: vec![(0, 0)],
+            index: 2,
+            anchor: 2,
+        };
+        assert!(editor.enter_at(Pos::new(0, 0), &cursor));
+        assert!(editor.convert_typed(' '));
+        let body = row_at(editor.text().line(0), &[(0, 0)]).unwrap();
+        match &body[0].kind {
+            NodeKind::Stack { above, .. } => assert_eq!(above, &vec![inner]),
+            other => panic!("expected a fraction inside the root, got {other:?}"),
+        }
+        assert_eq!(editor.nested_cursor().unwrap().path, vec![(0, 0), (0, 1)]);
+    }
+
+    #[test]
     fn multiple_nested_cursors_edit_different_structure_rows() {
         let mut editor = with_rows(vec![
             vec![Node::sqrt(None, Vec::new())],
