@@ -3,8 +3,8 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
-use super::api;
 use crate::editor;
+use crate::framework::write_settings;
 use crate::settings;
 use crate::settings::Settings;
 
@@ -18,7 +18,7 @@ pub(super) fn take_effect(settings: Settings) {
 pub(super) fn change(settings: Settings) {
     take_effect(settings.clone());
     spawn_local(async move {
-        api::write_settings(&settings::write(&settings)).await;
+        write_settings(&settings::write(&settings)).await;
     });
 }
 

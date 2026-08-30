@@ -5,9 +5,9 @@ use leptos::task::spawn_local;
 use wasm_bindgen::JsCast;
 use web_sys::KeyboardEvent;
 
-use super::api;
 use super::shell::{Field, Pane, Shell};
 use crate::editor;
+use crate::framework::{estimate_matches, file_size};
 
 #[component]
 pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
@@ -295,8 +295,7 @@ fn update_preview(
         let Some(handle) = pane.tab_untracked().doc.get_untracked() else {
             return;
         };
-        let result =
-            api::estimate_matches(handle, &query, options.regex, options.case_sensitive).await;
+        let result = estimate_matches(handle, &query, options.regex, options.case_sensitive).await;
         if generation.get_untracked() == current {
             if let Ok(count) = result {
                 estimated_count.set(Some(count));
@@ -319,5 +318,5 @@ async fn tick(ms: i32) {
 async fn file_size_for(pane: Pane) -> Option<usize> {
     let tab = pane.tab_untracked();
     let path = tab.path.get_untracked();
-    api::file_size(path.as_deref(), tab.id.get_untracked()).await
+    file_size(path.as_deref(), tab.id.get_untracked()).await
 }

@@ -4,11 +4,10 @@ use leptos::prelude::*;
 use leptos::reactive::owner::{LocalStorage, Owner};
 use leptos::task::spawn_local;
 
-use super::api;
 use super::drafts;
 use super::sync;
 use crate::editor;
-use crate::framework::{gui, GuiFramework};
+use crate::framework::{self, gui, GuiFramework};
 
 const UNTITLED: &str = "無題";
 
@@ -66,10 +65,10 @@ impl Tab {
     pub(super) fn assign_document(&self) {
         let tab = *self;
         spawn_local(async move {
-            if let Some(doc) = api::create_document().await {
+            if let Some(doc) = framework::create_document().await {
                 // 取っ手が既にある（開くが先に済んだ）なら、作った文書は要らない。
                 if tab.doc.get_untracked().is_some() {
-                    api::close_document(doc.handle).await;
+                    framework::close_document(doc.handle).await;
                 } else {
                     tab.doc.set(Some(doc.handle));
                     tab.encoding.set(doc.encoding);
@@ -83,7 +82,7 @@ impl Tab {
     pub(super) fn release_document(&self) {
         if let Some(handle) = self.doc.get_untracked() {
             self.doc.set(None);
-            spawn_local(async move { api::close_document(handle).await });
+            spawn_local(async move { framework::close_document(handle).await });
         }
     }
 
@@ -279,7 +278,7 @@ impl Shell {
                     .with_untracked(|tabs| tabs.iter().any(|tab| tab.dirty.get_untracked()))
             })
         });
-        spawn_local(api::set_dirty(any));
+        spawn_local(framework::set_dirty(any));
     }
 
     /// エディターのペインに表示されているタブ。
@@ -906,7 +905,7 @@ impl Shell {
             let Some(path) = gui().pick_open_file().await.ok().flatten() else {
                 return;
             };
-            match api::open_document(&path).await {
+            match framework::open_document(&path).await {
                 Ok(doc) => {
                     let pane = shell.pane_untracked();
                     let tab = shell.add_tab(pane);
@@ -929,7 +928,7 @@ impl Shell {
                     // 行数はバックグラウンドで走査中。確定したら手元へ合わせる。
                     let handle = doc.handle;
                     spawn_local(async move {
-                        match api::finish_document(handle).await {
+                        match framework::finish_document(handle).await {
                             Ok(count) => {
                                 shell.document_scanned(handle, count);
                             }
@@ -951,7 +950,7 @@ impl Shell {
         };
         let enc = encoding.to_string();
         spawn_local(async move {
-            match api::reopen_document_encoding(handle, &enc).await {
+            match framework::reopen_document_encoding(handle, &enc).await {
                 Ok(reopened) => {
                     tab.encoding.set(reopened.encoding.clone());
                     tab.line_ending.set(reopened.line_ending);
@@ -974,7 +973,7 @@ impl Shell {
         tab.encoding.set(enc.clone());
         if let Some(handle) = tab.doc.get_untracked() {
             spawn_local(async move {
-                let _ = api::set_document_encoding(handle, &enc).await;
+                let _ = framework::set_document_encoding(handle, &enc).await;
             });
         }
         self.mark_dirty_tab(tab);
@@ -987,7 +986,7 @@ impl Shell {
         tab.line_ending.set(le.clone());
         if let Some(handle) = tab.doc.get_untracked() {
             spawn_local(async move {
-                let _ = api::set_document_line_ending(handle, &le).await;
+                let _ = framework::set_document_line_ending(handle, &le).await;
             });
         }
         self.mark_dirty_tab(tab);
@@ -1026,7 +1025,7 @@ impl Shell {
     }
 
     /// アプリケーションが最後に停止したときに画面に表示されていたものを開きます。ドラフトは未保存のタブとして返され、番号が保持されるため、2 番目のストップで同じドラフトが上書きされます。
-    pub(super) fn restore_drafts(&self, drafts: Vec<api::Draft>) {
+    pub(super) fn restore_drafts(&self, drafts: Vec<framework::Draft>) {
         if drafts.is_empty() {
             return;
         }
@@ -1089,7 +1088,7 @@ impl Shell {
 
             // 最大印刷行数ガード（巨大ファイルでも安全に印刷可能）
             const MAX_PRINT_LINES: usize = 10_000;
-            let Ok(lines) = api::read_lines(handle, 0, MAX_PRINT_LINES).await else {
+            let Ok(lines) = framework::read_lines(handle, 0, MAX_PRINT_LINES).await else {
                 shell
                     .status
                     .set("印刷データの読み込みに失敗しました".into());

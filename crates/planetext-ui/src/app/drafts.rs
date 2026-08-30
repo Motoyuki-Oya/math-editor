@@ -13,9 +13,9 @@ use leptos::task::spawn_local;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 
-use super::api;
 use super::shell::Tab;
 use super::sync;
+use crate::framework::remove_draft;
 
 /// 下書きが書き込まれるまでに入力を停止する必要がある時間。そのため、下書きにはキーストロークごとに 1 回ではなく、一時停止ごとに 1 回の書き込みがかかります。
 const IDLE_MS: i32 = 1200;
@@ -69,5 +69,5 @@ fn flush() {
 pub(super) fn forget(tab: Tab) {
     let id = tab.id.get_untracked();
     PENDING.with(|pending| pending.borrow_mut().remove(&id));
-    spawn_local(async move { api::remove_draft(id).await });
+    spawn_local(async move { remove_draft(id).await });
 }

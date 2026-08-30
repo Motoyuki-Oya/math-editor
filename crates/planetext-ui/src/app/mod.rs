@@ -1,6 +1,5 @@
 //! アプリケーション シェル: 構造パレット、検索バー、ステータス バー。メニュー自体はオペレーティング システム独自のものです (`menu` および `src-tauri` を参照)。
 
-mod api;
 mod drafts;
 mod find;
 mod keys;
@@ -20,7 +19,7 @@ use preferences::Preferences;
 use shell::{Pane, Shell};
 
 use crate::editor;
-use crate::framework::{gui, GuiFramework};
+use crate::framework::{gui, read_drafts, read_settings, GuiFramework};
 use crate::settings;
 
 #[component]
@@ -50,10 +49,10 @@ pub fn App() -> impl IntoView {
         menu::install(shell);
         spawn_local(async move {
             // 起動もユーザーの変更と同じ入口を通ります。適用だけでは、保存されていた行番号や折り返しが最初の画面に出ず、メニューのチェックと食い違います。
-            preferences::take_effect(settings::read(&api::read_settings().await));
+            preferences::take_effect(settings::read(&read_settings().await));
             // 保存された設定がある場所にメニューのチェック マークが付けられます。
             menu::show_state(shell);
-            shell.restore_drafts(api::read_drafts().await);
+            shell.restore_drafts(read_drafts().await);
             let _ = gui().ready().await;
         });
     });
