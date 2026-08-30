@@ -191,7 +191,7 @@ fn framework_specific_apis_stop_at_the_connectors() {
         }
     }
 
-    let core = root.join("crates/planetext-document");
+    let core = root.join("../planetext-document");
     let manifest = fs::read_to_string(core.join("Cargo.toml")).expect("the core manifest");
     for name in ["tauri", "wry", "gpui", "arboard", "tokio"] {
         assert!(

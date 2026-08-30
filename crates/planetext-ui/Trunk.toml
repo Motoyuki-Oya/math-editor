@@ -1,8 +1,9 @@
 [build]
 target = "./index.html"
+dist = "../../dist"
 
 [watch]
-ignore = ["./src-tauri"]
+ignore = ["../../src-tauri"]
 
 [serve]
 port = 1420
