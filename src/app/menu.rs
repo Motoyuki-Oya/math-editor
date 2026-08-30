@@ -8,13 +8,13 @@ use leptos::task::spawn_local;
 use super::preferences::change;
 use super::shell::{Field, Shell};
 use crate::editor;
-use crate::ipc;
+use crate::framework::tauri;
 use crate::settings;
 use crate::settings::Settings;
 
 /// メニュー バーから選択された内容のリッスンを開始し、現在何がオンであるかをメニューに伝えます。
 pub(super) fn install(shell: Shell) {
-    ipc::on_menu(move |name| choose(shell, name, From::Menu));
+    tauri::on_menu(move |name| choose(shell, name, From::Menu));
     show_state(shell);
 }
 
@@ -76,7 +76,7 @@ pub(super) fn show_state(shell: Shell) {
     let settings = settings::current();
     let split = shell.panes.with_untracked(Vec::len) > 1;
     spawn_local(async move {
-        ipc::sync_view_menu(
+        tauri::sync_view_menu(
             settings.wrap,
             settings.line_numbers,
             settings.show_whitespace,

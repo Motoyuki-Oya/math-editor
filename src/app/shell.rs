@@ -4,10 +4,11 @@ use leptos::prelude::*;
 use leptos::reactive::owner::{LocalStorage, Owner};
 use leptos::task::spawn_local;
 
+use super::api;
 use super::drafts;
 use super::sync;
 use crate::editor;
-use crate::ipc;
+use crate::framework::tauri;
 
 const UNTITLED: &str = "無題";
 
@@ -65,10 +66,10 @@ impl Tab {
     pub(super) fn assign_document(&self) {
         let tab = *self;
         spawn_local(async move {
-            if let Some(doc) = ipc::create_document().await {
+            if let Some(doc) = api::create_document().await {
                 // 取っ手が既にある（開くが先に済んだ）なら、作った文書は要らない。
                 if tab.doc.get_untracked().is_some() {
-                    ipc::close_document(doc.handle).await;
+                    api::close_document(doc.handle).await;
                 } else {
                     tab.doc.set(Some(doc.handle));
                     tab.encoding.set(doc.encoding);
@@ -82,7 +83,7 @@ impl Tab {
     pub(super) fn release_document(&self) {
         if let Some(handle) = self.doc.get_untracked() {
             self.doc.set(None);
-            spawn_local(async move { ipc::close_document(handle).await });
+            spawn_local(async move { api::close_document(handle).await });
         }
     }
 
@@ -278,7 +279,7 @@ impl Shell {
                     .with_untracked(|tabs| tabs.iter().any(|tab| tab.dirty.get_untracked()))
             })
         });
-        spawn_local(ipc::set_dirty(any));
+        spawn_local(api::set_dirty(any));
     }
 
     /// エディターのペインに表示されているタブ。
@@ -515,7 +516,7 @@ impl Shell {
                 return;
             };
             if tab.dirty.get_untracked()
-                && !ipc::confirm_discard("保存されていない変更があります。破棄しますか？").await
+                && !tauri::confirm_discard("保存されていない変更があります。破棄しますか？").await
             {
                 return;
             }
@@ -617,7 +618,7 @@ impl Shell {
                 .enumerate()
                 .any(|(i, t)| i != keep_index && t.dirty.get_untracked());
             if has_dirty
-                && !ipc::confirm_discard(
+                && !tauri::confirm_discard(
                     "保存されていない変更があるタブが含まれています。破棄しますか？",
                 )
                 .await
@@ -661,7 +662,7 @@ impl Shell {
             let closing = &tabs[index + 1..];
             let has_dirty = closing.iter().any(|t| t.dirty.get_untracked());
             if has_dirty
-                && !ipc::confirm_discard(
+                && !tauri::confirm_discard(
                     "保存されていない変更があるタブが含まれています。破棄しますか？",
                 )
                 .await
@@ -899,10 +900,10 @@ impl Shell {
     pub(super) fn open(&self) {
         let shell = *self;
         spawn_local(async move {
-            let Some(path) = ipc::pick_open_path().await else {
+            let Some(path) = tauri::pick_open_path().await else {
                 return;
             };
-            match ipc::open_document(&path).await {
+            match api::open_document(&path).await {
                 Ok(doc) => {
                     let pane = shell.pane_untracked();
                     let tab = shell.add_tab(pane);
@@ -925,7 +926,7 @@ impl Shell {
                     // 行数はバックグラウンドで走査中。確定したら手元へ合わせる。
                     let handle = doc.handle;
                     spawn_local(async move {
-                        match ipc::finish_document(handle).await {
+                        match api::finish_document(handle).await {
                             Ok(count) => {
                                 shell.document_scanned(handle, count);
                             }
@@ -947,7 +948,7 @@ impl Shell {
         };
         let enc = encoding.to_string();
         spawn_local(async move {
-            match ipc::reopen_document_encoding(handle, &enc).await {
+            match api::reopen_document_encoding(handle, &enc).await {
                 Ok(reopened) => {
                     tab.encoding.set(reopened.encoding.clone());
                     tab.line_ending.set(reopened.line_ending);
@@ -970,7 +971,7 @@ impl Shell {
         tab.encoding.set(enc.clone());
         if let Some(handle) = tab.doc.get_untracked() {
             spawn_local(async move {
-                let _ = ipc::set_document_encoding(handle, &enc).await;
+                let _ = api::set_document_encoding(handle, &enc).await;
             });
         }
         self.mark_dirty_tab(tab);
@@ -983,7 +984,7 @@ impl Shell {
         tab.line_ending.set(le.clone());
         if let Some(handle) = tab.doc.get_untracked() {
             spawn_local(async move {
-                let _ = ipc::set_document_line_ending(handle, &le).await;
+                let _ = api::set_document_line_ending(handle, &le).await;
             });
         }
         self.mark_dirty_tab(tab);
@@ -1022,7 +1023,7 @@ impl Shell {
     }
 
     /// アプリケーションが最後に停止したときに画面に表示されていたものを開きます。ドラフトは未保存のタブとして返され、番号が保持されるため、2 番目のストップで同じドラフトが上書きされます。
-    pub(super) fn restore_drafts(&self, drafts: Vec<ipc::Draft>) {
+    pub(super) fn restore_drafts(&self, drafts: Vec<api::Draft>) {
         if drafts.is_empty() {
             return;
         }
@@ -1052,7 +1053,7 @@ impl Shell {
         spawn_local(async move {
             let path = match current {
                 Some(path) if !force_dialog => path,
-                _ => match ipc::pick_save_path(&default_name).await {
+                _ => match tauri::pick_save_path(&default_name).await {
                     Some(path) => path,
                     None => return,
                 },
@@ -1085,7 +1086,7 @@ impl Shell {
 
             // 最大印刷行数ガード（巨大ファイルでも安全に印刷可能）
             const MAX_PRINT_LINES: usize = 10_000;
-            let Ok(lines) = ipc::read_lines(handle, 0, MAX_PRINT_LINES).await else {
+            let Ok(lines) = api::read_lines(handle, 0, MAX_PRINT_LINES).await else {
                 shell
                     .status
                     .set("印刷データの読み込みに失敗しました".into());

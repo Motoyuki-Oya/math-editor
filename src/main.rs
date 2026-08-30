@@ -1,7 +1,7 @@
 mod app;
 mod editor;
 mod format;
-mod ipc;
+mod framework;
 mod settings;
 mod structure;
 pub mod syntax;

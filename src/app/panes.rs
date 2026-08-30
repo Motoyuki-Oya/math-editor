@@ -9,7 +9,7 @@ use super::hold_focus;
 use super::palette::Palette;
 use super::shell::{self, Pane, Shell};
 use crate::editor;
-use crate::ipc;
+use crate::framework::tauri;
 use leptos::task::spawn_local;
 
 /// タブのコンテキストメニュー状態。
@@ -86,7 +86,7 @@ pub(super) fn PaneView(
 
     let open_url = move |url: String| {
         spawn_local(async move {
-            ipc::open_external_url(&url).await;
+            tauri::open_external_url(&url).await;
         });
     };
 

@@ -13,9 +13,9 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use wasm_bindgen::JsCast;
 
+use super::api;
 use super::shell::{Shell, Tab};
 use crate::editor;
-use crate::ipc;
 
 /// 一度に取り寄せる行数。見えている窓と少しの余白が 1 回で届く程度。
 const CHUNK_LINES: usize = 20_000;
@@ -189,7 +189,7 @@ fn cancel_running_search(tab: Tab) {
     });
     if let Some(Task::Find { .. }) = task {
         if let Some(handle) = tab.doc.get_untracked() {
-            spawn_local(async move { ipc::cancel_search(handle).await });
+            spawn_local(async move { api::cancel_search(handle).await });
         }
     }
 }
@@ -245,7 +245,7 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
     match task {
         Task::Fetch(range) => {
             let count = range.len().min(CHUNK_LINES);
-            let Ok(lines) = ipc::read_lines(handle, range.start, count).await else {
+            let Ok(lines) = api::read_lines(handle, range.start, count).await else {
                 return false;
             };
             if !lines.is_empty() {
@@ -256,7 +256,7 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
                 enqueue(tab, Task::Fetch(rest));
             }
         }
-        Task::FetchTail { pane } => match ipc::read_tail(handle, TAIL_LINES).await {
+        Task::FetchTail { pane } => match api::read_tail(handle, TAIL_LINES).await {
             Ok(lines) => {
                 editor::show_tail(pane, &lines);
                 shell.status.set("末尾を表示しました（行数確認中）".into());
@@ -265,7 +265,7 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
         },
         Task::Edits(batch) => {
             for edit in &batch.edits {
-                if ipc::replace_lines(
+                if api::replace_lines(
                     handle,
                     edit.from,
                     edit.to,
@@ -282,7 +282,7 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
             }
         }
         Task::Undo { redo } => {
-            if let Some(restored) = ipc::undo_lines(handle, redo).await {
+            if let Some(restored) = api::undo_lines(handle, redo).await {
                 shell.apply_restored(
                     tab,
                     &restored.state,
@@ -297,7 +297,7 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
                 }
             }
         }
-        Task::Save { path } => match ipc::save_document(handle, &path).await {
+        Task::Save { path } => match api::save_document(handle, &path).await {
             Ok(()) => {
                 editor::set_doc_path(tab.id.get_untracked(), Some(path.clone()));
                 tab.path.set(Some(path));
@@ -309,7 +309,7 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
         Task::Draft => {
             let id = tab.id.get_untracked();
             let path = tab.path.get_untracked();
-            ipc::save_draft(handle, id, path.as_deref()).await;
+            api::save_draft(handle, id, path.as_deref()).await;
         }
         Task::Copy(copy) => match assemble_copy(handle, copy).await {
             Ok(()) => shell.status.set("コピーしました".into()),
@@ -356,7 +356,7 @@ async fn find_far(
     for (mut from, end, filter) in passes {
         let mut after_col = filter.map(|after| after.0.col);
         while from < end {
-            let page = ipc::search_document(
+            let page = api::search_document(
                 handle,
                 query,
                 options.regex,
@@ -372,7 +372,7 @@ async fn find_far(
             }
             for hit in &page.hits {
                 if hit.notation {
-                    let lines = ipc::read_lines(handle, hit.line, 1).await?;
+                    let lines = api::read_lines(handle, hit.line, 1).await?;
                     shell.feed(tab, hit.line, &lines);
                     if editor::find_far_in_line(pane, hit.line, query, options, file_size, filter) {
                         return Ok(Some(true));
@@ -403,7 +403,7 @@ async fn assemble_copy(handle: u64, copy: editor::FarCopy) -> Result<(), String>
     use crate::structure::plain;
     use crate::structure::text::SourceLine;
     let mut overrides = copy.overrides;
-    let notation = ipc::lines_containing(
+    let notation = api::lines_containing(
         handle,
         copy.from_line,
         copy.to_line,
@@ -417,7 +417,7 @@ async fn assemble_copy(handle: u64, copy: editor::FarCopy) -> Result<(), String>
         {
             continue;
         }
-        let text = ipc::read_lines(handle, line, 1).await?;
+        let text = api::read_lines(handle, line, 1).await?;
         let Some(text) = text.first() else { continue };
         let plain = match document::read_line(text) {
             SourceLine::Parsed(row) => plain::row(&row),
@@ -425,7 +425,7 @@ async fn assemble_copy(handle: u64, copy: editor::FarCopy) -> Result<(), String>
         };
         overrides.push((line, plain));
     }
-    ipc::copy_range(
+    api::copy_range(
         handle,
         copy.from_line,
         copy.first.as_deref(),
