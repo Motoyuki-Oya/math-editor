@@ -243,8 +243,6 @@ pub struct Cursor {
     pub path: Vec<(usize, usize)>,
     pub index: usize,
     pub anchor: usize,
-    /// 行に書き込まれる 1 つの内容を待機している行の深さ。 `/` を入力すると下の行が開き、次に書き込まれた内容が取り込まれてからキャレットが戻されるため、 `a/b + 1` は入力されたとおりに読み取ります。 'a/(b + 1)' のように、長い下の行は括弧で囲まれます。キャレットを移動すると待機が終了します。これ以降、ユーザーは書き込みではなく編集を行うためです。
-    pub fills: Vec<usize>,
 }
 
 impl Cursor {
@@ -253,7 +251,6 @@ impl Cursor {
             path: Vec::new(),
             index,
             anchor: index,
-            fills: Vec::new(),
         }
     }
 

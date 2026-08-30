@@ -6,4 +6,5 @@ pub mod ast;
 pub mod edit;
 pub mod plain;
 pub mod text;
+pub mod trigger;
 pub mod vocabulary;

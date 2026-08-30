@@ -123,19 +123,7 @@ impl Editor {
                     .map(|(node, slot)| format!("{node}.{slot}"))
                     .collect::<Vec<_>>()
                     .join(",");
-                let fills = cursor
-                    .fills
-                    .iter()
-                    .map(usize::to_string)
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let transient = selection
-                    .transient_structure
-                    .map_or_else(|| "_".to_string(), |at| at.to_string());
-                format!(
-                    "{base}@{path}@{}@{}@{fills}@{transient}",
-                    cursor.index, cursor.anchor
-                )
+                format!("{base}@{path}@{}@{}", cursor.index, cursor.anchor)
             })
             .collect::<Vec<_>>()
             .join(";")
@@ -158,11 +146,7 @@ impl Editor {
                     head: self.text.clamp(parse(head)?),
                 };
                 let Some(path) = fields.next() else {
-                    return Some(super::UnifiedCursor {
-                        sel,
-                        inside: None,
-                        transient_structure: None,
-                    });
+                    return Some(super::UnifiedCursor { sel, inside: None });
                 };
                 let path = path
                     .split(',')
@@ -174,26 +158,13 @@ impl Editor {
                     .collect::<Option<Vec<_>>>()?;
                 let index = fields.next()?.parse().ok()?;
                 let cursor_anchor = fields.next()?.parse().ok()?;
-                let fills = fields
-                    .next()?
-                    .split(',')
-                    .filter(|part| !part.is_empty())
-                    .map(str::parse)
-                    .collect::<Result<Vec<_>, _>>()
-                    .ok()?;
-                let transient = match fields.next()? {
-                    "_" => None,
-                    value => value.parse().ok(),
-                };
                 Some(super::UnifiedCursor {
                     sel,
                     inside: Some(Cursor {
                         path,
                         index,
                         anchor: cursor_anchor,
-                        fills,
                     }),
-                    transient_structure: transient,
                 })
             })
             .collect();

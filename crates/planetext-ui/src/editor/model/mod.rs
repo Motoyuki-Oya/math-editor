@@ -184,7 +184,6 @@ impl Editor {
     pub(super) fn clear_inside(&mut self) {
         for cursor in &mut self.cursors {
             cursor.inside = None;
-            cursor.transient_structure = None;
         }
     }
 
@@ -391,8 +390,6 @@ pub(crate) mod tests {
         editor.set_caret(Pos::new(0, 1));
         editor.add_caret(Pos::new(1, 1));
         editor.start_structure();
-        editor.cursors[0].inside.as_mut().unwrap().fills = vec![2, 3];
-        editor.cursors[0].transient_structure = Some(1);
         let state = editor.state_string();
         let expected = editor.cursors.clone();
         editor.set_caret(Pos::default());
@@ -436,6 +433,7 @@ pub(crate) mod tests {
         editor.add_caret(Pos::new(0, 3));
         editor.start_structure();
         editor.insert_text("/");
+        editor.insert_text(" ");
         let row = editor.text().line(0);
         assert!(matches!(
             row[0].kind,
@@ -563,7 +561,7 @@ pub(crate) mod tests {
                 path: vec![(1, lower)],
                 index: 0,
                 anchor: 0,
-                fills: Vec::new(),
+
             },
         ));
 

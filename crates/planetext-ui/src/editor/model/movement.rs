@@ -174,11 +174,7 @@ impl Editor {
         }
         self.cursors = sels
             .into_iter()
-            .map(|sel| UnifiedCursor {
-                sel,
-                inside: None,
-                transient_structure: None,
-            })
+            .map(|sel| UnifiedCursor { sel, inside: None })
             .collect();
         self.merge_sels();
     }
@@ -224,7 +220,6 @@ impl Editor {
         self.cursors.push(UnifiedCursor {
             sel: found,
             inside: None,
-            transient_structure: None,
         });
         true
     }

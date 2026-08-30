@@ -138,8 +138,6 @@ pub fn shifted(pos: Pos, to: Pos, end: Pos) -> Pos {
 pub struct UnifiedCursor {
     pub sel: Sel,
     pub inside: Option<Cursor>,
-    /// 本文トリガーが今回構造を作る文書行内の位置。
-    pub transient_structure: Option<usize>,
 }
 
 impl UnifiedCursor {
@@ -147,7 +145,6 @@ impl UnifiedCursor {
         Self {
             sel: Sel::caret(at),
             inside: None,
-            transient_structure: None,
         }
     }
 
@@ -155,7 +152,6 @@ impl UnifiedCursor {
         Self {
             sel: Sel::range(from, to),
             inside: None,
-            transient_structure: None,
         }
     }
 }
@@ -230,11 +226,7 @@ impl Editor {
             let next_col = (at.col + 1).min(line_len);
             Sel::range(at, Pos::new(at.line, next_col))
         });
-        self.cursors = vec![UnifiedCursor {
-            sel,
-            inside: None,
-            transient_structure: None,
-        }];
+        self.cursors = vec![UnifiedCursor { sel, inside: None }];
         super::Did::Moved
     }
 
@@ -243,11 +235,7 @@ impl Editor {
         self.leave_structure();
         let line_len = self.document.text.line_len(at.line);
         let sel = Sel::range(Pos::new(at.line, 0), Pos::new(at.line, line_len));
-        self.cursors = vec![UnifiedCursor {
-            sel,
-            inside: None,
-            transient_structure: None,
-        }];
+        self.cursors = vec![UnifiedCursor { sel, inside: None }];
         super::Did::Moved
     }
 }

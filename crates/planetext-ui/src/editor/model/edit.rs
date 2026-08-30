@@ -92,6 +92,12 @@ impl Editor {
         if self.touches_absent() {
             return Did::Nothing;
         }
+        let mut chars = text.chars();
+        if let (Some(c), None) = (chars.next(), chars.next()) {
+            if self.convert_typed(c) {
+                return Did::Changed;
+            }
+        }
         let top_level: Vec<usize> = self
             .cursors
             .iter()
@@ -314,9 +320,7 @@ impl Editor {
                     path: vec![(at.col, slot)],
                     index: 0,
                     anchor: 0,
-                    fills: Vec::new(),
                 }),
-                transient_structure: None,
             }];
             return Did::Changed;
         }
@@ -472,11 +476,6 @@ impl Editor {
             None
         });
         Did::Changed
-    }
-
-    /// 検索と置換によって使用される1つの範囲を置換します。
-    pub fn replace_range(&mut self, from: Pos, to: Pos, with: &str) {
-        self.replace_range_with(from, to, nodes_of(with));
     }
 
     /// カラムの区切り文字よりも多くの文字を入れる置換のために、アイテムと範囲を置換します。

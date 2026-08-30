@@ -5,6 +5,7 @@ use super::Editor;
 use crate::structure::ast::{row_at, Cursor, Node, Row};
 use crate::structure::edit::{Editing, Escape};
 use crate::structure::text::{before_col, Pos, Sel};
+use crate::structure::trigger::{self, Conversion};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Inside {
@@ -26,7 +27,6 @@ impl Editor {
         }
         for cursor in &mut self.cursors {
             cursor.inside = Some(Cursor::root(cursor.head.col));
-            cursor.transient_structure = None;
         }
         self.recorder.cut();
     }
@@ -41,7 +41,6 @@ impl Editor {
         self.cursors = vec![super::UnifiedCursor {
             sel: Sel::caret(at),
             inside: Some(Cursor::root(if from_start { at.col } else { at.col + 1 })),
-            transient_structure: None,
         }];
         self.with_cursor(Inside::Move, |editing| {
             if from_start {
@@ -61,7 +60,6 @@ impl Editor {
         self.cursors = vec![super::UnifiedCursor {
             sel: Sel::caret(at),
             inside: Some(cursor.clone()),
-            transient_structure: None,
         }];
         true
     }
@@ -95,7 +93,6 @@ impl Editor {
             let Some(cursor) = selection.inside.take() else {
                 continue;
             };
-            selection.transient_structure = None;
             let col = cursor
                 .path
                 .first()
@@ -218,40 +215,19 @@ impl Editor {
                 self.modified_lines.insert(line);
             }
         }
-        let transient_structure = self.cursors[index].transient_structure;
         let Some(root) = self.document.text.line_mut(line) else {
             return false;
         };
         let escape = command(&mut Editing::new(root, &mut cursor));
-        let transient_done = transient_structure.is_some_and(|at| {
-            cursor.path.is_empty()
-                && root.get(at).is_some_and(|node| {
-                    !matches!(
-                        node.kind,
-                        crate::structure::ast::NodeKind::Char(_)
-                            | crate::structure::ast::NodeKind::Tab
-                    ) || !node.upper.is_empty()
-                        || !node.lower.is_empty()
-                })
-        });
         self.cursors[index].inside = Some(cursor);
         if let Some(escape) = escape {
             self.finish_cursor(index, line, escape);
-        } else if transient_done {
-            let col = self.cursors[index]
-                .inside
-                .as_ref()
-                .map_or(0, |cursor| cursor.index);
-            self.cursors[index].inside = None;
-            self.cursors[index].transient_structure = None;
-            self.cursors[index].sel = Sel::caret(Pos::new(line, col));
         }
         true
     }
 
     fn finish_cursor(&mut self, index: usize, line: usize, escape: Escape) {
         let cursor = self.cursors[index].inside.take().unwrap_or_default();
-        self.cursors[index].transient_structure = None;
         let col = match escape {
             Escape::Left | Escape::Delete => 0,
             Escape::Right => cursor.index.min(self.text.line_len(line)),
@@ -272,7 +248,6 @@ impl Editor {
         self.cursors.push(super::UnifiedCursor {
             sel: Sel::caret(at),
             inside: Some(cursor),
-            transient_structure: None,
         });
         self.merge_sels();
         true
@@ -395,7 +370,7 @@ impl Editor {
                 let before_len = row_at(editor.text.line(line), &before.path).map(|row| row.len());
                 let mut left = false;
                 done |= editor.with_cursor_at(index, Inside::Type, |editing| {
-                    if c == ' ' && editing.commit_command() {
+                    if apply_trigger(editing, c) {
                         return None;
                     }
                     let escape = editing.insert_char(c);
@@ -431,15 +406,6 @@ impl Editor {
         done
     }
 
-    pub fn limit_trigger_to_structure(&mut self) {
-        let transient = self
-            .primary_cursor()
-            .inside
-            .as_ref()
-            .map(|cursor| cursor.index);
-        self.primary_cursor_mut().transient_structure = transient;
-    }
-
     pub(super) fn move_vertical_cursors(&mut self, down: bool) {
         let indices: Vec<usize> = self
             .cursors
@@ -460,7 +426,6 @@ impl Editor {
             });
             if !moved {
                 self.cursors[index].inside = None;
-                self.cursors[index].transient_structure = None;
             }
         }
     }
@@ -477,6 +442,104 @@ impl Editor {
         };
         at.is_some_and(|at| self.enter_node(at, forward))
     }
+
+    /// キャレットがある各 Row で、トリガー文字が構造へ移るなら変換する。
+    pub fn convert_typed(&mut self, c: char) -> bool {
+        if self.touches_absent() {
+            return false;
+        }
+        if self.cursors.iter().any(|cursor| {
+            !cursor.is_caret()
+                || cursor
+                    .inside
+                    .as_ref()
+                    .is_some_and(|inside| !inside.is_caret())
+        }) {
+            return false;
+        }
+        let ready: Vec<usize> = (0..self.cursors.len())
+            .filter(|&index| {
+                let cursor = &self.cursors[index];
+                let line = self.text.line(cursor.head.line);
+                let (row, col) = match &cursor.inside {
+                    Some(inside) => (row_at(line, &inside.path).unwrap_or(line), inside.index),
+                    None => (line, cursor.head.col),
+                };
+                trigger::conversion_for(row, col, c).is_some()
+            })
+            .collect();
+        if ready.is_empty() {
+            return false;
+        }
+        // 複数キャレットでは全員が同じトリガーを完了したときだけ変換し、それ以外は通常の文字入力にする。
+        if self.cursors.len() > 1 && ready.len() != self.cursors.len() {
+            return false;
+        }
+        self.one_step(|editor| {
+            let mut processed = Vec::new();
+            for &index in ready.iter().rev() {
+                if editor.cursors[index].inside.is_none() {
+                    let col = editor.cursors[index].head.col;
+                    editor.cursors[index].inside = Some(Cursor::root(col));
+                }
+                let Some(before) = editor.cursors[index].inside.clone() else {
+                    continue;
+                };
+                let line = editor.cursors[index].head.line;
+                let from_root = before.path.is_empty();
+                let before_len =
+                    row_at(editor.text.line(line), &before.path).map(|row| row.len());
+                editor.with_cursor_at(index, Inside::Change, |editing| {
+                    apply_trigger(editing, c);
+                    None
+                });
+                let after_len = row_at(editor.text.line(line), &before.path).map(|row| row.len());
+                if let (Some(before_len), Some(after_len)) = (before_len, after_len) {
+                    let delta = after_len as isize - before_len as isize;
+                    if delta != 0 {
+                        editor.shift_after_nested_edit(
+                            &processed,
+                            line,
+                            &before.path,
+                            before.index,
+                            delta,
+                        );
+                    }
+                }
+                processed.push(index);
+                if !from_root {
+                    continue;
+                }
+                match editor.cursors[index].inside.clone() {
+                    Some(inside) if inside.path.is_empty() => {
+                        editor.cursors[index].inside = None;
+                        editor.cursors[index].sel = Sel::caret(Pos::new(line, inside.index));
+                    }
+                    Some(inside) => {
+                        editor.cursors[index].sel = Sel::caret(Pos::new(line, inside.path[0].0));
+                    }
+                    None => {}
+                }
+            }
+        });
+        true
+    }
+}
+
+fn apply_trigger(editing: &mut Editing<'_>, c: char) -> bool {
+    let Some((consume, conversion)) = trigger::conversion_for(editing.current_row(), editing.cursor.index, c)
+    else {
+        return false;
+    };
+    match conversion {
+        Conversion::Text(text) => {
+            editing.convert_preceding(consume, text.chars().map(Node::char).collect(), None);
+        }
+        Conversion::Structure { nodes, enter } => {
+            editing.convert_preceding(consume, nodes, enter);
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -491,28 +554,60 @@ mod tests {
         editor.set_caret(Pos::new(0, 5));
         editor.start_structure();
         editor.type_with_cursor('/');
-        editor.type_with_cursor('c');
         editor.type_with_cursor(' ');
-        editor.insert_text("+ d");
+        editor.type_with_cursor('c');
         let row = editor.text().line(0);
-        assert!(matches!(row[4].kind, NodeKind::Stack { .. }));
-        assert!(matches!(row[5].kind, NodeKind::Char(' ')));
+        match &row[4].kind {
+            NodeKind::Stack { above, below, .. } => {
+                assert!(matches!(
+                    above.as_slice(),
+                    [Node {
+                        kind: NodeKind::Char('b'),
+                        ..
+                    }]
+                ));
+                assert!(matches!(
+                    below.as_slice(),
+                    [Node {
+                        kind: NodeKind::Char('c'),
+                        ..
+                    }]
+                ));
+            }
+            other => panic!("expected a fraction, got {other:?}"),
+        }
     }
 
     #[test]
-    fn a_trigger_tracks_the_new_structure_in_a_row_with_existing_structures() {
+    fn space_after_slash_converts_at_the_document_row() {
+        let mut editor = editor("1/");
+        editor.set_caret(Pos::new(0, 2));
+        assert!(editor.convert_typed(' '));
+        match &editor.text().line(0)[0].kind {
+            NodeKind::Stack { above, .. } => {
+                assert!(matches!(
+                    above.as_slice(),
+                    [Node {
+                        kind: NodeKind::Char('1'),
+                        ..
+                    }]
+                ));
+            }
+            other => panic!("expected a fraction, got {other:?}"),
+        }
+        assert!(editor.nested_cursor().is_some());
+    }
+
+    #[test]
+    fn nested_slash_stays_text_until_space() {
         let mut editor = editor("");
-        editor.insert(vec![vec![Node::sqrt(None, Vec::new()), Node::char(' ')]]);
         editor.start_structure();
-        editor.limit_trigger_to_structure();
-        for c in "b/c+d".chars() {
+        editor.insert_node(Node::sqrt(None, Vec::new()));
+        for c in "x(x+1)".chars() {
             editor.insert_text(&c.to_string());
         }
-        let row = editor.text().line(0);
-        assert!(matches!(row[0].kind, NodeKind::Sqrt { .. }));
-        assert!(matches!(row[2].kind, NodeKind::Stack { .. }));
-        assert!(matches!(row[3].kind, NodeKind::Char('+')));
-        assert!(matches!(row[4].kind, NodeKind::Char('d')));
+        let body = row_at(editor.text().line(0), &[(0, 0)]).unwrap();
+        assert!(body.iter().all(|node| matches!(node.kind, NodeKind::Char(_))));
     }
 
     #[test]
@@ -525,7 +620,7 @@ mod tests {
             path: vec![(0, 0)],
             index: 0,
             anchor: 0,
-            fills: Vec::new(),
+
         };
         assert!(editor.enter_at(Pos::new(0, 0), &cursor));
         assert!(editor.add_nested(Pos::new(1, 0), cursor));
@@ -548,11 +643,12 @@ mod tests {
             path: vec![(0, 0)],
             index: 1,
             anchor: 1,
-            fills: Vec::new(),
+
         };
         assert!(editor.enter_at(Pos::new(0, 0), &cursor));
         assert!(editor.add_nested(Pos::new(1, 0), cursor));
         editor.insert_text("/");
+        editor.insert_text(" ");
         for line in 0..2 {
             let row = row_at(editor.text().line(line), &[(0, 0)]).unwrap();
             assert!(matches!(row[0].kind, NodeKind::Stack { .. }));
@@ -569,7 +665,7 @@ mod tests {
             path: vec![(0, 0)],
             index: 1,
             anchor: 1,
-            fills: Vec::new(),
+
         };
         let second = Cursor {
             index: 3,
@@ -602,7 +698,7 @@ mod tests {
             path: vec![(0, 0)],
             index: 0,
             anchor: 0,
-            fills: Vec::new(),
+
         };
         assert!(editor.enter_at(Pos::new(0, 0), &cursor));
         assert!(editor.add_nested(Pos::new(1, 0), cursor));
@@ -646,7 +742,7 @@ mod tests {
                 path: vec![(0, 0)],
                 index: 1,
                 anchor: 0,
-                fills: Vec::new(),
+    
             },
             "a\nb\tc",
         ));

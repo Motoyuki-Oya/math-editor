@@ -1,7 +1,6 @@
 //! 文書行と入れ子Rowで共通に使うカーソル移動・編集コマンド。
 
-use super::ast::{is_arrow, row_at, row_at_mut, Between, Cursor, Delim, Node, NodeKind, Row};
-use super::vocabulary;
+use super::ast::{row_at, row_at_mut, Cursor, Node, NodeKind, Row};
 
 /// カーソルが吸収できなかった編集の結果。そのため、周囲のテキスト エディタが代わりに反応する必要があります。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,7 +26,7 @@ impl<'a> Editing<'a> {
         Editing { root, cursor }
     }
 
-    fn current_row(&self) -> &[Node] {
+    pub fn current_row(&self) -> &[Node] {
         row_at(self.root, &self.cursor.path).unwrap_or(self.root)
     }
 
@@ -51,7 +50,6 @@ impl<'a> Editing<'a> {
 
     /// 選択範囲を 1 つずつ拡大するか、行の最後に達すると選択範囲が含まれる構造全体を取得します。
     pub fn extend(&mut self, forward: bool) -> Option<Escape> {
-        self.stop_waiting();
         let index = self.cursor.index;
         let target = if forward {
             (index < self.current_row().len()).then_some(index + 1)
@@ -69,7 +67,6 @@ impl<'a> Editing<'a> {
 
     /// 選択範囲の先頭を `to` に移動します。これが選択範囲のドラッグの方法です。別の行の場所は同じ選択の一部ではないため、推測されずにそのまま残されます。
     pub fn extend_to(&mut self, to: &Cursor) {
-        self.stop_waiting();
         if to.path != self.cursor.path {
             return;
         }
@@ -93,14 +90,12 @@ impl<'a> Editing<'a> {
 
     /// すべて選択の場合は、キャレットが含まれる行全体を選択します。
     pub fn select_row(&mut self) {
-        self.stop_waiting();
         self.cursor.anchor = 0;
         self.cursor.index = self.current_row().len();
     }
 
     /// キャレット位置の単語（英数字、識別子、漢字・カタカナ・ひらがな等）を選択します。
     pub fn select_word(&mut self) {
-        self.stop_waiting();
         let row = self.current_row();
         if row.is_empty() {
             return;
@@ -197,7 +192,6 @@ impl<'a> Editing<'a> {
 
     /// 貼り付けのために、構造の行全体をキャレットに配置します。
     pub fn insert_row(&mut self, nodes: Row) {
-        self.stop_waiting();
         self.take_selection();
         let index = self.cursor.index;
         let count = nodes.len();
@@ -210,7 +204,6 @@ impl<'a> Editing<'a> {
 
     fn place(&mut self, node: Node) {
         self.take_selection();
-        let waits = waits_for_one(&node);
         let entry = if matches!(&node.kind, NodeKind::BigOp(_)) {
             Some(node.lower_slot())
         } else {
@@ -221,155 +214,42 @@ impl<'a> Editing<'a> {
         if let Some(entry) = entry {
             self.cursor.path.push((index, entry));
             self.caret_at(0);
-            if waits {
-                self.wait_for_one();
-            }
         } else {
             self.caret_at(self.cursor.index + 1);
         }
     }
 
-    /// キャレットが存在する行がその 1 つのことを待っているかどうかtake.
-    fn waiting(&self) -> bool {
-        self.cursor.fills.last() == Some(&self.cursor.path.len())
-    }
-
-    /// キャレットが入力した行を 1 つのものだけを取るものとしてマークします。
-    fn wait_for_one(&mut self) {
-        self.cursor.fills.push(self.cursor.path.len());
-    }
-
-    /// 1まとまりの入力を待っていた内側Rowから、待機元のRowへキャレットを戻します。
-    #[must_use]
-    fn settle(&mut self, leave_root: bool) -> Option<Escape> {
-        while self.cursor.fills.last() == Some(&self.cursor.path.len()) {
-            match self.cursor.path.pop() {
-                Some((node, _)) => {
-                    self.cursor.fills.pop();
-                    self.caret_at(node + 1);
-                }
-                // `/`やスクリプトが続く場合は、直前に作った構造へさらに積み重ねます。
-                None if !leave_root => return None,
-                None => {
-                    self.cursor.fills.pop();
-                    return Some(Escape::Right);
-                }
-            }
-        }
-        None
-    }
-
-    /// キャレットの移動は書き込みではなく編集であるため、その 1 つの処理を待つ行はありません。
-    fn stop_waiting(&mut self) {
-        self.cursor.fills.clear();
-    }
-
-    /// マークダウン エディタがショートカットを展開する方法と同じように、入力したばかりの `\name` (または入力された `√` などのグリフ) を、その名前の構造に変換します。
-    pub fn commit_command(&mut self) -> bool {
-        let index = self.cursor.index;
-        let row = self.current_row();
-        let (start, node) = match command_start(row, index) {
-            Some(start) => {
-                let name: String = row[start + 1..index]
-                    .iter()
-                    .filter_map(|node| match &node.kind {
-                        NodeKind::Char(c) => Some(*c),
-                        _ => None,
-                    })
-                    .collect();
-                if let Some(node) = vocabulary::structure_for(&name) {
-                    (start, node)
-                } else if let Some(text) = vocabulary::text_for(&name) {
-                    self.current_row_mut().drain(start..index);
-                    self.caret_at(start);
-                    self.insert_row(text.chars().map(Node::char).collect());
-                    return true;
-                } else {
-                    return false;
-                }
-            }
-            None => match row.get(index.wrapping_sub(1)).map(|node| &node.kind) {
-                Some(NodeKind::Char(c)) => match vocabulary::node_for_glyph(*c) {
-                    Some(node) => (index - 1, node),
-                    None => return false,
-                },
-                _ => return false,
-            },
-        };
-        self.current_row_mut().drain(start..index);
-        self.caret_at(start);
-        self.place(node);
-        true
-    }
-
-    /// 待機中の構造を抜ける文字ではEscapeを返し、呼び出し側が外側Rowへ入力します。
-    pub fn insert_char(&mut self, c: char) -> Option<Escape> {
-        // 待機中の行には、上の行に持ち上げられる文字 `/` と同じ文字列が含まれます。それ以外の書き込みは構造体の外側で行われるため、「a/b + 1」は入力されたとおりに読み取られます。すぐに開いた括弧は、代わりに `a/(b + 1)` という 1 つのことです。
-        if self.waiting()
-            && !carries_on(c)
-            && !(self.current_row().is_empty() && matches!(c, '(' | '['))
-        {
-            if let Some(escape) = self.settle(!builds_on(c)) {
-                return Some(escape);
-            }
-        }
-        match c {
-            '/' => self.insert_stack(Between::Rule),
-            c if is_arrow(c) => self.insert_stack(Between::Arrow(c)),
-            '^' => self.insert(Node::sup(Row::new())),
-            '_' => self.insert(Node::sub(Row::new())),
-            '(' | '[' => self.insert(Node::group(Delim::from_open(c).unwrap(), Row::new())),
-            ')' | ']' => return self.leave_group(),
-            // グリッドは、キャレットがある列ごとに拡大します。それ以外の `&` は単なる文字です。
-            '&' => {
-                if !self.grow_matrix(false) {
-                    self.insert(Node::char('&'));
-                }
-            }
-            _ => self.insert(Node::char(c)),
-        }
-        None
-    }
-
-    /// `/` (または矢印) を入力すると、紙に書くときと同じように、入力した内容がその上に配置されます。
-    pub fn insert_stack(&mut self, between: Between) {
+    /// 直前の `consume` 個のノードを置き換え、必要なら新しい構造のスロットへ入ります。
+    /// トリガー変換(`1/` + スペース)が深さによらず同じ手順で構造を置くために使います。
+    pub fn convert_preceding(
+        &mut self,
+        consume: usize,
+        nodes: Row,
+        enter: Option<(usize, usize)>,
+    ) {
         self.take_selection();
-        let index = self.cursor.index;
-        let start = {
-            let row = self.current_row();
-            above_start(row, index)
-        };
-        let above: Row = self.current_row_mut().drain(start..index).collect();
-        let node = Node::stack(above, Row::new(), between);
-        self.current_row_mut().insert(start, node);
-        self.cursor.path.push((start, 1));
-        self.caret_at(0);
-        self.wait_for_one();
+        let end = self.cursor.index;
+        let start = end.saturating_sub(consume);
+        self.current_row_mut().drain(start..end);
+        let count = nodes.len();
+        for (offset, node) in nodes.into_iter().enumerate() {
+            self.current_row_mut().insert(start + offset, node);
+        }
+        if let Some((offset, slot)) = enter {
+            self.cursor.path.push((start + offset, slot));
+            self.caret_at(0);
+        } else {
+            self.caret_at(start + count);
+        }
     }
 
-    /// 区切り文字を閉じると、キャレットが閉じたグループのすぐ前に移動します。これは、キャレットがその内側にある最も内側の括弧です。括弧内の分母から閉じると、すべてが同じように閉じられます。すべてが入力された場合と同様です。 1 行です。
-    fn leave_group(&mut self) -> Option<Escape> {
-        let mut depth = self.cursor.path.len();
-        while depth > 0 {
-            let (node, _) = self.cursor.path[depth - 1];
-            let parent = &self.cursor.path[..depth - 1];
-            if self
-                .node_at(parent, node)
-                .is_some_and(|node| matches!(&node.kind, NodeKind::Group { .. }))
-            {
-                self.cursor.path.truncate(depth - 1);
-                self.cursor.fills.retain(|&at| at <= self.cursor.path.len());
-                self.caret_at(node + 1);
-                // 外側の行が待っていたのは括弧だけでした。そのため、分数の外側では `a/(b + c) + 1` が続きます。
-                return self.settle(true);
-            }
-            depth -= 1;
-        }
+    /// どの深さでも通常の文字として挿入します。構造化はトリガー+スペース側が行います。
+    pub fn insert_char(&mut self, c: char) -> Option<Escape> {
+        self.insert(Node::char(c));
         None
     }
 
     pub fn backspace(&mut self) -> Option<Escape> {
-        self.stop_waiting();
         if self.take_selection() {
             return None;
         }
@@ -417,7 +297,6 @@ impl<'a> Editing<'a> {
     }
 
     pub fn delete_forward(&mut self) {
-        self.stop_waiting();
         if self.take_selection() {
             return;
         }
@@ -429,7 +308,6 @@ impl<'a> Editing<'a> {
     }
 
     pub fn move_left(&mut self) -> Option<Escape> {
-        self.stop_waiting();
         // 選択範囲を離れると、キャレットがその端に配置されるだけです。
         if self.collapse(false) {
             return None;
@@ -474,7 +352,6 @@ impl<'a> Editing<'a> {
     }
 
     pub fn move_right(&mut self) -> Option<Escape> {
-        self.stop_waiting();
         if self.collapse(true) {
             return None;
         }
@@ -513,7 +390,6 @@ impl<'a> Editing<'a> {
     }
 
     pub fn annotate(&mut self, upper: bool) -> bool {
-        self.stop_waiting();
         let (start, end) = if self.cursor.is_caret() {
             let len = self.current_row().len();
             if self.cursor.index > 0 {
@@ -553,7 +429,6 @@ impl<'a> Editing<'a> {
 
     /// 現在のスロットより上 (または下) にスロットがあるコンテナを探してパスを上っていきます: 分子と分母、上限と下限、または行列の隣接する行。
     fn move_vertically(&mut self, up: bool) -> bool {
-        self.stop_waiting();
         self.collapse(!up);
         let adjacent = if self.cursor.index > 0 {
             Some(self.cursor.index - 1)
@@ -643,12 +518,10 @@ impl<'a> Editing<'a> {
     }
 
     pub fn move_home(&mut self) {
-        self.stop_waiting();
         self.caret_at(0);
     }
 
     pub fn move_end(&mut self) {
-        self.stop_waiting();
         self.caret_at(self.current_row().len());
     }
 
@@ -704,64 +577,11 @@ impl<'a> Editing<'a> {
     }
 }
 
-/// 入力された文字が基になるかどうかそれに従うのではなく、書き込まれたばかりの構造: `a/b/c` はスタックし、`a/b^2` はスクリプトを取得します。
-fn builds_on(c: char) -> bool {
-    matches!(c, '/' | '^' | '_') || is_arrow(c)
-}
-
-/// 入力された文字が、現在の構造を作る1まとまりとして続くかを判定します。
-fn carries_on(c: char) -> bool {
-    c.is_alphanumeric()
-        || matches!(c, '.' | '\\' | '^' | '_')
-        || vocabulary::node_for_glyph(c).is_some()
-}
-
-/// この構造体が開く行が 1 つのことを実行してからキャレットを戻すかどうか。これらは、1 次元の読み取りで括弧なしで書き込まれる構造 (`√2 + 1`、`x^2 + 1`) なので、書き込みは同じ方法で終了する必要があります。それより長いものは括弧で囲まれます: `√(a + b)`。
-fn waits_for_one(node: &Node) -> bool {
-    matches!(
-        &node.kind,
-        NodeKind::Sqrt { index: None, .. } | NodeKind::Sup(_) | NodeKind::Sub(_)
-    )
-}
-
-/// `/` が入力されたときに暗黙的に上の行が始まる場所を見つけます。つまり、キャレットの直前の一連の文字 (または単一のグループ) です。
-fn above_start(row: &[Node], index: usize) -> usize {
-    if index == 0 {
-        return 0;
-    }
-    match &row[index - 1].kind {
-        NodeKind::Char(c) if c.is_alphanumeric() || *c == '.' => {
-            let mut start = index - 1;
-            while start > 0 {
-                match &row[start - 1].kind {
-                    NodeKind::Char(c) if c.is_alphanumeric() || *c == '.' => start -= 1,
-                    _ => break,
-                }
-            }
-            start
-        }
-        _ => index - 1,
-    }
-}
-
-/// キャレットで終わるコマンド ワードを開始する `\` を見つけます。
-fn command_start(row: &[Node], index: usize) -> Option<usize> {
-    let mut start = index;
-    while start > 0 {
-        match &row[start - 1].kind {
-            NodeKind::Char(c) if c.is_ascii_alphabetic() => start -= 1,
-            NodeKind::Char('\\') => return (start < index).then_some(start - 1),
-            _ => return None,
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// ここでのフィクスチャのみが表記法を通過します。この層のテスト以外には、構造体がどのように書かれているかを知るものは何もありません。
     use crate::format::notation;
+    use crate::structure::trigger::{self, Conversion};
 
     /// 編集対象のRowとCursorをまとめたテスト用フィクスチャ。
     struct Fixture {
@@ -789,8 +609,36 @@ mod tests {
 
         fn type_in(&mut self, text: &str) {
             for c in text.chars() {
-                self.edit().insert_char(c);
+                self.type_char(c);
             }
+        }
+
+        fn type_char(&mut self, c: char) {
+            if self.apply_trigger(c) {
+                return;
+            }
+            self.edit().insert_char(c);
+        }
+
+        fn apply_trigger(&mut self, c: char) -> bool {
+            let index = self.cursor.index;
+            let Some((consume, conversion)) = trigger::conversion_for(self.edit().current_row(), index, c)
+            else {
+                return false;
+            };
+            match conversion {
+                Conversion::Text(text) => {
+                    self.edit().convert_preceding(
+                        consume,
+                        text.chars().map(Node::char).collect(),
+                        None,
+                    );
+                }
+                Conversion::Structure { nodes, enter } => {
+                    self.edit().convert_preceding(consume, nodes, enter);
+                }
+            }
+            true
         }
 
         fn to_notation(&self) -> String {
@@ -806,103 +654,65 @@ mod tests {
     }
 
     #[test]
-    fn backslash_shortcut_expands_into_a_structure() {
+    fn slash_and_parens_stay_ordinary_until_space() {
         let mut island = Fixture::new();
-        island.type_in("\\sqrt");
-        assert!(island.edit().commit_command());
-        island.type_in("2");
-        assert_eq!(island.to_notation(), "√ 2");
+        island.type_in("a/(b + c)");
+        // `/` は特殊文字なので記法では重ね書きする。括弧はそのまま文字。
+        assert_eq!(island.to_notation(), "a//(b + c)");
     }
 
     #[test]
-    fn typed_glyph_expands_like_its_command() {
+    fn space_after_slash_turns_the_preceding_run_into_a_fraction() {
         let mut island = Fixture::new();
-        island.type_in("√");
-        assert!(island.edit().commit_command());
-        island.type_in("2");
-        assert_eq!(island.to_notation(), "√ 2");
-    }
-
-    #[test]
-    fn unknown_backslash_shortcut_is_left_alone() {
-        let mut island = Fixture::new();
-        island.type_in("\\nope");
-        assert!(!island.edit().commit_command());
-    }
-
-    #[test]
-    fn slash_takes_the_preceding_run_as_the_upper_row() {
-        let mut island = Fixture::new();
-        island.type_in("1+ab/");
+        island.type_in("1+ab/ ");
         island.type_in("2c");
         assert_eq!(island.to_notation(), "1+$(ab/2c)");
     }
 
     #[test]
-    fn a_closing_bracket_leaves_the_brackets_from_inside_a_fraction() {
+    fn grouped_text_becomes_the_upper_row_the_same_way() {
         let mut island = Fixture::new();
-        island.type_in("1/(2/3)+4");
-        // `+4` は、その下の行に落ちずに分数をたどります。
-        assert_eq!(island.to_notation(), "$(1/($(2/3)))+4");
-    }
-
-    /// 下の行は、`/` 自体が持ち上げられてキャレットを戻すので、入力された内容は、行に書かれたとおりに読み取られます。
-    #[test]
-    fn a_lower_row_takes_one_run_and_then_hands_the_caret_back() {
-        let mut island = Fixture::new();
-        island.type_in("a/b + 1");
-        assert_eq!(island.to_notation(), "$(a/b) + 1");
+        island.type_in("(x+1)/ ");
+        island.type_in("2");
+        assert_eq!(island.to_notation(), "x+1/2");
     }
 
     #[test]
-    fn a_longer_lower_row_is_written_in_brackets() {
+    fn nested_rows_use_the_same_space_trigger() {
         let mut island = Fixture::new();
-        island.type_in("a/(b + c) + 1");
-        assert_eq!(island.to_notation(), "$(a/(b + c)) + 1");
+        island.type_in("a/ ");
+        island.type_in("(x+1)/ ");
+        island.type_in("2");
+        assert_eq!(island.to_notation(), "a/$(x+1/2)");
     }
 
     #[test]
-    fn a_digit_run_stays_in_the_lower_row() {
+    fn a_root_keeps_every_typed_character_inside() {
         let mut island = Fixture::new();
-        island.type_in("1/12+3");
-        assert_eq!(island.to_notation(), "$(1/12)+3");
-    }
-
-    #[test]
-    fn brackets_after_the_lower_row_are_not_part_of_it() {
-        let mut island = Fixture::new();
-        island.type_in("c/d(e/f) +g");
-        assert_eq!(island.to_notation(), "$(c/d)($(e/f)) +g");
-    }
-
-    #[test]
-    fn a_second_slash_stacks_on_the_first_fraction() {
-        let mut island = Fixture::new();
-        island.type_in("a/b/c");
-        assert_eq!(island.to_notation(), "$(a/b)/c");
-    }
-
-    #[test]
-    fn a_root_takes_one_run_the_same_way() {
-        let mut island = Fixture::new();
-        island.type_in("√");
-        assert!(island.edit().commit_command());
+        island.type_in("\\sqrt ");
         island.type_in("2 + 1");
-        assert_eq!(island.to_notation(), "$(√ 2) + 1");
+        assert_eq!(island.to_notation(), "√ 2 + 1");
     }
 
     #[test]
-    fn a_script_belongs_to_the_run_it_follows() {
+    fn unknown_backslash_shortcut_is_left_alone() {
         let mut island = Fixture::new();
-        island.type_in("a/b^2 + 1");
-        assert_eq!(island.to_notation(), "$(a/b$(^ 2)) + 1");
+        island.type_in("\\nope ");
+        assert_eq!(island.to_notation(), "\\nope ");
     }
 
     #[test]
-    fn a_closing_bracket_with_no_brackets_open_changes_nothing() {
+    fn a_closing_paren_is_an_ordinary_character() {
+        let mut island = Fixture::new();
+        island.type_in("(x)+");
+        assert_eq!(island.to_notation(), "(x)+");
+    }
+
+    #[test]
+    fn a_closing_bracket_with_no_brackets_open_stays() {
         let mut island = Fixture::new();
         island.type_in("a)b");
-        assert_eq!(island.to_notation(), "ab");
+        assert_eq!(island.to_notation(), "a)b");
     }
 
     #[test]

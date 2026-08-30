@@ -128,7 +128,6 @@ pub(super) fn hit_in_line(holder: &Element, line: usize, x: f64, y: f64) -> Hit 
                 path,
                 index,
                 anchor: index,
-                fills: Vec::new(),
             },
         ),
     }
