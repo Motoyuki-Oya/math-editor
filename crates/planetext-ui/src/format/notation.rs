@@ -205,7 +205,9 @@ fn between(mark: char) -> Between {
     }
 }
 
-/// `√[n] x`: インデックスはオプションで、本文はそれに続く 1 つのチャンクであり、その後に来るものはルートの下ではなく横にあります。
+/// `√[n] x+1`: インデックスはオプションで、アイランドの残りすべてが本文。
+/// 書き込みが本文を裸で全部書くので、読みも全部を本文へ戻す。横に続けたい
+/// ものは `$(√ 2)+1` のように島の外に書かれる。
 fn root(chars: &[char]) -> Row {
     let chars = trim(chars);
     let (index, rest) = match chars.first() {
@@ -215,29 +217,7 @@ fn root(chars: &[char]) -> Row {
         },
         _ => (None, chars),
     };
-    let rest = trim(rest);
-    let (body, taken) = chunk(rest);
-    let mut out = vec![Node::sqrt(index, body)];
-    out.extend(row(&rest[taken.min(rest.len())..]));
-    out
-}
-
-/// 1 つのチャンク: 文字、グループ、またはネストされたアイランド、およびそれに関連付けられたスクリプト。また、使用した `chars` の量もレポートします。
-fn chunk(chars: &[char]) -> (Row, usize) {
-    let mut out = Row::new();
-    let mut i = 0;
-    if let Some((node, next)) = node_at(chars, 0) {
-        out.push(node);
-        i = next;
-    }
-    while let Some((node, next)) = node_at(chars, i) {
-        if !matches!(&node.kind, NodeKind::Sup(_) | NodeKind::Sub(_)) {
-            break;
-        }
-        out.push(node);
-        i = next;
-    }
-    (out, i)
+    vec![Node::sqrt(index, row(trim(rest)))]
 }
 
 /// `^ 3 _ i`: 各マーカーは次のマーカーまでのすべてを取得します。
@@ -561,19 +541,20 @@ mod tests {
     }
 
     #[test]
-    fn roots_take_one_chunk() {
+    fn the_root_takes_the_rest_of_the_island() {
         assert_eq!(roundtrip("√ x"), "√ x");
         assert_eq!(roundtrip("sqrt[3] x"), "√[3] x");
-        // マークの直後のチャンクだけがルートの下にあります。
+        // 本文へ書いたものは往復しても本文に残る。
+        assert_eq!(roundtrip("√ x+1"), "√ x+1");
         match parse_island("√ x+1").as_slice() {
             [Node {
                 kind: NodeKind::Sqrt { body, .. },
                 ..
-            }, plus, one]
-                if matches!(&plus.kind, NodeKind::Char('+'))
-                    && matches!(&one.kind, NodeKind::Char('1')) =>
-            {
-                assert_eq!(body, &vec![Node::char('x')]);
+            }] => {
+                assert_eq!(
+                    body,
+                    &vec![Node::char('x'), Node::char('+'), Node::char('1')]
+                );
             }
             other => panic!("unexpected {other:?}"),
         }
