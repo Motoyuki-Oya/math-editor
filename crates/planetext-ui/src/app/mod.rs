@@ -299,16 +299,6 @@ pub fn App() -> impl IntoView {
             <div class="statusbar">
                 <span>{move || {
                     let stats = shell.stats.get();
-                    if stats.counting {
-                        "行数確認中".to_string()
-                    } else if let Some(chars) = stats.total_chars {
-                        format!("{chars} 文字 / {} 行", stats.total_lines)
-                    } else {
-                        format!("{} 行", stats.total_lines)
-                    }
-                }}</span>
-                <span>{move || {
-                    let stats = shell.stats.get();
                     if let Some(sel) = &stats.selection {
                         if let Some((chars_without_nl, newlines)) = sel.chars {
                             if newlines > 0 {
@@ -319,10 +309,26 @@ pub fn App() -> impl IntoView {
                         } else {
                             format!("選択中: {} 行", sel.lines)
                         }
-                    } else if let Some((chars_without_nl, newlines)) = stats.caret_prefix {
-                        format!("{} 行, {} 列  (先頭から: {chars_without_nl} 文字 / 改行 {newlines} 文字)", stats.caret_line, stats.caret_col)
+                    } else if stats.counting {
+                        if let Some(bytes) = stats.file_bytes {
+                            format_file_size(bytes)
+                        } else {
+                            "全体 0 文字".to_string()
+                        }
+                    } else if let Some(chars) = stats.total_chars {
+                        format!("全体 {chars} 文字")
+                    } else if let Some(bytes) = stats.file_bytes {
+                        format_file_size(bytes)
                     } else {
-                        format!("{} 行, {} 列", stats.caret_line, stats.caret_col)
+                        format!("{} 行", stats.total_lines)
+                    }
+                }}</span>
+                <span>{move || {
+                    let stats = shell.stats.get();
+                    if let Some((chars_without_nl, newlines)) = stats.caret_prefix {
+                        format!("[ {} | {} ]  (先頭から: {chars_without_nl} 文字 / 改行 {newlines} 文字)", stats.caret_line, stats.caret_col)
+                    } else {
+                        format!("[ {} | {} ]", stats.caret_line, stats.caret_col)
                     }
                 }}</span>
                 <span
@@ -547,4 +553,16 @@ pub fn App() -> impl IntoView {
 /// ツールバー操作で、現在編集中の入れ子Rowからフォーカスが外れないようにします。
 pub(super) fn hold_focus(event: web_sys::MouseEvent) {
     event.prevent_default();
+}
+
+fn format_file_size(bytes: usize) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{:.1} GB", bytes as f64 / 1_000_000_000.0)
+    } else if bytes >= 1_000_000 {
+        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+    } else if bytes >= 1_000 {
+        format!("{:.1} KB", bytes as f64 / 1_000.0)
+    } else {
+        format!("{bytes} B")
+    }
 }

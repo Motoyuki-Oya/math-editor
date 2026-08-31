@@ -1095,6 +1095,8 @@ pub struct FlushEdit {
 pub struct DocStats {
     /// 10MB以下の通常ファイルにおける全体文字数（10MB超の巨大ファイル時は None）。
     pub total_chars: Option<usize>,
+    /// 巨大ファイル等のファイルサイズ（バイト数）。
+    pub file_bytes: Option<usize>,
     /// 全体行数。
     pub total_lines: usize,
     /// バックグラウンドで行数走査中かどうか。
@@ -1124,6 +1126,7 @@ pub fn stats() -> DocStats {
     let Some(session) = session() else {
         return DocStats {
             total_chars: Some(0),
+            file_bytes: None,
             total_lines: 1,
             counting: false,
             caret_line: 1,
@@ -1181,6 +1184,7 @@ pub fn stats() -> DocStats {
 
     DocStats {
         total_chars,
+        file_bytes: borrowed.preview_file_size,
         total_lines: if is_counting { 0 } else { line_count },
         counting: is_counting,
         caret_line,
