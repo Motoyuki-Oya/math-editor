@@ -27,6 +27,8 @@ pub struct Settings {
     pub global_shortcut: bool,
     /// 半角スペース、全角スペース、タブなどの空白文字を可視化するかどうか。
     pub show_whitespace: bool,
+    /// フォントの合字（リガチャー: -> や != 等）を有効にするかどうか。
+    pub font_ligatures: bool,
 }
 
 impl Default for Settings {
@@ -41,6 +43,7 @@ impl Default for Settings {
             history_limit: 500,
             global_shortcut: true,
             show_whitespace: false,
+            font_ligatures: true,
         }
     }
 }
@@ -140,9 +143,8 @@ fn show(settings: &Settings) {
             .trim()
             .trim_matches('"')
             .trim_matches('\'');
-        style
-            .set_property("--setting-font-text", &format!("\"{font}\", {font}"))
-            .ok();
+        let family_val = format!("\"{font}\", monospace, var(--font-text)");
+        style.set_property("--setting-font-text", &family_val).ok();
     }
     style
         .set_property(
@@ -154,6 +156,19 @@ fn show(settings: &Settings) {
             },
         )
         .ok();
+    if settings.font_ligatures {
+        style
+            .set_property("--setting-font-ligatures", "contextual common-ligatures")
+            .ok();
+        style
+            .set_property("--setting-font-features", "\"calt\" 1, \"liga\" 1")
+            .ok();
+    } else {
+        style.set_property("--setting-font-ligatures", "none").ok();
+        style
+            .set_property("--setting-font-features", "\"calt\" 0, \"liga\" 0")
+            .ok();
+    }
     if settings.show_whitespace {
         root.class_list().add_1("mn-show-whitespace").ok();
     } else {
@@ -166,7 +181,7 @@ fn show(settings: &Settings) {
 /// ファイルに保存されている設定を書き込みます。1 行に 1 つの `name = value` で、これは TOML の小さなコーナーです。
 pub fn write(settings: &Settings) -> String {
     format!(
-        "font_size = {}\nfont_family = \"{}\"\ncaret_blink = {}\nwrap = {}\nline_numbers = {}\ncolumn_gap = {}\nhistory_limit = {}\nglobal_shortcut = {}\nshow_whitespace = {}\n",
+        "font_size = {}\nfont_family = \"{}\"\ncaret_blink = {}\nwrap = {}\nline_numbers = {}\ncolumn_gap = {}\nhistory_limit = {}\nglobal_shortcut = {}\nshow_whitespace = {}\nfont_ligatures = {}\n",
         settings.font_size,
         settings.font_family.replace('"', ""),
         settings.caret_blink,
@@ -176,6 +191,7 @@ pub fn write(settings: &Settings) -> String {
         settings.history_limit,
         settings.global_shortcut,
         settings.show_whitespace,
+        settings.font_ligatures,
     )
 }
 
@@ -232,6 +248,11 @@ pub fn read(text: &str) -> Settings {
             "show_whitespace" => {
                 if let Ok(shown) = value.parse() {
                     settings.show_whitespace = shown;
+                }
+            }
+            "font_ligatures" => {
+                if let Ok(enabled) = value.parse() {
+                    settings.font_ligatures = enabled;
                 }
             }
             _ => {}

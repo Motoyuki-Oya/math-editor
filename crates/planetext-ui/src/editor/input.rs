@@ -52,10 +52,24 @@ pub fn install(session: &Rc<RefCell<Session>>) {
         "keydown",
         session,
         |session, event: KeyboardEvent| {
+            session
+                .borrow()
+                .view
+                .root
+                .class_list()
+                .add_1("mn-typing")
+                .ok();
             keys::on_keydown(session, event);
         },
     );
     on(&textarea, "input", session, |session, event: InputEvent| {
+        session
+            .borrow()
+            .view
+            .root
+            .class_list()
+            .add_1("mn-typing")
+            .ok();
         commands::on_input(session, event);
     });
     on(
@@ -66,6 +80,7 @@ pub fn install(session: &Rc<RefCell<Session>>) {
             let mut borrowed = session.borrow_mut();
             borrowed.composing = true;
             borrowed.preedit.clear();
+            borrowed.view.root.class_list().add_1("mn-typing").ok();
             drop(borrowed);
             session::redraw(session);
         },
@@ -75,6 +90,13 @@ pub fn install(session: &Rc<RefCell<Session>>) {
         "compositionupdate",
         session,
         |session, event: CompositionEvent| {
+            session
+                .borrow()
+                .view
+                .root
+                .class_list()
+                .add_1("mn-typing")
+                .ok();
             commands::update_composition(session, &event.data().unwrap_or_default());
         },
     );
@@ -114,9 +136,23 @@ pub fn install(session: &Rc<RefCell<Session>>) {
     );
 
     on(&root, "mousedown", session, |session, event: MouseEvent| {
+        session
+            .borrow()
+            .view
+            .root
+            .class_list()
+            .remove_1("mn-typing")
+            .ok();
         mouse::on_mousedown(session, event);
     });
     on(&root, "mousemove", session, |session, event: MouseEvent| {
+        session
+            .borrow()
+            .view
+            .root
+            .class_list()
+            .remove_1("mn-typing")
+            .ok();
         mouse::on_mousemove(session, event);
     });
     on(&root, "dblclick", session, |session, event: MouseEvent| {

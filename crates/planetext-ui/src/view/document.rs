@@ -11,6 +11,7 @@
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
 
+use wasm_bindgen::JsCast;
 use web_sys::{Document, Element, HtmlElement};
 
 use crate::structure::ast::{Cursor, Node, NodeKind};
@@ -435,7 +436,7 @@ impl View {
         // パイプの場合は、行頭の最初の | (column 0) は広げず、2個目以降 (column 1..columns) を右寄せで揃える
         let start_col = if is_pipe { 1 } else { 0 };
         let gap = if is_pipe {
-            6.0
+            12.0
         } else {
             crate::settings::column_gap()
         };
@@ -667,8 +668,38 @@ impl View {
         }
     }
 
+    /// テーブル（整列ブロック）内でキャレットが左右にはみ出た場合に自動横スクロールします。
+    fn reveal_block(&self, caret: &Caret<'_>) {
+        let (path, _) = caret.place();
+        let Some(row_el) = self.row_element(caret.at.line, &path) else {
+            return;
+        };
+        let Some(block_el) = row_el
+            .closest(".mn-aligned-block")
+            .ok()
+            .flatten()
+            .and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok())
+        else {
+            return;
+        };
+        let Some(caret_box) = self.caret_box(caret) else {
+            return;
+        };
+        let block_rect = block_el.get_bounding_client_rect();
+        let scroll_left = block_el.scroll_left() as f64;
+        let caret_left = caret_box.left - block_rect.left() + scroll_left;
+        let width = block_el.client_width() as f64;
+        let margin = 32.0;
+        if caret_left < scroll_left + margin {
+            block_el.set_scroll_left((caret_left - margin).max(0.0) as i32);
+        } else if caret_left > scroll_left + width - margin {
+            block_el.set_scroll_left((caret_left - width + margin) as i32);
+        }
+    }
+
     /// スクロールしてキャレットが見えるようにし、入力要素がキャレットに従うことができるように**文書内の**場所を報告します (ここに IME 候補が表示されます)。画面ではなくドキュメント: input 要素は行の間に配置され、行と一緒にスクロールします。ドキュメントの上部に残された input 要素は、入力されるとすぐにブラウザがスクロールして戻ってくるものです。
     pub fn reveal(&self, caret: &Caret<'_>) -> Option<Box2> {
+        self.reveal_block(caret);
         let rect = self.caret_box(caret)?;
         Some(self.viewport.reveal(&self.scroller, rect))
     }

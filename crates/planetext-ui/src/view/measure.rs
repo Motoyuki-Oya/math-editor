@@ -236,22 +236,23 @@ fn visual_neighbor_in(mut places: Vec<(usize, Box2)>, index: usize, right: bool)
     let mut seen = std::collections::HashSet::new();
     places.retain(|(index, _)| seen.insert(*index));
     places.sort_by(|(_, a), (_, b)| {
-        a.top
-            .total_cmp(&b.top)
-            .then_with(|| a.left.total_cmp(&b.left))
+        let line_diff = a.top - b.top;
+        let threshold = (a.height.max(b.height) * 0.5).max(4.0);
+        if line_diff.abs() > threshold {
+            a.top.total_cmp(&b.top)
+        } else {
+            a.left.total_cmp(&b.left)
+        }
     });
     let current = places
         .iter()
         .position(|(candidate, _)| *candidate == index)?;
     let next = if right {
-        current.checked_add(1)
+        current.checked_add(1)?
     } else {
-        current.checked_sub(1)
+        current.checked_sub(1)?
     };
-    Some(
-        next.and_then(|next| places.get(next).map(|(index, _)| *index))
-            .unwrap_or(index),
-    )
+    places.get(next).map(|(index, _)| *index)
 }
 
 /// `index` の項目の直前の場所。 `usize::MAX` は終了を意味します。
@@ -382,7 +383,7 @@ mod tests {
             at(6, 70.0),
         ];
         assert_eq!(visual_neighbor_in(places.clone(), 0, false), Some(1));
-        assert_eq!(visual_neighbor_in(places.clone(), 0, true), Some(0));
+        assert_eq!(visual_neighbor_in(places.clone(), 0, true), None);
         assert_eq!(visual_neighbor_in(places.clone(), 4, true), Some(5));
         assert_eq!(visual_neighbor_in(places, 4, false), Some(3));
     }
