@@ -434,6 +434,11 @@ impl View {
         let columns = tabs.iter().map(Vec::len).max().unwrap_or(0);
         // パイプの場合は、行頭の最初の | (column 0) は広げず、2個目以降 (column 1..columns) を右寄せで揃える
         let start_col = if is_pipe { 1 } else { 0 };
+        let gap = if is_pipe {
+            6.0
+        } else {
+            crate::settings::column_gap()
+        };
         for column in start_col..columns {
             // 一度に 1 列です。列の幅を広げるとその後の列が移動し、測定値もそれに従う必要があるためです。
             let separators: Vec<&Element> =
@@ -444,7 +449,7 @@ impl View {
                 .fold(f64::MIN, f64::max);
             for tab in separators {
                 let left = tab.get_bounding_client_rect().left();
-                let width = (widest - left + crate::settings::column_gap()).max(1.0);
+                let width = (widest - left + gap).max(1.0);
                 tab.set_attribute("style", &format!("width:{width}px")).ok();
             }
         }

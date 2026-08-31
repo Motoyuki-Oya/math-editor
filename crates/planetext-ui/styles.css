@@ -97,7 +97,7 @@ body {
   font-weight: 400;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  font-size: 15px;
+  font-size: 14px;
 }
 
 .app {
@@ -494,12 +494,12 @@ body {
      ページには見えている行しか無い。 */
   overflow: hidden;
   outline: none;
-  line-height: 1.5;
+  line-height: 1.35;
   cursor: text;
   font-weight: 400;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  font-size: var(--setting-font-size, 15px);
+  font-size: var(--setting-font-size, 14px);
   font-family: var(--setting-font-text, var(--font-text));
 }
 
@@ -655,6 +655,7 @@ body {
   overflow-x: visible;
   padding: 0 18px 18px 10px;
   box-sizing: border-box;
+  line-height: 1.35;
 }
 
 .mn-nowrap .mn-document {
@@ -664,11 +665,17 @@ body {
 
 .mn-line {
   position: relative;
+  line-height: 1.35;
   min-height: 1.35em;
   text-align: start;
   white-space: pre-wrap;
   /* 必要な箇所で下に続く行: 長い単語は のままです長い単語。 */
   overflow-wrap: anywhere;
+}
+
+.mn-run:empty::before {
+  content: "\200b";
+  display: inline;
 }
 
 /* 連続する整列ブロック（Tab整列行またはMarkdownテーブル）を包むラッパーコンテナ */
@@ -1055,15 +1062,15 @@ body {
   display: inline-grid;
   grid-template-rows: auto auto auto;
   justify-items: center;
-  margin: 0 0.15em;
+  margin: 0 0.12em;
 }
 
 .mn-frac-num {
-  padding: 0 0.32em 0.22em;
+  padding: 0 0.25em 0.15em;
 }
 
 .mn-frac-den {
-  padding: 0.26em 0.32em 0;
+  padding: 0.18em 0.25em 0;
 }
 
 /* 幅の広い方と同じ幅です。 */
@@ -1108,7 +1115,7 @@ body {
   position: relative;
   /* このパディングに描画される記号用のスペース。 */
   padding-left: 0.82em;
-  margin: 0.12em 0.14em 0;
+  margin: 0.08em 0.12em 0;
 }
 
 .mn-sqrt-index {
@@ -1133,7 +1140,7 @@ body {
 .mn-sqrt-body {
   display: inline-block;
   /* バーの下、および記号と最初の 文字の間のすべての面に空気があるため、記号はルートの下にあるものに触れることは決してない。 */
-  padding: 0.08em 0.3em 0.08em 0.22em;
+  padding: 0.16em 0.3em 0.10em 0.22em;
 }
 
 .mn-sup,
@@ -1182,10 +1189,23 @@ body {
 .mn-annotated {
   display: inline-block;
   position: relative;
-  padding: 0.62em 0;
   margin: 0 0.08em;
   line-height: 1;
   vertical-align: baseline;
+}
+
+.mn-annotated-both {
+  padding: 0.52em 0;
+}
+
+.mn-annotated-upper {
+  padding-top: 0.52em;
+  padding-bottom: 0;
+}
+
+.mn-annotated-lower {
+  padding-top: 0;
+  padding-bottom: 0.52em;
 }
 
 .mn-annotated > .mn-limit {

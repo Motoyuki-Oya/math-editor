@@ -32,7 +32,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            font_size: 15.0,
+            font_size: 14.0,
             font_family: String::new(),
             caret_blink: true,
             wrap: true,
@@ -93,11 +93,11 @@ pub fn zoom_out() {
     }
 }
 
-/// フォントサイズを標準（15px）にリセットします。
+/// フォントサイズを標準（14px）にリセットします。
 #[allow(dead_code)]
 pub fn zoom_reset() {
     let mut s = current();
-    s.font_size = 15.0;
+    s.font_size = 14.0;
     apply(s);
     crate::editor::redraw_all();
 }
