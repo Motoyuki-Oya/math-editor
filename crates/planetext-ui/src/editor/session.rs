@@ -1091,7 +1091,7 @@ pub struct FlushEdit {
 }
 
 /// ステータスバー等で表示するドキュメントおよびキャレット・選択範囲の統計情報。
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DocStats {
     /// 10MB以下の通常ファイルにおける全体文字数（10MB超の巨大ファイル時は None）。
     pub total_chars: Option<usize>,
@@ -1111,6 +1111,21 @@ pub struct DocStats {
     pub selection: Option<SelectionStats>,
 }
 
+impl Default for DocStats {
+    fn default() -> Self {
+        DocStats {
+            total_chars: Some(0),
+            file_bytes: None,
+            total_lines: 1,
+            counting: false,
+            caret_line: 1,
+            caret_col: 1,
+            caret_prefix: Some((0, 0)),
+            selection: None,
+        }
+    }
+}
+
 /// 選択範囲の統計情報。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectionStats {
@@ -1124,16 +1139,7 @@ const MAX_CARET_STATS_BYTES: usize = 10_000_000;
 
 pub fn stats() -> DocStats {
     let Some(session) = session() else {
-        return DocStats {
-            total_chars: Some(0),
-            file_bytes: None,
-            total_lines: 1,
-            counting: false,
-            caret_line: 1,
-            caret_col: 1,
-            caret_prefix: Some((0, 0)),
-            selection: None,
-        };
+        return DocStats::default();
     };
 
     let borrowed = session.borrow();
@@ -1141,10 +1147,8 @@ pub fn stats() -> DocStats {
     let text = doc.text();
     let line_count = text.line_count();
     let is_counting = borrowed.counting;
-    let is_large = borrowed
-        .preview_file_size
-        .is_some_and(|s| s > MAX_CARET_STATS_BYTES)
-        || text.absent_lines() > 0;
+    let is_large =
+        doc.file_bytes.is_some_and(|s| s > MAX_CARET_STATS_BYTES) || text.absent_lines() > 0;
 
     let primary = borrowed.primary();
     let head = primary.head;
@@ -1212,7 +1216,7 @@ pub fn stats() -> DocStats {
 
     DocStats {
         total_chars,
-        file_bytes: borrowed.preview_file_size,
+        file_bytes: doc.file_bytes,
         total_lines: if is_counting { 0 } else { line_count },
         counting: is_counting,
         caret_line,
@@ -1220,6 +1224,12 @@ pub fn stats() -> DocStats {
         caret_prefix,
         selection,
     }
+}
+
+/// ドキュメントのファイルサイズを設定します（巨大ファイルの Zero-Scan 判定用）。
+pub fn set_doc_file_size(doc_id: usize, bytes: Option<usize>) {
+    let doc = get_or_create_doc(doc_id);
+    doc.borrow_mut().set_file_bytes(bytes);
 }
 
 /// 入力を受けるペインの文書が手元に全部あるか。検索や置換が文書の本体の

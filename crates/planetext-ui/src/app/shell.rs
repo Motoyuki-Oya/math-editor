@@ -925,6 +925,7 @@ impl Shell {
                     editor::load_pending(doc.line_count);
                     let doc_id = tab.id.get_untracked();
                     editor::set_doc_path(doc_id, Some(path.clone()));
+                    editor::set_doc_file_size(doc_id, Some(doc.bytes));
                     tab.path.set(Some(path));
                     editor::redraw_all();
                     shell.status.set("開きました".into());
