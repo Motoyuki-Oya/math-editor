@@ -30,7 +30,7 @@ pub fn App() -> impl IntoView {
         focused: RwSignal::new(0),
         next_key: RwSignal::new(1),
         status: RwSignal::new(String::new()),
-        stats: RwSignal::new((0, 1)),
+        stats: RwSignal::new(editor::DocStats::default()),
         searching: RwSignal::new(false),
         preferences: RwSignal::new(false),
         find_focus: RwSignal::new(None),
@@ -43,6 +43,9 @@ pub fn App() -> impl IntoView {
         editor::set_on_change(std::rc::Rc::new(move |pane| shell.mark_dirty(pane)));
         editor::set_on_focus(std::rc::Rc::new(move |pane| {
             shell.note_focus_by_editor_pane(pane)
+        }));
+        editor::add_on_redraw(std::rc::Rc::new(move |_| {
+            shell.refresh();
         }));
         sync::install(shell);
         keys::install_shortcuts(shell);
@@ -294,14 +297,32 @@ pub fn App() -> impl IntoView {
             </div>
 
             <div class="statusbar">
-                <span>{move || shell.file_name()}</span>
-                <span>{move || if shell.tab().dirty.get() { "未保存" } else { "保存済み" }}</span>
                 <span>{move || {
-                    let (characters, lines) = shell.stats.get();
-                    if lines == 0 {
-                        format!("{characters} 文字 / 行数確認中")
+                    let stats = shell.stats.get();
+                    if stats.counting {
+                        "行数確認中".to_string()
+                    } else if let Some(chars) = stats.total_chars {
+                        format!("{chars} 文字 / {} 行", stats.total_lines)
                     } else {
-                        format!("{characters} 文字 / {lines} 行")
+                        format!("{} 行", stats.total_lines)
+                    }
+                }}</span>
+                <span>{move || {
+                    let stats = shell.stats.get();
+                    if let Some(sel) = &stats.selection {
+                        if let Some((chars_without_nl, newlines)) = sel.chars {
+                            if newlines > 0 {
+                                format!("選択中: {chars_without_nl} 文字 / 改行 {newlines} 文字 ({} 行)", sel.lines)
+                            } else {
+                                format!("選択中: {chars_without_nl} 文字")
+                            }
+                        } else {
+                            format!("選択中: {} 行", sel.lines)
+                        }
+                    } else if let Some((chars_without_nl, newlines)) = stats.caret_prefix {
+                        format!("{} 行, {} 列  (先頭から: {chars_without_nl} 文字 / 改行 {newlines} 文字)", stats.caret_line, stats.caret_col)
+                    } else {
+                        format!("{} 行, {} 列", stats.caret_line, stats.caret_col)
                     }
                 }}</span>
                 <span

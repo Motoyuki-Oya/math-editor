@@ -176,7 +176,7 @@ pub(super) struct Shell {
     pub(super) focused: RwSignal<usize>,
     pub(super) next_key: RwSignal<usize>,
     pub(super) status: RwSignal<String>,
-    pub(super) stats: RwSignal<(usize, usize)>,
+    pub(super) stats: RwSignal<editor::DocStats>,
     pub(super) searching: RwSignal<bool>,
     /// 設定が画面上に表示されるかどうか。
     pub(super) preferences: RwSignal<bool>,

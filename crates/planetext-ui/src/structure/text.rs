@@ -893,6 +893,70 @@ impl Text {
         });
         (count, self.line_count())
     }
+
+    /// 先頭から指定位置 `at` までの文字数を計算します。
+    /// 戻り値: `Some((改行抜文字数, 改行文字数))`。
+    /// 途中に未着行（`Line::Absent`）が1行でも含まれる場合は即座に `None` を返します。
+    pub fn chars_until(&self, at: Pos) -> Option<(usize, usize)> {
+        if at.line >= self.line_count {
+            return None;
+        }
+        let mut chars_without_nl = 0;
+        for line in 0..at.line {
+            if self.is_absent(line) {
+                return None;
+            }
+            chars_without_nl += self.line_len(line);
+        }
+        if self.is_absent(at.line) {
+            return None;
+        }
+        let col = at.col.min(self.line_len(at.line));
+        chars_without_nl += col;
+        let newlines = at.line;
+        Some((chars_without_nl, newlines))
+    }
+
+    /// 2つの位置 `from` と `to` の間の文字数を計算します。
+    /// 戻り値: `Some((改行抜文字数, 改行文字数))`。
+    /// 途中に未着行（`Line::Absent`）が1行でも含まれる場合は即座に `None` を返します。
+    pub fn chars_between(&self, from: Pos, to: Pos) -> Option<(usize, usize)> {
+        let (start, end) = if from <= to { (from, to) } else { (to, from) };
+        if start.line >= self.line_count || end.line >= self.line_count {
+            return None;
+        }
+        if start.line == end.line {
+            if self.is_absent(start.line) {
+                return None;
+            }
+            let line_len = self.line_len(start.line);
+            let col_start = start.col.min(line_len);
+            let col_end = end.col.min(line_len);
+            let chars = col_end.saturating_sub(col_start);
+            return Some((chars, 0));
+        }
+
+        if self.is_absent(start.line) {
+            return None;
+        }
+        let start_line_len = self.line_len(start.line);
+        let mut chars = start_line_len.saturating_sub(start.col.min(start_line_len));
+
+        for line in start.line + 1..end.line {
+            if self.is_absent(line) {
+                return None;
+            }
+            chars += self.line_len(line);
+        }
+
+        if self.is_absent(end.line) {
+            return None;
+        }
+        let end_line_len = self.line_len(end.line);
+        chars += end.col.min(end_line_len);
+        let newlines = end.line - start.line;
+        Some((chars, newlines))
+    }
 }
 
 pub fn before_col(at: Pos) -> Option<Pos> {
@@ -1267,6 +1331,73 @@ mod tests {
             access_time,
             access_time.as_nanos() as f64 / 1024.0,
             evict_time
+        );
+    }
+
+    #[test]
+    fn chars_until_and_chars_between_calculate_accurately() {
+        let lines = vec![
+            SourceLine::Plain("hello".into()),
+            SourceLine::Plain("world".into()),
+            SourceLine::Plain("test line 3".into()),
+        ];
+        let text = Text::compose(lines);
+
+        // 1. 先頭 (0, 0)
+        assert_eq!(text.chars_until(Pos::new(0, 0)), Some((0, 0)));
+
+        // 2. 0行目の中間 (0, 3) -> "hel"
+        assert_eq!(text.chars_until(Pos::new(0, 3)), Some((3, 0)));
+
+        // 3. 0行目の行末 (0, 5) -> "hello"
+        assert_eq!(text.chars_until(Pos::new(0, 5)), Some((5, 0)));
+
+        // 4. 1行目の行頭 (1, 0) -> "hello" + 改行1
+        assert_eq!(text.chars_until(Pos::new(1, 0)), Some((5, 1)));
+
+        // 5. 1行目の中間 (1, 2) -> "hello" + "wo" + 改行1
+        assert_eq!(text.chars_until(Pos::new(1, 2)), Some((7, 1)));
+
+        // 6. 2行目の行末 (2, 11) -> 5 + 5 + 11 = 21, 改行2
+        assert_eq!(text.chars_until(Pos::new(2, 11)), Some((21, 2)));
+
+        // 7. 単一行間の選択 (0, 1)..(0, 4) -> "ell" (3文字, 改行0)
+        assert_eq!(
+            text.chars_between(Pos::new(0, 1), Pos::new(0, 4)),
+            Some((3, 0))
+        );
+
+        // 8. 複数行間の選択 (0, 2)..(2, 4) -> "llo"(3) + "world"(5) + "test"(4) = 12文字, 改行2
+        assert_eq!(
+            text.chars_between(Pos::new(0, 2), Pos::new(2, 4)),
+            Some((12, 2))
+        );
+
+        // 9. 逆順の引数 (2, 4)..(0, 2) でも同じ結果
+        assert_eq!(
+            text.chars_between(Pos::new(2, 4), Pos::new(0, 2)),
+            Some((12, 2))
+        );
+    }
+
+    #[test]
+    fn chars_until_and_between_safely_abort_on_absent_lines() {
+        let mut text = Text::pending(100_000);
+        // 先頭0行目だけロード
+        text.fill_line(0, SourceLine::Plain("hello".into()));
+        // 50_000行目だけロード
+        text.fill_line(50_000, SourceLine::Plain("world".into()));
+
+        // 先頭行内は計算可能
+        assert_eq!(text.chars_until(Pos::new(0, 3)), Some((3, 0)));
+
+        // 未着行を含む先頭からの走査は即時 None で安全に中断
+        assert_eq!(text.chars_until(Pos::new(50_000, 2)), None);
+
+        // 未着行を跨ぐ選択も即時 None で中断
+        assert_eq!(
+            text.chars_between(Pos::new(0, 0), Pos::new(50_000, 5)),
+            None
         );
     }
 }

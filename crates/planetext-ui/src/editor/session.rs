@@ -1090,14 +1090,104 @@ pub struct FlushEdit {
     pub lines: Vec<String>,
 }
 
-pub fn stats() -> (usize, usize) {
-    session()
-        .map(|session| {
-            let borrowed = session.borrow();
-            let (characters, lines) = borrowed.document.borrow().text().stats();
-            (characters, if borrowed.counting { 0 } else { lines })
-        })
-        .unwrap_or((0, 1))
+/// ステータスバー等で表示するドキュメントおよびキャレット・選択範囲の統計情報。
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct DocStats {
+    /// 10MB以下の通常ファイルにおける全体文字数（10MB超の巨大ファイル時は None）。
+    pub total_chars: Option<usize>,
+    /// 全体行数。
+    pub total_lines: usize,
+    /// バックグラウンドで行数走査中かどうか。
+    pub counting: bool,
+    /// キャレットの1-based行番号。
+    pub caret_line: usize,
+    /// キャレットの1-based列番号。
+    pub caret_col: usize,
+    /// 先頭からキャレットまでの文字数 (改行抜文字数, 改行文字数)。10MB超または未着行時は None。
+    pub caret_prefix: Option<(usize, usize)>,
+    /// 選択範囲の統計情報（選択が存在する場合のみ Some）。
+    pub selection: Option<SelectionStats>,
+}
+
+/// 選択範囲の統計情報。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectionStats {
+    /// 選択行数（1行選択なら 1）。
+    pub lines: usize,
+    /// 選択中の (改行抜文字数, 改行文字数)。10MB超または未着行時は None。
+    pub chars: Option<(usize, usize)>,
+}
+
+const MAX_CARET_STATS_BYTES: usize = 10_000_000;
+
+pub fn stats() -> DocStats {
+    let Some(session) = session() else {
+        return DocStats {
+            total_chars: Some(0),
+            total_lines: 1,
+            counting: false,
+            caret_line: 1,
+            caret_col: 1,
+            caret_prefix: Some((0, 0)),
+            selection: None,
+        };
+    };
+
+    let borrowed = session.borrow();
+    let doc = borrowed.document.borrow();
+    let text = doc.text();
+    let line_count = text.line_count();
+    let is_counting = borrowed.counting;
+    let is_large = borrowed
+        .preview_file_size
+        .is_some_and(|s| s > MAX_CARET_STATS_BYTES)
+        || text.absent_lines() > 0;
+
+    let primary = borrowed.primary();
+    let head = primary.head;
+    let caret_line = head.line + 1;
+    let caret_col = head.col + 1;
+
+    let total_chars = if is_large || is_counting {
+        None
+    } else {
+        let (chars, _) = text.stats();
+        if chars <= MAX_CARET_STATS_BYTES {
+            Some(chars)
+        } else {
+            None
+        }
+    };
+
+    let caret_prefix = if !is_large && !is_counting && total_chars.is_some() {
+        text.chars_until(head)
+    } else {
+        None
+    };
+
+    let selection = if !primary.is_caret() {
+        let start = primary.start();
+        let end = primary.end();
+        let lines = end.line.saturating_sub(start.line) + 1;
+        let chars = if !is_large && !is_counting {
+            text.chars_between(start, end)
+        } else {
+            None
+        };
+        Some(SelectionStats { lines, chars })
+    } else {
+        None
+    };
+
+    DocStats {
+        total_chars,
+        total_lines: if is_counting { 0 } else { line_count },
+        counting: is_counting,
+        caret_line,
+        caret_col,
+        caret_prefix,
+        selection,
+    }
 }
 
 /// 入力を受けるペインの文書が手元に全部あるか。検索や置換が文書の本体の
