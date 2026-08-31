@@ -1,8 +1,4 @@
-use std::io::{Read, Seek, SeekFrom};
-
 use crate::document::Document;
-use crate::piece_tree::Piece;
-use crate::source::{Source, STRIDE};
 
 /// 通常文字列の一致バイト位置。ASCIIの大小無視は先頭バイト候補だけを調べ、
 /// 候補ごとにASCII case-foldで比較する。結果はregexと同じ非重複一致。
@@ -84,100 +80,6 @@ pub(crate) struct SearchSpec<'a> {
     pub(crate) after_col: Option<usize>,
 }
 
-impl Source {
-    /// ディスク上の行範囲をひとかたまりで読み、通常文字列を memmem で探す。
-    /// 行ごとの read_until を避け、一致した場所だけ文字の列位置へ変換する。
-    fn literal_matches(
-        &mut self,
-        from: usize,
-        count: usize,
-        query: &str,
-        case_sensitive: bool,
-        marker: u8,
-    ) -> Result<Vec<ScanHit>, String> {
-        if count == 0 || query.is_empty() {
-            return Ok(Vec::new());
-        }
-        self.check()?;
-        let lines = self.lines();
-        let to = from.saturating_add(count).min(lines);
-        if from >= to {
-            return Ok(Vec::new());
-        }
-        let (base, start, end) = {
-            let state = self.index.state.lock().unwrap();
-            let group = (from / STRIDE).min(state.marks.len().saturating_sub(1));
-            let end_group = to.div_ceil(STRIDE);
-            (
-                group * STRIDE,
-                state.marks[group],
-                state.marks.get(end_group).copied().unwrap_or(self.bytes),
-            )
-        };
-        let mut bytes = vec![0; (end - start) as usize];
-        let broken = |e| format!("{} を読めませんでした: {e}", self.path.display());
-        self.file.seek(SeekFrom::Start(start)).map_err(broken)?;
-        self.file.read_exact(&mut bytes).map_err(broken)?;
-        let query_bytes = self.encoding.encode_str(query);
-        let match_bytes = if query_bytes.is_empty() {
-            Vec::new()
-        } else {
-            literal_positions(&bytes, &query_bytes, case_sensitive)
-        };
-        let marker_bytes: Vec<usize> = memchr::memchr_iter(marker, &bytes).collect();
-        // 候補が無ければ行番号へ直す必要もない。巨大な改行配列を作らず返る。
-        if match_bytes.is_empty() && marker_bytes.is_empty() {
-            return Ok(Vec::new());
-        }
-        let delimiter = self.delimiter();
-        let newlines: Vec<usize> = memchr::memchr_iter(delimiter, &bytes).collect();
-        let line_at = |byte: usize| base + newlines.partition_point(|newline| *newline < byte);
-        let mut marked = std::collections::HashSet::new();
-        for byte in marker_bytes {
-            let line = line_at(byte);
-            if line >= from && line < to {
-                marked.insert(line);
-            }
-        }
-        let mut hits: Vec<ScanHit> = marked
-            .iter()
-            .map(|line| ScanHit {
-                line: *line,
-                notation: true,
-                start: 0,
-                end: 0,
-            })
-            .collect();
-        for byte in match_bytes {
-            let line = line_at(byte);
-            if line < from || line >= to || marked.contains(&line) {
-                continue;
-            }
-            let end_byte = byte + query_bytes.len();
-            if bytes[byte..end_byte].contains(&delimiter) {
-                continue;
-            }
-            let line_start = (line - base)
-                .checked_sub(1)
-                .and_then(|index| newlines.get(index))
-                .map_or(0, |newline| newline + 1);
-            let start_col = self
-                .encoding
-                .decode_line(&bytes[line_start..byte])
-                .chars()
-                .count();
-            hits.push(ScanHit {
-                line,
-                notation: false,
-                start: start_col,
-                end: start_col + query.chars().count(),
-            });
-        }
-        hits.sort_by_key(|hit| (hit.line, hit.start));
-        Ok(hits)
-    }
-}
-
 impl Document {
     /// `from..end` を native 内で連続走査し、最初の候補群まで進む。空の
     /// ページを frontend と往復せず、ページごとにキャンセルを確認する。
@@ -251,72 +153,35 @@ impl Document {
     ) -> Result<(Vec<ScanHit>, usize), String> {
         let to = from.saturating_add(count).min(self.count);
         let mut hits = Vec::new();
-        let mut line = 0;
-        for index in 0..self.pieces.len() {
-            let len = self.pieces[index].len();
-            let (start, end) = (line, line + len);
-            line = end;
-            if end <= from {
-                continue;
+        self.each_line(from, to - from, &mut |at, text| {
+            if hits.len() >= limit {
+                return false;
             }
-            if start >= to {
-                break;
-            }
-            let skip = from.saturating_sub(start);
-            let take = to.min(end) - (start + skip);
-            match &self.pieces[index] {
-                Piece::Fresh(lines) => {
-                    for (offset, text) in lines.as_slice()[skip..skip + take].iter().enumerate() {
-                        let at = start + skip + offset;
-                        if text.contains(marker) {
-                            hits.push(ScanHit {
-                                line: at,
-                                notation: true,
-                                start: 0,
-                                end: 0,
-                            });
-                        } else {
-                            for byte in
-                                literal_positions(text.as_bytes(), query.as_bytes(), case_sensitive)
-                            {
-                                let start_col = text[..byte].chars().count();
-                                hits.push(ScanHit {
-                                    line: at,
-                                    notation: false,
-                                    start: start_col,
-                                    end: start_col + query.chars().count(),
-                                });
-                            }
-                        }
+            if text.contains(marker) {
+                hits.push(ScanHit {
+                    line: at,
+                    notation: true,
+                    start: 0,
+                    end: 0,
+                });
+            } else {
+                for byte in literal_positions(text.as_bytes(), query.as_bytes(), case_sensitive) {
+                    let start_col = text[..byte].chars().count();
+                    hits.push(ScanHit {
+                        line: at,
+                        notation: false,
+                        start: start_col,
+                        end: start_col + query.chars().count(),
+                    });
+                    if hits.len() >= limit {
+                        break;
                     }
                 }
-                Piece::Disk { from: disk, .. } => {
-                    let disk = *disk + skip;
-                    let base = start + skip;
-                    let source = self.source.as_mut().ok_or_else(|| {
-                        "文書ストアのディスク参照が失われました。開き直してください".to_string()
-                    })?;
-                    hits.extend(
-                        source
-                            .literal_matches(disk, take, query, case_sensitive, marker as u8)?
-                            .into_iter()
-                            .map(|hit| ScanHit {
-                                line: base + (hit.line - disk),
-                                ..hit
-                            }),
-                    );
-                }
             }
-            if hits.len() >= limit {
-                hits.sort_by_key(|hit| (hit.line, hit.start));
-                hits.truncate(limit);
-                let scanned_to = hits.last().map_or(from, |hit| hit.line + 1);
-                return Ok((hits, scanned_to));
-            }
-        }
-        hits.sort_by_key(|hit| (hit.line, hit.start));
-        hits.truncate(limit);
-        Ok((hits, to))
+            true
+        })?;
+        let scanned_to = to;
+        return Ok((hits, scanned_to));
     }
 
     /// 検索の走査で見つかったもの: 素の行の一致か、読み替え（記法の解釈）を

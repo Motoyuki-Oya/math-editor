@@ -11,17 +11,23 @@ impl Document {
     /// 文書の行を書き手へ流す。全文を 1 つの文字列に集めない。
     pub(crate) fn write_to<W: Write>(&mut self, out: &mut W) -> Result<(), String> {
         let mut broken = None;
-        let line_ending_bytes = self.line_ending.as_bytes();
         let encoding = self.encoding;
-        if encoding == FileEncoding::Utf8Bom {
-            if let Err(e) = out.write_all(b"\xEF\xBB\xBF") {
-                return Err(format!("書き込めませんでした: {e}"));
-            }
+        let line_ending_bytes = encoding.encode_str(
+            std::str::from_utf8(self.line_ending.as_bytes()).expect("line endings are ASCII"),
+        );
+        let bom: &[u8] = match encoding {
+            FileEncoding::Utf8Bom => b"\xEF\xBB\xBF",
+            FileEncoding::Utf16Le => b"\xFF\xFE",
+            FileEncoding::Utf16Be => b"\xFE\xFF",
+            _ => b"",
+        };
+        if let Err(e) = out.write_all(bom) {
+            return Err(format!("書き込めませんでした: {e}"));
         }
         self.each_line(0, self.count, &mut |i, line| {
             let write = |out: &mut W| -> std::io::Result<()> {
                 if i > 0 {
-                    out.write_all(line_ending_bytes)?;
+                    out.write_all(&line_ending_bytes)?;
                 }
                 let clean_line = line.trim_end_matches(['\r', '\n']);
                 out.write_all(&encoding.encode_str(clean_line))
@@ -48,35 +54,38 @@ impl Document {
         let tmp = format!("{path}.saving");
         let fail = |e: String| format!("{path} を保存できませんでした: {e}");
         // 書きながら次の索引を作る。保存が終わった姿はこの索引そのもの。
-        let initial_offset = if self.encoding == FileEncoding::Utf8Bom {
-            3
-        } else {
-            0
+        let bom: &[u8] = match self.encoding {
+            FileEncoding::Utf8Bom => b"\xEF\xBB\xBF",
+            FileEncoding::Utf16Le => b"\xFF\xFE",
+            FileEncoding::Utf16Be => b"\xFE\xFF",
+            _ => b"",
         };
+        let initial_offset = bom.len() as u64;
         let mut marks = vec![initial_offset];
         let mut written = 0;
+        let mut ends_with_newline = false;
         {
             let file = File::create(&tmp).map_err(|e| fail(e.to_string()))?;
             let mut out = BufWriter::with_capacity(CHUNK, file);
-            if self.encoding == FileEncoding::Utf8Bom {
-                out.write_all(b"\xEF\xBB\xBF")
-                    .map_err(|e| fail(e.to_string()))?;
-                written += 3;
-            }
+            out.write_all(bom).map_err(|e| fail(e.to_string()))?;
+            written += initial_offset;
             let count = self.count;
             let mut broken = None;
-            let line_ending_bytes = self.line_ending.as_bytes();
             let encoding = self.encoding;
+            let line_ending_bytes = encoding.encode_str(
+                std::str::from_utf8(self.line_ending.as_bytes()).expect("line endings are ASCII"),
+            );
             self.each_line(0, count, &mut |i, line| {
                 let mut write = |out: &mut BufWriter<File>| -> std::io::Result<()> {
                     if i > 0 {
-                        out.write_all(line_ending_bytes)?;
+                        out.write_all(&line_ending_bytes)?;
                         written += line_ending_bytes.len() as u64;
                         if i % STRIDE == 0 {
                             marks.push(written);
                         }
                     }
                     let clean_line = line.trim_end_matches(['\r', '\n']);
+                    ends_with_newline = i > 0 && clean_line.is_empty();
                     let encoded = encoding.encode_str(clean_line);
                     out.write_all(&encoded)?;
                     written += encoded.len() as u64;
@@ -129,14 +138,19 @@ impl Document {
                 }),
             }),
             bytes: written,
+            content_offset: initial_offset,
+            ends_with_newline,
             modified,
             encoding: self.encoding,
             line_ending: self.line_ending,
         });
-        self.pieces = vec![Piece::Disk {
-            from: 0,
-            lines: self.count,
-        }];
+        self.pieces = crate::piece_tree::PieceTree::new(vec![Piece::Source {
+            from: initial_offset as usize,
+            len: written as usize - initial_offset as usize,
+            newlines: self.count.saturating_sub(1),
+            starts_newline: false,
+            ends_newline: false,
+        }]);
         self.log.saved_undo_len = self.log.undo.len();
         Ok(())
     }

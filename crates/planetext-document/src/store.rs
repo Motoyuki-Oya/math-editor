@@ -21,6 +21,53 @@ mod tests {
         doc.read(0, usize::MAX).unwrap()
     }
 
+    fn utf16_file_bytes(text: &str, encoding: FileEncoding) -> Vec<u8> {
+        let mut bytes = match encoding {
+            FileEncoding::Utf16Le => b"\xFF\xFE".to_vec(),
+            FileEncoding::Utf16Be => b"\xFE\xFF".to_vec(),
+            _ => unreachable!(),
+        };
+        bytes.extend(text.encode_utf16().flat_map(|unit| match encoding {
+            FileEncoding::Utf16Le => unit.to_le_bytes(),
+            FileEncoding::Utf16Be => unit.to_be_bytes(),
+            _ => unreachable!(),
+        }));
+        bytes
+    }
+
+    fn encoded_text(text: &str, encoding: FileEncoding) -> Vec<u8> {
+        match encoding {
+            FileEncoding::Utf16Le => text.encode_utf16().flat_map(u16::to_le_bytes).collect(),
+            FileEncoding::Utf16Be => text.encode_utf16().flat_map(u16::to_be_bytes).collect(),
+            _ => encoding.encode_str(text),
+        }
+    }
+
+    fn encoded_disk_doc(
+        name: &str,
+        lines: &[&str],
+        encoding: FileEncoding,
+        line_ending: LineEnding,
+        trailing_newline: bool,
+    ) -> (Document, String) {
+        let path =
+            std::env::temp_dir().join(format!("planetext-store-{}-{name}.txt", std::process::id()));
+        let separator = std::str::from_utf8(line_ending.as_bytes()).unwrap();
+        let mut text = lines.join(separator);
+        if trailing_newline {
+            text.push_str(separator);
+        }
+        let bytes = match encoding {
+            FileEncoding::Utf16Le | FileEncoding::Utf16Be => utf16_file_bytes(&text, encoding),
+            _ => encoded_text(&text, encoding),
+        };
+        std::fs::write(&path, bytes).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let (doc, scan) = Document::open_with_encoding(&path, Some(encoding)).unwrap();
+        assert!(scan.is_none());
+        (doc, path)
+    }
+
     #[test]
     fn opening_indexes_lines_without_holding_the_contents() {
         let (mut doc, path) = disk_doc("open", &["ab", "", "cd"]);
@@ -28,6 +75,54 @@ mod tests {
         assert_eq!(all(&mut doc), vec!["ab", "", "cd"]);
         assert_eq!(doc.read(2, 1).unwrap(), vec!["cd"]);
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn empty_and_bom_only_files_expose_one_empty_line() {
+        for (name, bytes, specified, offset) in [
+            ("empty", Vec::new(), Some(FileEncoding::Utf8Bom), 0),
+            ("utf8-bom-only", b"\xEF\xBB\xBF".to_vec(), None, 3),
+            ("utf16le-bom-only", b"\xFF\xFE".to_vec(), None, 2),
+            ("utf16be-bom-only", b"\xFE\xFF".to_vec(), None, 2),
+        ] {
+            let path = std::env::temp_dir()
+                .join(format!("planetext-store-{}-{name}.txt", std::process::id()));
+            std::fs::write(&path, bytes).unwrap();
+            let (mut doc, scan) =
+                Document::open_with_encoding(path.to_str().unwrap(), specified).unwrap();
+
+            assert!(scan.is_none());
+            assert_eq!(doc.source.as_ref().unwrap().content_offset, offset);
+            assert_eq!(doc.line_count(), 1);
+            assert_eq!(doc.read(0, 1).unwrap(), vec![""]);
+            assert_eq!(doc.read_tail(1).unwrap(), vec![""]);
+            std::fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn forced_utf8_bom_without_a_bom_keeps_all_content() {
+        for (name, bytes) in [
+            ("short-one", b"x".as_slice()),
+            ("short-two", b"xy".as_slice()),
+            ("full", b"first\nsecond".as_slice()),
+        ] {
+            let path = std::env::temp_dir().join(format!(
+                "planetext-store-{}-forced-bom-{name}.txt",
+                std::process::id()
+            ));
+            std::fs::write(&path, bytes).unwrap();
+            let (mut doc, _) =
+                Document::open_with_encoding(path.to_str().unwrap(), Some(FileEncoding::Utf8Bom))
+                    .unwrap();
+
+            assert_eq!(doc.source.as_ref().unwrap().content_offset, 0);
+            assert_eq!(
+                all(&mut doc),
+                String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>()
+            );
+            std::fs::remove_file(path).ok();
+        }
     }
 
     #[test]
@@ -47,6 +142,77 @@ mod tests {
         doc.confirm_scan();
         assert_eq!(doc.line_count(), complete_lines + 1);
         assert_eq!(doc.read(complete_lines, 1).unwrap(), vec![""]);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn confirming_background_scan_preserves_prior_edits_and_history() {
+        let path = std::env::temp_dir().join(format!(
+            "planetext-store-{}-background-edited.txt",
+            std::process::id()
+        ));
+        let source_line = "0123456789 source line\n";
+        let source_lines = 60_000usize;
+        let source_bytes = source_line.repeat(source_lines);
+        std::fs::write(&path, &source_bytes).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let (mut doc, scan) = Document::open(&path).unwrap();
+        let scan = scan.expect("the file must exceed the initial scan chunk");
+
+        doc.replace(
+            1,
+            2,
+            vec!["edited one".into(), "edited two".into()],
+            1,
+            "before",
+            "after",
+        )
+        .unwrap();
+        scan.run().unwrap();
+        doc.confirm_scan();
+
+        assert_eq!(doc.line_count(), source_lines + 2);
+        assert_eq!(doc.pieces.line_count(), source_lines + 2);
+        assert_eq!(doc.pieces.newline_count, source_lines + 1);
+        assert_eq!(
+            doc.bytes(),
+            source_bytes.len() - "0123456789 source line".len() + "edited one\nedited two".len()
+        );
+        assert_eq!(
+            doc.read(0, 4).unwrap(),
+            vec![
+                "0123456789 source line",
+                "edited one",
+                "edited two",
+                "0123456789 source line"
+            ]
+        );
+
+        let undone = doc.undo().unwrap().unwrap();
+        assert_eq!(undone.state, "before");
+        assert_eq!(doc.line_count(), source_lines + 1);
+        assert_eq!(doc.pieces.newline_count, source_lines);
+        assert_eq!(doc.bytes(), source_bytes.len());
+        assert_eq!(doc.read(0, 3).unwrap(), vec!["0123456789 source line"; 3]);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn sparse_mark_at_eof_exposes_the_final_empty_line() {
+        let path = std::env::temp_dir().join(format!(
+            "planetext-store-{}-stride-final-empty.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, "\n".repeat(STRIDE)).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let (mut doc, scan) =
+            Document::open_with_encoding(&path, Some(FileEncoding::Utf8)).unwrap();
+
+        assert!(scan.is_none());
+        let source = doc.source.as_ref().unwrap();
+        assert_eq!(source.index.state.lock().unwrap().marks[1], source.bytes);
+        assert_eq!(doc.line_count(), STRIDE + 1);
+        assert_eq!(doc.read(STRIDE, 1).unwrap(), vec![""]);
         std::fs::remove_file(path).ok();
     }
 
@@ -84,6 +250,21 @@ mod tests {
         let redone = doc.redo().unwrap().unwrap();
         assert_eq!(redone.state, "after");
         assert_eq!(all(&mut doc), vec!["a", "X", "Y", "c"]);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn no_op_edit_and_undo_keep_zero_removed_lines() {
+        let (mut doc, path) = disk_doc("no-op", &["a", "b"]);
+        doc.replace(1, 1, Vec::new(), 1, "before", "after").unwrap();
+
+        assert!(doc.log.undo[0].edits[0].removed.lines == 0);
+        assert_eq!(all(&mut doc), vec!["a", "b"]);
+        let undone = doc.undo().unwrap().unwrap();
+        assert_eq!(undone.state, "before");
+        assert_eq!(all(&mut doc), vec!["a", "b"]);
+        assert_eq!(doc.redo().unwrap().unwrap().state, "after");
+        assert_eq!(all(&mut doc), vec!["a", "b"]);
         std::fs::remove_file(path).ok();
     }
 
@@ -283,6 +464,218 @@ mod tests {
         let (mut doc, path) = disk_doc("contains", &["aa", "a$b", "cc", "$"]);
         assert_eq!(doc.lines_containing(0, 3, '$').unwrap(), vec![1, 3]);
         assert_eq!(doc.lines_containing(0, 99, '$').unwrap(), vec![1, 3]);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn multi_piece_callbacks_keep_global_line_numbers() {
+        let (mut doc, path) = disk_doc("global-lines", &["a", "b", "c", "d", "e", "f"]);
+        doc.replace(
+            3,
+            4,
+            vec!["x".into(), "$one".into(), "y$".into()],
+            1,
+            "",
+            "",
+        )
+        .unwrap();
+        assert_eq!(doc.lines_containing(0, 99, '$').unwrap(), vec![4, 5]);
+        let overrides = std::collections::HashMap::from([(5, "override".to_string())]);
+        assert_eq!(
+            doc.assemble(2, None, 6, None, &overrides).unwrap(),
+            "c\nx\n$one\noverride\ne"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    fn assert_document_state(doc: &mut Document, expected: &[String]) {
+        assert_eq!(all(doc), expected);
+        assert_eq!(doc.line_count(), expected.len());
+        assert_eq!(doc.pieces.line_count(), expected.len());
+        assert_eq!(doc.pieces.newline_count, expected.len().saturating_sub(1));
+        let separator = std::str::from_utf8(doc.line_ending().as_bytes()).unwrap();
+        assert_eq!(
+            doc.bytes(),
+            encoded_text(&expected.join(separator), doc.encoding()).len()
+        );
+        assert_eq!(doc.pieces.byte_len, doc.bytes());
+    }
+
+    fn assert_encoded_document_state(doc: &mut Document, expected: &[&str]) {
+        let expected_lines: Vec<String> = expected.iter().map(|line| (*line).to_string()).collect();
+        let separator = std::str::from_utf8(doc.line_ending().as_bytes()).unwrap();
+        let text = expected.join(separator);
+        assert_eq!(all(doc), expected_lines);
+        assert_eq!(doc.line_count(), expected.len());
+        assert_eq!(doc.pieces.line_count(), expected.len());
+        assert_eq!(doc.pieces.newline_count, expected.len().saturating_sub(1));
+        assert_eq!(doc.bytes(), encoded_text(&text, doc.encoding()).len());
+        assert_eq!(doc.pieces.byte_len, doc.bytes());
+    }
+
+    #[test]
+    fn trailing_newline_final_empty_line_edits_target_the_right_range() {
+        for line_ending in [LineEnding::Lf, LineEnding::CrLf] {
+            for (operation, inserted, edited) in [
+                ("edit", vec!["edited"], vec!["head", "edited"]),
+                (
+                    "replace",
+                    vec!["replacement one", "replacement two"],
+                    vec!["head", "replacement one", "replacement two"],
+                ),
+                ("delete", Vec::new(), vec!["head"]),
+            ] {
+                let name = format!("trailing-{line_ending:?}-{operation}");
+                let (mut doc, path) =
+                    encoded_disk_doc(&name, &["head"], FileEncoding::Utf8, line_ending, true);
+                assert_encoded_document_state(&mut doc, &["head", ""]);
+
+                doc.replace(
+                    1,
+                    2,
+                    inserted.into_iter().map(str::to_string).collect(),
+                    1,
+                    "before",
+                    "after",
+                )
+                .unwrap();
+                assert_encoded_document_state(&mut doc, &edited);
+
+                let undone = doc.undo().unwrap().unwrap();
+                assert_eq!(undone.state, "before");
+                assert_encoded_document_state(&mut doc, &["head", ""]);
+                let redone = doc.redo().unwrap().unwrap();
+                assert_eq!(redone.state, "after");
+                assert_encoded_document_state(&mut doc, &edited);
+                std::fs::remove_file(path).ok();
+            }
+        }
+    }
+
+    #[test]
+    fn edited_separators_match_document_line_ending_and_encoding() {
+        for (encoding, line_ending) in [
+            (FileEncoding::Utf8, LineEnding::Lf),
+            (FileEncoding::Utf8, LineEnding::CrLf),
+            (FileEncoding::Utf8, LineEnding::Cr),
+            (FileEncoding::Utf16Le, LineEnding::CrLf),
+            (FileEncoding::Utf16Be, LineEnding::Cr),
+        ] {
+            let name = format!("separator-{encoding:?}-{line_ending:?}");
+            let (mut doc, path) =
+                encoded_disk_doc(&name, &["head", "tail"], encoding, line_ending, false);
+            doc.replace(1, 1, vec!["左".into(), "右".into()], 1, "before", "after")
+                .unwrap();
+            assert_encoded_document_state(&mut doc, &["head", "左", "右", "tail"]);
+
+            let saved = format!("{path}.saved");
+            doc.save(&saved).unwrap();
+            let expected_text = ["head", "左", "右", "tail"]
+                .join(std::str::from_utf8(line_ending.as_bytes()).unwrap());
+            let expected_bytes = match encoding {
+                FileEncoding::Utf16Le | FileEncoding::Utf16Be => {
+                    utf16_file_bytes(&expected_text, encoding)
+                }
+                _ => encoded_text(&expected_text, encoding),
+            };
+            assert_eq!(std::fs::read(&saved).unwrap(), expected_bytes);
+
+            assert_eq!(doc.undo().unwrap().unwrap().state, "before");
+            assert_encoded_document_state(&mut doc, &["head", "tail"]);
+            assert_eq!(doc.redo().unwrap().unwrap().state, "after");
+            assert_encoded_document_state(&mut doc, &["head", "左", "右", "tail"]);
+            std::fs::remove_file(path).ok();
+            std::fs::remove_file(saved).ok();
+        }
+    }
+
+    #[test]
+    fn boundary_separators_survive_insertions_and_replacements() {
+        for (name, from, to, inserted, expected) in [
+            (
+                "replace-start",
+                0,
+                1,
+                vec!["A", "AA"],
+                vec!["A", "AA", "b", "c"],
+            ),
+            (
+                "replace-middle",
+                1,
+                2,
+                vec!["B", "BB"],
+                vec!["a", "B", "BB", "c"],
+            ),
+            (
+                "replace-eof",
+                2,
+                3,
+                vec!["C", "CC"],
+                vec!["a", "b", "C", "CC"],
+            ),
+            (
+                "insert-start",
+                0,
+                0,
+                vec!["H", "HH"],
+                vec!["H", "HH", "a", "b", "c"],
+            ),
+            (
+                "insert-middle",
+                1,
+                1,
+                vec!["M", "MM"],
+                vec!["a", "M", "MM", "b", "c"],
+            ),
+            (
+                "insert-eof",
+                3,
+                3,
+                vec!["T", "TT"],
+                vec!["a", "b", "c", "T", "TT"],
+            ),
+        ] {
+            let (mut doc, path) = disk_doc(name, &["a", "b", "c"]);
+            doc.replace(
+                from,
+                to,
+                inserted.into_iter().map(str::to_string).collect(),
+                1,
+                "",
+                "",
+            )
+            .unwrap();
+            let expected: Vec<String> = expected.into_iter().map(str::to_string).collect();
+            assert_document_state(&mut doc, &expected);
+            std::fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn document_boundaries_stay_consistent_beyond_node_capacity() {
+        let (mut doc, path) = disk_doc("many-pieces", &["base"]);
+        let mut expected = vec!["base".to_string()];
+        for i in 0..24 {
+            let line = format!("line-{i}");
+            let at = doc.line_count();
+            doc.replace(at, at, vec![line.clone()], i + 1, "", "")
+                .unwrap();
+            expected.push(line);
+        }
+        doc.replace(
+            9,
+            15,
+            vec!["middle-a".into(), "middle-b".into(), "middle-c".into()],
+            100,
+            "",
+            "",
+        )
+        .unwrap();
+        expected.splice(
+            9..15,
+            ["middle-a", "middle-b", "middle-c"].map(str::to_string),
+        );
+        assert_document_state(&mut doc, &expected);
         std::fs::remove_file(path).ok();
     }
 
@@ -530,6 +923,76 @@ mod tests {
                 "line 99999 with some content"
             ]
         );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn utf16_bom_files_read_edit_undo_redo_save_and_reopen() {
+        for (name, encoding, first) in [
+            ("le", FileEncoding::Utf16Le, "\u{a01}\u{100} first"),
+            ("be", FileEncoding::Utf16Be, "\u{100}\u{a01} first"),
+        ] {
+            let path = std::env::temp_dir().join(format!(
+                "planetext-store-{}-utf16-{name}.txt",
+                std::process::id()
+            ));
+            let original = format!("{first}\n中央\nlast");
+            std::fs::write(&path, utf16_file_bytes(&original, encoding)).unwrap();
+            let (mut doc, scan) = Document::open(path.to_str().unwrap()).unwrap();
+            if let Some(scan) = scan {
+                scan.run().unwrap();
+                doc.confirm_scan();
+            }
+
+            assert_eq!(doc.encoding(), encoding);
+            assert_eq!(doc.source.as_ref().unwrap().content_offset, 2);
+            assert_eq!(all(&mut doc), vec![first, "中央", "last"]);
+            doc.replace(
+                1,
+                2,
+                vec!["編集一".into(), "編集二".into()],
+                1,
+                "before",
+                "after",
+            )
+            .unwrap();
+            assert_eq!(all(&mut doc), vec![first, "編集一", "編集二", "last"]);
+            assert_eq!(doc.undo().unwrap().unwrap().state, "before");
+            assert_eq!(all(&mut doc), vec![first, "中央", "last"]);
+            assert_eq!(doc.redo().unwrap().unwrap().state, "after");
+            assert_eq!(all(&mut doc), vec![first, "編集一", "編集二", "last"]);
+
+            doc.save(path.to_str().unwrap()).unwrap();
+            let saved = std::fs::read(&path).unwrap();
+            assert!(saved.starts_with(match encoding {
+                FileEncoding::Utf16Le => b"\xFF\xFE",
+                FileEncoding::Utf16Be => b"\xFE\xFF",
+                _ => unreachable!(),
+            }));
+            let (mut reopened, _) = Document::open(path.to_str().unwrap()).unwrap();
+            assert_eq!(reopened.encoding(), encoding);
+            assert_eq!(all(&mut reopened), vec![first, "編集一", "編集二", "last"]);
+            std::fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn encoding_change_keeps_existing_edit_and_undo_ranges_decodable() {
+        let (mut doc, path) = disk_doc("encoding-change", &["base", "tail"]);
+        doc.replace(1, 2, vec!["編集".into()], 1, "before", "after")
+            .unwrap();
+        doc.set_encoding(FileEncoding::Utf16Be);
+
+        assert_eq!(all(&mut doc), vec!["base", "編集"]);
+        assert_eq!(doc.undo().unwrap().unwrap().state, "before");
+        assert_eq!(all(&mut doc), vec!["base", "tail"]);
+        assert_eq!(doc.redo().unwrap().unwrap().state, "after");
+        assert_eq!(all(&mut doc), vec!["base", "編集"]);
+        doc.save(&path).unwrap();
+
+        let (mut reopened, _) = Document::open(&path).unwrap();
+        assert_eq!(reopened.encoding(), FileEncoding::Utf16Be);
+        assert_eq!(all(&mut reopened), vec!["base", "編集"]);
         std::fs::remove_file(path).ok();
     }
 

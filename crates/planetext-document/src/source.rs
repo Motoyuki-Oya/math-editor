@@ -10,6 +10,7 @@ pub(crate) const STRIDE: usize = 1024;
 
 /// ファイルを読むときのひとかたまり。
 pub(crate) const CHUNK: usize = 1 << 20;
+pub(crate) const MAX_LINE_BYTES: usize = 20 << 20;
 
 /// ファイルの文字エンコーディング。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -79,10 +80,28 @@ impl FileEncoding {
     pub(crate) fn encode_str(&self, text: &str) -> Vec<u8> {
         match self {
             FileEncoding::Utf8 | FileEncoding::Utf8Bom => text.as_bytes().to_vec(),
+            FileEncoding::Utf16Le => text.encode_utf16().flat_map(u16::to_le_bytes).collect(),
+            FileEncoding::Utf16Be => text.encode_utf16().flat_map(u16::to_be_bytes).collect(),
             _ => {
                 let (cow, _, _) = self.encoding().encode(text);
                 cow.into_owned()
             }
+        }
+    }
+
+    fn unit_bytes(self) -> usize {
+        match self {
+            FileEncoding::Utf16Le | FileEncoding::Utf16Be => 2,
+            _ => 1,
+        }
+    }
+
+    fn bom_len(self, bytes: &[u8]) -> usize {
+        match self {
+            FileEncoding::Utf8 | FileEncoding::Utf8Bom if bytes.starts_with(b"\xEF\xBB\xBF") => 3,
+            FileEncoding::Utf16Le if bytes.starts_with(b"\xFF\xFE") => 2,
+            FileEncoding::Utf16Be if bytes.starts_with(b"\xFE\xFF") => 2,
+            _ => 0,
         }
     }
 
@@ -159,7 +178,14 @@ impl LineEnding {
     }
 
     /// バイト列から改行コードを判別する。
-    pub(crate) fn detect(bytes: &[u8]) -> Self {
+    pub(crate) fn detect_encoded(bytes: &[u8], encoding: FileEncoding) -> Self {
+        let decoded;
+        let bytes = if encoding.unit_bytes() == 1 {
+            bytes
+        } else {
+            decoded = encoding.decode_line(bytes);
+            decoded.as_bytes()
+        };
         let crlf = memchr::memmem::find_iter(bytes, b"\r\n").count();
         let total_n = memchr::memchr_iter(b'\n', bytes).count();
         let lf_only = total_n.saturating_sub(crlf);
@@ -191,23 +217,23 @@ pub(crate) fn index_chunk(
     offset: u64,
     line: &mut usize,
     marks: &mut Vec<u64>,
-    delimiter: u8,
+    delimiter: &[u8],
+    unit_bytes: usize,
 ) {
-    // memchrのcountはSIMD実装を持つ。4KBごとに改行数だけ先に数え、STRIDEの
-    // 境界を含む小区間だけ位置を列挙することで、debugでも全改行をRust側で
-    // 1件ずつ反復しない。
-    const BLOCK: usize = 4 << 10;
-    for (block_index, block) in chunk.chunks(BLOCK).enumerate() {
-        let count = memchr::memchr_iter(delimiter, block).count();
-        let next_mark = (*line / STRIDE + 1) * STRIDE;
-        if *line + count < next_mark {
-            *line += count;
-            continue;
-        }
-        for at in memchr::memchr_iter(delimiter, block) {
+    if unit_bytes == 1 {
+        for at in memchr::memchr_iter(delimiter[0], chunk) {
             *line += 1;
             if (*line).is_multiple_of(STRIDE) {
-                marks.push(offset + (block_index * BLOCK + at) as u64 + 1);
+                marks.push(offset + at as u64 + 1);
+            }
+        }
+    } else {
+        for at in (0..chunk.len().saturating_sub(1)).step_by(unit_bytes) {
+            if &chunk[at..at + unit_bytes] == delimiter {
+                *line += 1;
+                if (*line).is_multiple_of(STRIDE) {
+                    marks.push(offset + at as u64 + unit_bytes as u64);
+                }
             }
         }
     }
@@ -248,6 +274,8 @@ pub(crate) struct Source {
     /// 行数と間引き索引はバックグラウンド走査スレッドと共有する。
     pub(crate) index: Arc<ScanIndex>,
     pub(crate) bytes: u64,
+    pub(crate) content_offset: u64,
+    pub(crate) ends_with_newline: bool,
     /// 開いたときの姿。外から書き換えられると seek 読みが壊れるので、
     /// 変わっていたら読む前に断る。
     pub(crate) modified: Option<SystemTime>,
@@ -261,7 +289,8 @@ pub(crate) struct BackgroundScan {
     path: PathBuf,
     offset: u64,
     line: usize,
-    delimiter: u8,
+    delimiter: Vec<u8>,
+    unit_bytes: usize,
 }
 
 impl BackgroundScan {
@@ -286,7 +315,8 @@ impl BackgroundScan {
                 self.offset,
                 &mut self.line,
                 &mut marks,
-                self.delimiter,
+                &self.delimiter,
+                self.unit_bytes,
             );
             let len = chunk.len();
             self.offset += len as u64;
@@ -298,11 +328,59 @@ impl BackgroundScan {
     }
 }
 
+fn read_line_bounded<R: BufRead>(
+    reader: &mut R,
+    encoding: FileEncoding,
+    delimiter: &[u8],
+    buffer: &mut Vec<u8>,
+) -> Result<usize, String> {
+    buffer.clear();
+    if encoding.unit_bytes() == 1 {
+        let mut limited = reader.take((MAX_LINE_BYTES + 1) as u64);
+        let read = limited
+            .read_until(delimiter[0], buffer)
+            .map_err(|e| e.to_string())?;
+        if buffer.len() > MAX_LINE_BYTES {
+            return Err("1行が20MBを超えるため表示できません".to_string());
+        }
+        return Ok(read);
+    }
+    let mut unit = [0; 2];
+    loop {
+        match reader.read_exact(&mut unit) {
+            Ok(()) => {
+                buffer.extend_from_slice(&unit);
+                if buffer.len() > MAX_LINE_BYTES {
+                    return Err("1行が20MBを超えるため表示できません".to_string());
+                }
+                if unit == delimiter {
+                    return Ok(buffer.len());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {
+                return Ok(buffer.len())
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+}
+
 impl Source {
-    pub(crate) fn delimiter(&self) -> u8 {
-        match self.line_ending {
-            LineEnding::Cr => b'\r',
-            _ => b'\n',
+    pub(crate) fn delimiter(&self) -> Vec<u8> {
+        let delimiter = match self.line_ending {
+            LineEnding::Cr => "\r",
+            _ => "\n",
+        };
+        match self.encoding {
+            FileEncoding::Utf16Le => delimiter
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect(),
+            FileEncoding::Utf16Be => delimiter
+                .encode_utf16()
+                .flat_map(u16::to_be_bytes)
+                .collect(),
+            _ => delimiter.as_bytes().to_vec(),
         }
     }
 
@@ -310,7 +388,7 @@ impl Source {
         path: &Path,
         specified_encoding: Option<FileEncoding>,
     ) -> Result<(Source, Option<BackgroundScan>), String> {
-        let file =
+        let mut file =
             File::open(path).map_err(|e| format!("{} を開けませんでした: {e}", path.display()))?;
         let modified = file.metadata().ok().and_then(|meta| meta.modified().ok());
         let bytes = file.metadata().ok().map_or(0, |m| m.len());
@@ -319,38 +397,44 @@ impl Source {
         let scan_file =
             File::open(path).map_err(|e| format!("{} を読めませんでした: {e}", path.display()))?;
         let mut reader = BufReader::with_capacity(CHUNK, scan_file);
-        let (encoding, has_bom, line_ending) = {
+        let (encoding, initial_offset, line_ending) = {
             let chunk = reader
                 .fill_buf()
                 .map_err(|e| format!("{} を読めませんでした: {e}", path.display()))?;
-            let (detected_enc, has_bom) = match specified_encoding {
-                Some(enc) => (
-                    enc,
-                    enc == FileEncoding::Utf8Bom && chunk.starts_with(b"\xEF\xBB\xBF"),
-                ),
-                None => FileEncoding::detect(chunk),
-            };
-            (detected_enc, has_bom, LineEnding::detect(chunk))
+            let encoding = specified_encoding.unwrap_or_else(|| FileEncoding::detect(chunk).0);
+            let initial_offset = encoding.bom_len(chunk);
+            let content = &chunk[initial_offset.min(chunk.len())..];
+            (
+                encoding,
+                initial_offset,
+                LineEnding::detect_encoded(content, encoding),
+            )
         };
-        let initial_offset =
-            if has_bom && (encoding == FileEncoding::Utf8Bom || encoding == FileEncoding::Utf8) {
-                3
-            } else {
-                0
-            };
         let index = Arc::new(ScanIndex {
             state: Mutex::new(ScanState {
-                marks: vec![initial_offset],
+                marks: vec![initial_offset as u64],
                 lines: 0,
                 done: false,
                 broken: None,
             }),
         });
-        let delimiter = match line_ending {
-            LineEnding::Cr => b'\r',
-            _ => b'\n',
+        let delimiter_text = match line_ending {
+            LineEnding::Cr => "\r",
+            _ => "\n",
         };
-        let mut marks = vec![initial_offset];
+        let delimiter = match encoding {
+            FileEncoding::Utf16Le => delimiter_text
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+            FileEncoding::Utf16Be => delimiter_text
+                .encode_utf16()
+                .flat_map(u16::to_be_bytes)
+                .collect::<Vec<_>>(),
+            _ => delimiter_text.as_bytes().to_vec(),
+        };
+        let unit_bytes = encoding.unit_bytes();
+        let mut marks = vec![initial_offset as u64];
         let mut line = 0;
         let mut offset = 0;
         {
@@ -362,7 +446,14 @@ impl Source {
             } else {
                 chunk_buf
             };
-            index_chunk(chunk, initial_offset, &mut line, &mut marks, delimiter);
+            index_chunk(
+                chunk,
+                initial_offset as u64,
+                &mut line,
+                &mut marks,
+                &delimiter,
+                unit_bytes,
+            );
             let len = chunk_buf.len();
             offset += len as u64;
             reader.consume(len);
@@ -375,11 +466,22 @@ impl Source {
             state.lines = if done { line + 1 } else { line };
             state.done = done;
         }
+        let ends_with_newline = if bytes >= initial_offset as u64 + delimiter.len() as u64 {
+            let mut tail = vec![0; delimiter.len()];
+            file.seek(SeekFrom::End(-(delimiter.len() as i64)))
+                .and_then(|_| file.read_exact(&mut tail))
+                .map_err(|e| format!("{} を読めませんでした: {e}", path.display()))?;
+            tail == delimiter
+        } else {
+            false
+        };
         let source = Source {
             path: path.to_path_buf(),
             file,
             index: index.clone(),
             bytes,
+            content_offset: initial_offset as u64,
+            ends_with_newline,
             modified,
             encoding,
             line_ending,
@@ -395,6 +497,7 @@ impl Source {
                 offset,
                 line,
                 delimiter,
+                unit_bytes,
             })
         };
         Ok((source, scan))
@@ -420,8 +523,11 @@ impl Source {
 
     /// 総行数や間引き索引を待たず、EOFから後ろの行だけを読む。
     pub(crate) fn read_tail(&mut self, count: usize) -> Result<Vec<String>, String> {
-        if count == 0 || self.bytes == 0 {
+        if count == 0 {
             return Ok(Vec::new());
+        }
+        if self.bytes == self.content_offset {
+            return Ok(vec![String::new()]);
         }
         self.check()?;
         const TAIL_CHUNK: u64 = 64 << 10;
@@ -431,8 +537,11 @@ impl Source {
         let mut chunks = Vec::new();
         let mut newlines = 0;
         let mut read_bytes = 0;
-        while at > 0 && newlines < count && read_bytes < MAX_TAIL_BYTES {
-            let from = at.saturating_sub(TAIL_CHUNK);
+        while at > self.content_offset && newlines < count && read_bytes < MAX_TAIL_BYTES {
+            let mut from = at.saturating_sub(TAIL_CHUNK).max(self.content_offset);
+            if self.encoding.unit_bytes() == 2 && (from - self.content_offset) % 2 != 0 {
+                from += 1;
+            }
             let mut chunk = vec![0; (at - from) as usize];
             self.file
                 .seek(SeekFrom::Start(from))
@@ -440,28 +549,169 @@ impl Source {
             self.file
                 .read_exact(&mut chunk)
                 .map_err(|e| format!("{} を読めませんでした: {e}", self.path.display()))?;
-            newlines += memchr::memchr_iter(delimiter, &chunk).count();
+            newlines += if delimiter.len() == 1 {
+                memchr::memchr_iter(delimiter[0], &chunk).count()
+            } else {
+                chunk
+                    .chunks_exact(2)
+                    .filter(|unit| *unit == delimiter.as_slice())
+                    .count()
+            };
             read_bytes += chunk.len() as u64;
             chunks.push(chunk);
             at = from;
         }
-        if at > 0 && newlines < count {
+        if at > self.content_offset && newlines < count {
             return Err("末尾の行が8MBを超えるため表示できません".to_string());
         }
         chunks.reverse();
-        let bytes: Vec<u8> = chunks.into_iter().flatten().collect();
-        let lines: Vec<&[u8]> = bytes.split(|byte| *byte == delimiter).collect();
+        let text = self
+            .encoding
+            .decode_line(&chunks.into_iter().flatten().collect::<Vec<_>>());
+        let delimiter = match self.line_ending {
+            LineEnding::Cr => '\r',
+            _ => '\n',
+        };
+        let lines: Vec<&str> = text.split(delimiter).collect();
         let first = lines.len().saturating_sub(count);
-        lines[first..]
+        Ok(lines[first..]
             .iter()
-            .map(|raw_line| {
-                let mut line = *raw_line;
-                while line.last() == Some(&b'\r') || line.last() == Some(&b'\n') {
-                    line = &line[..line.len() - 1];
+            .map(|line| line.trim_end_matches(['\r', '\n']).to_string())
+            .collect())
+    }
+
+    fn indexed_start(
+        &mut self,
+        from: usize,
+        len: usize,
+        skip: usize,
+    ) -> Result<(usize, usize), String> {
+        if skip < STRIDE {
+            return Ok((from, skip));
+        }
+        let (before, mark) = {
+            let index = self.index.state.lock().unwrap();
+            let before = index
+                .marks
+                .partition_point(|offset| *offset <= from as u64)
+                .saturating_sub(1);
+            (before, index.marks[before] as usize)
+        };
+        let mut source_line = before * STRIDE;
+        if mark < from {
+            self.file
+                .seek(SeekFrom::Start(mark as u64))
+                .map_err(|e| e.to_string())?;
+            let delimiter = self.delimiter();
+            let mut left = from - mark;
+            let mut buffer = vec![0; CHUNK.min(left.max(1))];
+            while left > 0 {
+                let take = left.min(buffer.len());
+                self.file
+                    .read_exact(&mut buffer[..take])
+                    .map_err(|e| e.to_string())?;
+                source_line += if delimiter.len() == 1 {
+                    memchr::memchr_iter(delimiter[0], &buffer[..take]).count()
+                } else {
+                    buffer[..take]
+                        .chunks_exact(2)
+                        .filter(|unit| *unit == delimiter.as_slice())
+                        .count()
+                };
+                left -= take;
+            }
+        }
+        let target = source_line + skip;
+        let indexed_line = target / STRIDE;
+        let offset = self
+            .index
+            .state
+            .lock()
+            .unwrap()
+            .marks
+            .get(indexed_line)
+            .copied()
+            .map(|offset| offset as usize);
+        if let Some(offset) = offset {
+            if offset >= from && offset <= from.saturating_add(len) {
+                return Ok((offset, target - indexed_line * STRIDE));
+            }
+        }
+        Ok((from, skip))
+    }
+
+    pub(crate) fn for_each_range_line(
+        &mut self,
+        from: usize,
+        len: usize,
+        skip: usize,
+        take: usize,
+        f: &mut dyn FnMut(usize, &str) -> bool,
+    ) -> Result<bool, String> {
+        self.check()?;
+        let (start, remaining_skip) = self.indexed_start(from, len, skip)?;
+        self.file
+            .seek(SeekFrom::Start(start as u64))
+            .map_err(|e| e.to_string())?;
+        let available = from.saturating_add(len).saturating_sub(start);
+        let limited = (&self.file).take(available as u64);
+        let mut reader = BufReader::with_capacity(CHUNK.min(available.max(1)), limited);
+        let delimiter = self.delimiter();
+        let mut buffer = Vec::new();
+        let mut ended_after_delimiter = false;
+        for line in 0..remaining_skip + take {
+            let read = read_line_bounded(&mut reader, self.encoding, &delimiter, &mut buffer)?;
+            if read == 0 {
+                let indexed_empty_tail = start == from.saturating_add(len) && remaining_skip == 0;
+                if (len == 0 || ended_after_delimiter || indexed_empty_tail)
+                    && line >= remaining_skip
+                {
+                    if !f(line - remaining_skip, "") {
+                        return Ok(false);
+                    }
                 }
-                Ok(self.encoding.decode_line(line))
-            })
-            .collect()
+                break;
+            }
+            ended_after_delimiter = buffer.ends_with(&delimiter);
+            while buffer.ends_with(&self.encoding.encode_str("\n"))
+                || buffer.ends_with(&self.encoding.encode_str("\r"))
+            {
+                buffer.truncate(buffer.len() - self.encoding.unit_bytes());
+            }
+            if line >= remaining_skip
+                && !f(line - remaining_skip, &self.encoding.decode_line(&buffer))
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn byte_offset_after_lines(
+        &mut self,
+        from: usize,
+        len: usize,
+        lines: usize,
+    ) -> Result<usize, String> {
+        self.check()?;
+        let (start, remaining) = self.indexed_start(from, len, lines)?;
+        self.file
+            .seek(SeekFrom::Start(start as u64))
+            .map_err(|e| e.to_string())?;
+        let available = from.saturating_add(len).saturating_sub(start);
+        let limited = (&self.file).take(available as u64);
+        let mut reader = BufReader::with_capacity(CHUNK.min(available.max(1)), limited);
+        let delimiter = self.delimiter();
+        let mut buffer = Vec::new();
+        let mut offset = start - from;
+        for _ in 0..remaining {
+            let read = read_line_bounded(&mut reader, self.encoding, &delimiter, &mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            offset += read;
+        }
+        Ok(offset.min(len))
     }
 
     /// 検索スレッド専用の独立したファイルハンドルを持つ同じソース。
@@ -474,57 +724,45 @@ impl Source {
             file,
             index: self.index.clone(),
             bytes: self.bytes,
+            content_offset: self.content_offset,
+            ends_with_newline: self.ends_with_newline,
             modified: self.modified,
             encoding: self.encoding,
             line_ending: self.line_ending,
         })
     }
+}
 
-    /// ディスク上の行 `from` から `count` 行に `f` を呼ぶ。`f` が `false` を
-    /// 返したら打ち切る。最寄りの索引へ seek し、そこから読み流す。
-    pub(crate) fn each_line(
-        &mut self,
-        from: usize,
-        count: usize,
-        f: &mut dyn FnMut(usize, &str) -> bool,
-    ) -> Result<(), String> {
-        if count == 0 {
-            return Ok(());
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn far_range_start_uses_a_sparse_mark() {
+        let path = std::env::temp_dir().join(format!(
+            "planetext-source-{}-sparse-mark.txt",
+            std::process::id()
+        ));
+        let text = (0..STRIDE * 2 + 8)
+            .map(|line| format!("line-{line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, text).unwrap();
+        let (mut source, scan) = Source::open_with_encoding(&path, None).unwrap();
+        if let Some(scan) = scan {
+            scan.run().unwrap();
         }
-        let (lines, mark_index, mark) = {
-            let state = self.index.state.lock().unwrap();
-            if let Some(error) = &state.broken {
-                return Err(error.clone());
-            }
-            let mark_index = (from / STRIDE).min(state.marks.len().saturating_sub(1));
-            (state.lines, mark_index, state.marks[mark_index])
-        };
-        if from >= lines {
-            return Ok(());
-        }
-        self.check()?;
-        let broken = |e| format!("{} を読めませんでした: {e}", self.path.display());
-        self.file.seek(SeekFrom::Start(mark)).map_err(broken)?;
-        let mut reader = BufReader::with_capacity(CHUNK, &self.file);
-        let mut buffer = Vec::new();
-        let delimiter = self.delimiter();
-        // 遅延索引が目的行へまだ届いていなければ、最後にある印から正しく読む。
-        for _ in 0..from - mark_index * STRIDE {
-            buffer.clear();
-            reader.read_until(delimiter, &mut buffer).map_err(broken)?;
-        }
-        let to = (from + count).min(lines);
-        for line in from..to {
-            buffer.clear();
-            reader.read_until(delimiter, &mut buffer).map_err(broken)?;
-            while buffer.last() == Some(&b'\n') || buffer.last() == Some(&b'\r') {
-                buffer.pop();
-            }
-            let text = self.encoding.decode_line(&buffer);
-            if !f(line, &text) {
-                return Ok(());
-            }
-        }
-        Ok(())
+        let marks = source.index.state.lock().unwrap().marks.clone();
+
+        let (start, remaining) = source
+            .indexed_start(
+                source.content_offset as usize,
+                source.bytes as usize - source.content_offset as usize,
+                STRIDE + 3,
+            )
+            .unwrap();
+        assert_eq!(start, marks[1] as usize);
+        assert_eq!(remaining, 3);
+        std::fs::remove_file(path).ok();
     }
 }

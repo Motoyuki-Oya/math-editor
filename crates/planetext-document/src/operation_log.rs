@@ -1,23 +1,19 @@
-/// 履歴が持つステップ数の上限。それより古いものは忘れる。
+use crate::edit_buffers::{EditBuffers, EditRange};
+use crate::source::{FileEncoding, LineEnding};
+
 pub(crate) const HISTORY_LIMIT: usize = 1000;
 
-/// 履歴の 1 かたまりに入る 1 つの置き換えの逆: `from` から `inserted` 行を
-/// 取り除き、`removed` を戻すと元に戻る。
 #[derive(Debug)]
 pub(crate) struct Edit {
     pub(crate) from: usize,
-    pub(crate) removed: Vec<String>,
+    pub(crate) removed: EditRange,
     pub(crate) inserted: usize,
 }
 
-/// 履歴の 1 ステップ。同じ `group` の置き換えが続く間は 1 つにつながるので、
-/// 「すべて置換」も入力の 1 操作も、1 回の元に戻すで全部戻る。
 #[derive(Debug)]
 pub(crate) struct Step {
     pub(crate) group: u64,
     pub(crate) edits: Vec<Edit>,
-    /// 編集前後のキャレットなどの控え。frontend が渡す不透明な文字列で、
-    /// こちらは中身を解釈しない。
     pub(crate) before: String,
     pub(crate) after: String,
 }
@@ -27,6 +23,7 @@ pub(crate) struct OperationLog {
     pub(crate) undo: Vec<Step>,
     pub(crate) redo: Vec<Step>,
     pub(crate) saved_undo_len: usize,
+    pub(crate) delete_buffers: EditBuffers,
 }
 
 impl OperationLog {
@@ -34,9 +31,22 @@ impl OperationLog {
         self.undo.clear();
         self.redo.clear();
         self.saved_undo_len = 0;
+        self.delete_buffers = EditBuffers::default();
     }
-
     pub(crate) fn is_clean(&self) -> bool {
         self.undo.len() == self.saved_undo_len
+    }
+    pub(crate) fn append_deleted(
+        &mut self,
+        lines: &[String],
+        encoding: FileEncoding,
+        line_ending: LineEnding,
+    ) -> EditRange {
+        self.delete_buffers
+            .append_lines(lines, encoding, line_ending)
+            .0
+    }
+    pub(crate) fn read_deleted(&self, range: EditRange) -> Vec<String> {
+        self.delete_buffers.read_lines(range)
     }
 }
