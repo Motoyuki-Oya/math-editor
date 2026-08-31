@@ -51,6 +51,40 @@ pub struct TokenSpan {
     pub kind: TokenKind,
 }
 
+fn word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
+}
+
+fn configured_literal(slice: &str, lang: &LanguageDef) -> Option<(usize, TokenKind)> {
+    [
+        (&lang.keywords, TokenKind::Keyword),
+        (&lang.types, TokenKind::Type),
+        (&lang.builtins, TokenKind::Builtin),
+        (&lang.constants, TokenKind::Constant),
+    ]
+    .into_iter()
+    .flat_map(|(words, kind)| words.iter().map(move |word| (word, kind)))
+    .filter_map(|(word, kind)| {
+        let width = word.chars().count();
+        let has_symbol = word.chars().any(|c| !word_char(c));
+        let boundary = word
+            .chars()
+            .next_back()
+            .is_none_or(|last| !word_char(last))
+            || slice.chars().nth(width).is_none_or(|next| !word_char(next));
+        (has_symbol && boundary && slice.starts_with(word)).then_some((width, kind))
+    })
+    .max_by_key(|(width, _)| *width)
+}
+
+fn configured_operator(slice: &str, lang: &LanguageDef) -> Option<usize> {
+    lang.operators
+        .iter()
+        .filter(|operator| !operator.is_empty() && slice.starts_with(operator.as_str()))
+        .map(|operator| operator.chars().count())
+        .max()
+}
+
 /// 1 行のテキストを、指定された言語定義に基づいてトークン分割します。
 pub fn tokenize_line(line: &str, lang: &LanguageDef) -> Vec<TokenSpan> {
     if line.trim().is_empty() {
@@ -204,75 +238,31 @@ pub fn tokenize_line(line: &str, lang: &LanguageDef) -> Vec<TokenSpan> {
             continue;
         }
 
-        // 6. LaTeX コマンド (\frac, \alpha 等)
-        if chars[i] == '\\' && i + 1 < len && chars[i + 1].is_alphabetic() {
-            let start = i;
-            i += 1;
-            while i < len && chars[i].is_alphabetic() {
-                i += 1;
-            }
-            let word: String = chars[start..i].iter().collect();
-            let kind = if lang.keywords.contains(&word) {
-                TokenKind::Keyword
-            } else if lang.builtins.contains(&word) {
-                TokenKind::Builtin
-            } else {
-                TokenKind::Keyword
-            };
+        if let Some((width, kind)) = configured_literal(&slice_from_i, lang) {
             spans.push(TokenSpan {
-                start,
-                end: i,
+                start: i,
+                end: i + width,
                 kind,
             });
-            continue;
-        }
-
-        // 7. 記号キーワード（Markdownの見出し '#', '##', リスト '-', 等）の判定
-        let mut matched_symbol_kw = false;
-        for kw in &lang.keywords {
-            if !kw
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
-                && slice_from_i.starts_with(kw)
-            {
-                let kw_len = kw.chars().count();
-                // 単語境界の確認（英字で続く場合は別単語）
-                if i + kw_len == len || !chars[i + kw_len].is_alphanumeric() {
-                    spans.push(TokenSpan {
-                        start: i,
-                        end: i + kw_len,
-                        kind: TokenKind::Keyword,
-                    });
-                    i += kw_len;
-                    matched_symbol_kw = true;
-                    break;
-                }
-            }
-        }
-        if matched_symbol_kw {
+            i += width;
             continue;
         }
 
         // 8. 識別子・キーワード・型の判定
         if chars[i].is_alphabetic() || chars[i] == '_' || chars[i] == '$' {
             let start = i;
-            while i < len && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '$') {
-                i += 1;
-            }
-            // Rust などのマクロ (println!)
-            if i < len && chars[i] == '!' && (i + 1 == len || chars[i + 1] != '=') {
+            while i < len && word_char(chars[i]) {
                 i += 1;
             }
             let word: String = chars[start..i].iter().collect();
-            let raw_word = word.trim_end_matches('!');
 
-            let kind = if lang.keywords.contains(&word) || lang.keywords.contains(raw_word) {
+            let kind = if lang.keywords.contains(&word) {
                 TokenKind::Keyword
-            } else if lang.types.contains(&word) || lang.types.contains(raw_word) {
+            } else if lang.types.contains(&word) {
                 TokenKind::Type
-            } else if lang.constants.contains(&word) || lang.constants.contains(raw_word) {
+            } else if lang.constants.contains(&word) {
                 TokenKind::Constant
-            } else if lang.builtins.contains(&word) || lang.builtins.contains(raw_word) {
+            } else if lang.builtins.contains(&word) {
                 TokenKind::Builtin
             } else {
                 // 通常の識別子は色付けなし（プレーンテキスト）
@@ -287,16 +277,15 @@ pub fn tokenize_line(line: &str, lang: &LanguageDef) -> Vec<TokenSpan> {
             continue;
         }
 
-        // 8. 演算子・記号
-        let start = i;
-        let c = chars[i];
-        i += 1;
-        if lang.operators.contains(&c.to_string()) {
+        if let Some(width) = configured_operator(&slice_from_i, lang) {
             spans.push(TokenSpan {
-                start,
-                end: i,
+                start: i,
+                end: i + width,
                 kind: TokenKind::Operator,
             });
+            i += width;
+        } else {
+            i += 1;
         }
     }
 
@@ -307,6 +296,20 @@ pub fn tokenize_line(line: &str, lang: &LanguageDef) -> Vec<TokenSpan> {
 mod tests {
     use super::*;
     use crate::syntax::lang::built_in_languages;
+
+    #[test]
+    fn symbol_words_and_operators_come_only_from_the_language_definition() {
+        let mut language = LanguageDef::new("Custom");
+        language.builtins.insert("\\known".into());
+        language.operators.insert("=".into());
+        language.operators.insert("==".into());
+
+        let tokens = tokenize_line("\\known == \\unknown", &language);
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].kind, TokenKind::Builtin);
+        assert_eq!((tokens[1].start, tokens[1].end), (7, 9));
+        assert_eq!(tokens[1].kind, TokenKind::Operator);
+    }
 
     #[test]
     fn numbers_are_not_highlighted_in_any_language() {
