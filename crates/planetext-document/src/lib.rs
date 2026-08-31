@@ -533,7 +533,7 @@ impl Application {
                 let id = path.file_stem()?.to_string_lossy().into_owned();
                 let file = std::fs::read_to_string(&path).ok()?;
                 let (first, contents) = file.split_once('\n').unwrap_or(("", file.as_str()));
-                let first = first.trim_end_matches(['\r', '\n']).trim();
+                let first = first.trim_end_matches(['\r', '\n']);
                 Some(Draft {
                     id,
                     path: (!first.is_empty()).then(|| first.to_string()),

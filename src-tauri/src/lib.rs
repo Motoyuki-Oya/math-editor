@@ -96,7 +96,11 @@ async fn pick_save_path(app: tauri::AppHandle, default_name: String) -> Option<S
 fn save_session_state(app: tauri::AppHandle, state_json: String) -> Result<(), String> {
     let dir = app_config_dir(&app).ok_or_else(|| "設定ディレクトリがありません".to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    std::fs::write(dir.join("session.json"), state_json).map_err(|e| e.to_string())
+    let target = dir.join("session.json");
+    let tmp = dir.join("session.json.tmp");
+    std::fs::write(&tmp, state_json).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(&target);
+    std::fs::rename(tmp, target).map_err(|e| e.to_string())
 }
 
 #[tauri::command(rename_all = "snake_case")]

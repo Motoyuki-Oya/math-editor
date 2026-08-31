@@ -1256,8 +1256,11 @@ impl Shell {
                                         tab_copy.doc.set(Some(opened.handle));
                                         tab_copy.encoding.set(opened.encoding);
                                         tab_copy.line_ending.set(opened.line_ending);
+                                        let normalized = draft_contents
+                                            .replace("\r\n", "\n")
+                                            .replace('\r', "\n");
                                         let lines: Vec<String> =
-                                            draft_contents.lines().map(String::from).collect();
+                                            normalized.split('\n').map(String::from).collect();
                                         let _ = framework::replace_lines(
                                             opened.handle,
                                             0,
@@ -1383,7 +1386,8 @@ impl Shell {
                         tab_copy.doc.set(Some(opened.handle));
                         tab_copy.encoding.set(opened.encoding);
                         tab_copy.line_ending.set(opened.line_ending);
-                        let lines: Vec<String> = draft_contents.lines().map(String::from).collect();
+                        let normalized = draft_contents.replace("\r\n", "\n").replace('\r', "\n");
+                        let lines: Vec<String> = normalized.split('\n').map(String::from).collect();
                         let _ =
                             framework::replace_lines(opened.handle, 0, 1, &lines, 0, "", "").await;
                     }
