@@ -1,7 +1,19 @@
 //! 文書エンジン。GUIフレームワークを知らない。
 
+mod document;
+mod edit_buffers;
+mod operation_log;
+mod persistence;
+mod piece_tree;
+mod search;
+mod search_index;
+mod source;
+#[cfg(test)]
 mod store;
 
+use document::Document;
+use search::{ScanHit, SearchSpec};
+use source::{FileEncoding, LineEnding, ScanIndex};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,7 +29,7 @@ struct ApplicationState {
     dirty: Mutex<bool>,
     /// 開いている文書の本体。webview は行の窓だけを取り寄せ、編集は
     /// 行範囲の置き換えとして届く。タブが閉じられると手放す。
-    docs: Mutex<HashMap<u64, store::Document>>,
+    docs: Mutex<HashMap<u64, Document>>,
     /// 文書ごとの検索世代。値が変われば走査スレッドは古い検索を中止する。
     searches: Mutex<HashMap<u64, Arc<AtomicU64>>>,
     next_document: Mutex<u64>,
@@ -51,7 +63,7 @@ pub struct RestoredLines {
 
 #[derive(serde::Serialize)]
 pub struct SearchPage {
-    hits: Vec<store::ScanHit>,
+    hits: Vec<ScanHit>,
     scanned_to: usize,
     cancelled: bool,
 }
@@ -67,7 +79,7 @@ pub struct Draft {
 pub struct FinishDocumentJob {
     application: Application,
     handle: u64,
-    index: Option<Arc<store::ScanIndex>>,
+    index: Option<Arc<ScanIndex>>,
 }
 
 impl FinishDocumentJob {
@@ -88,7 +100,7 @@ impl FinishDocumentJob {
 }
 
 pub struct SearchJob {
-    snapshot: store::Document,
+    snapshot: Document,
     pattern: regex::Regex,
     literal: Option<String>,
     case_sensitive: bool,
@@ -103,7 +115,7 @@ pub struct SearchJob {
 impl SearchJob {
     pub fn run(mut self) -> Result<SearchPage, String> {
         let found = self.snapshot.search_candidates(
-            store::SearchSpec {
+            SearchSpec {
                 pattern: &self.pattern,
                 literal: self.literal.as_deref(),
                 case_sensitive: self.case_sensitive,
@@ -191,7 +203,7 @@ impl Application {
     fn with_doc<T>(
         &self,
         handle: u64,
-        f: impl FnOnce(&mut store::Document) -> Result<T, String>,
+        f: impl FnOnce(&mut Document) -> Result<T, String>,
     ) -> Result<T, String> {
         let mut docs = self.state.docs.lock().unwrap();
         let doc = docs
@@ -200,7 +212,7 @@ impl Application {
         f(doc)
     }
 
-    fn adopt(&self, doc: store::Document) -> OpenedDocument {
+    fn adopt(&self, doc: Document) -> OpenedDocument {
         let encoding = doc.encoding().label().to_string();
         let line_ending = doc.line_ending().label().to_string();
         let opened = OpenedDocument {
@@ -224,7 +236,7 @@ impl Application {
     }
 
     pub fn open_document(&self, path: String) -> Result<OpenedDocument, String> {
-        let (doc, scan) = store::Document::open(&path)?;
+        let (doc, scan) = Document::open(&path)?;
         let opened = self.adopt(doc);
         if let Some(scan) = scan {
             std::thread::spawn(move || {
@@ -239,7 +251,7 @@ impl Application {
         handle: u64,
         encoding: String,
     ) -> Result<ReopenedDocument, String> {
-        let enc = store::FileEncoding::from_label(&encoding)
+        let enc = FileEncoding::from_label(&encoding)
             .ok_or_else(|| format!("未知の文字コードです: {encoding}"))?;
         let (line_count, enc_label, line_ending, scan) = self.with_doc(handle, |doc| {
             let scan = doc.reopen_with_encoding(enc)?;
@@ -263,7 +275,7 @@ impl Application {
     }
 
     pub fn set_document_encoding(&self, handle: u64, encoding: String) -> Result<(), String> {
-        let enc = store::FileEncoding::from_label(&encoding)
+        let enc = FileEncoding::from_label(&encoding)
             .ok_or_else(|| format!("未知の文字コードです: {encoding}"))?;
         self.with_doc(handle, |doc| {
             doc.set_encoding(enc);
@@ -272,7 +284,7 @@ impl Application {
     }
 
     pub fn set_document_line_ending(&self, handle: u64, line_ending: String) -> Result<(), String> {
-        let le = store::LineEnding::from_label(&line_ending)
+        let le = LineEnding::from_label(&line_ending)
             .ok_or_else(|| format!("未知の改行コードです: {line_ending}"))?;
         self.with_doc(handle, |doc| {
             doc.set_line_ending(le);
@@ -290,7 +302,7 @@ impl Application {
     }
 
     pub fn create_document(&self) -> OpenedDocument {
-        self.adopt(store::Document::empty())
+        self.adopt(Document::empty())
     }
 
     pub fn read_lines(
