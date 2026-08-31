@@ -132,11 +132,16 @@ fn show(settings: &Settings) {
     style
         .set_property("--setting-font-size", &format!("{}px", settings.font_size))
         .ok();
-    if settings.font_family.is_empty() {
+    if settings.font_family.trim().is_empty() {
         style.remove_property("--setting-font-text").ok();
     } else {
+        let font = settings
+            .font_family
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'');
         style
-            .set_property("--setting-font-text", &settings.font_family)
+            .set_property("--setting-font-text", &format!("\"{font}\", {font}"))
             .ok();
     }
     style

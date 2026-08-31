@@ -65,6 +65,10 @@ pub(super) fn Preferences(open: RwSignal<bool>) -> impl IntoView {
                     placeholder="既定"
                     list="font-family-list"
                     prop:value=move || font_family.get()
+                    on:input=move |ev| {
+                        font_family.set(event_target_value(&ev));
+                        changed();
+                    }
                     on:change=move |ev| {
                         font_family.set(event_target_value(&ev));
                         changed();
