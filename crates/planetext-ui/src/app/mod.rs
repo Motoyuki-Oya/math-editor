@@ -19,7 +19,7 @@ use preferences::Preferences;
 use shell::{Pane, Shell};
 
 use crate::editor;
-use crate::framework::{gui, read_drafts, read_settings, GuiFramework};
+use crate::framework::{gui, read_drafts, read_session_state, read_settings, GuiFramework};
 use crate::settings;
 
 #[component]
@@ -37,6 +37,7 @@ pub fn App() -> impl IntoView {
         tab_drag: RwSignal::new(None),
         split_ratio: RwSignal::new(0.5),
         resizing_split: RwSignal::new(false),
+        restored: RwSignal::new(false),
     };
 
     Effect::new(move |_| {
@@ -55,7 +56,9 @@ pub fn App() -> impl IntoView {
             preferences::take_effect(settings::read(&read_settings().await));
             // 保存された設定がある場所にメニューのチェック マークが付けられます。
             menu::show_state(shell);
-            shell.restore_drafts(read_drafts().await);
+            let drafts = read_drafts().await;
+            let session_json = read_session_state().await;
+            shell.restore_workspace(session_json, drafts);
             let _ = gui().ready().await;
         });
     });
@@ -150,6 +153,7 @@ pub fn App() -> impl IntoView {
                 if shell.resizing_split.get_untracked() {
                     shell.resizing_split.set(false);
                     editor::redraw_all();
+                    shell.save_session();
                     return;
                 }
 

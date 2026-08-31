@@ -72,6 +72,10 @@ impl Document {
         self.modified_lines.clear();
     }
 
+    pub fn set_modified_lines(&mut self, lines: Vec<usize>) {
+        self.modified_lines = lines.into_iter().collect();
+    }
+
     pub fn mark_lines_modified(&mut self, from_line: usize, to_line: usize, end_line: usize) {
         let removed_lines = to_line.saturating_sub(from_line);
         let inserted_lines = end_line.saturating_sub(from_line);
@@ -198,6 +202,7 @@ impl Editor {
     }
 
     /// ファイルから読み取られたばかりのドキュメントを表示します。
+    #[allow(dead_code)]
     pub fn load(&mut self, text: Text) {
         self.document.load(text);
         self.cursors = vec![UnifiedCursor::caret(Pos::default())];
@@ -205,6 +210,7 @@ impl Editor {
 
     /// 読み込んだ内容をまるごと文書の本体へ届くようにする。本体が
     /// 1 行の空文書のときに使う（下書きの復元）。
+    #[allow(dead_code)]
     pub fn load_contents(&mut self, text: Text) {
         self.load(text);
         self.record(Step::Other);

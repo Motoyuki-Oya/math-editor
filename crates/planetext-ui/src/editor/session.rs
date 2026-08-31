@@ -875,6 +875,7 @@ pub fn focus() {
 
 /// 読み込んだ内容を表示し、文書の本体（1 行の空文書）へまるごと届くようにします。
 /// 下書きの復元で使われます。
+#[allow(dead_code)]
 pub fn load(text: &str) {
     let Some(session) = session() else { return };
     session

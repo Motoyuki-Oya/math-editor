@@ -555,6 +555,19 @@ pub async fn read_drafts() -> Vec<Draft> {
         .collect()
 }
 
+pub async fn save_session_state(state_json: &str) {
+    #[derive(Serialize)]
+    struct StateArg<'a> {
+        state_json: &'a str,
+    }
+    let _ = call("save_session_state", StateArg { state_json }).await;
+}
+
+pub async fn read_session_state() -> Option<String> {
+    let value = call("read_session_state", NoArgs {}).await.ok()?;
+    value.as_string()
+}
+
 /// 開いている文書のファイルサイズを返します。保存済みならそのファイル、未保存なら下書き
 /// ファイルのサイズです。どちらも読めないときは `None` を返します（エラーにはしません）。
 pub async fn file_size(path: Option<&str>, id: usize) -> Option<usize> {
