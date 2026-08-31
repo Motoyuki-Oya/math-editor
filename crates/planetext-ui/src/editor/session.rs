@@ -1191,9 +1191,13 @@ pub fn stats() -> DocStats {
             total_lines += lines;
 
             if !any_absent {
-                if let Some((c, nl)) = text.chars_between(start, end) {
-                    total_chars_without_nl += c;
-                    total_newlines += nl;
+                if lines <= 1000 {
+                    if let Some((c, nl)) = text.chars_between(start, end) {
+                        total_chars_without_nl += c;
+                        total_newlines += nl;
+                    } else {
+                        any_absent = true;
+                    }
                 } else {
                     any_absent = true;
                 }

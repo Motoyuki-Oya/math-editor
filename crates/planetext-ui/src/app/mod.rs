@@ -301,7 +301,6 @@ pub fn App() -> impl IntoView {
                     <span>{move || {
                         let stats = shell.stats.get();
                         let tab = shell.tab();
-                        let is_large = tab.large.get();
                         let bytes = tab.bytes.get();
                         if let Some(sel) = &stats.selection {
                             if let Some((chars_without_nl, newlines)) = sel.chars {
@@ -310,8 +309,6 @@ pub fn App() -> impl IntoView {
                             } else {
                                 format!("選択 {}行", sel.lines)
                             }
-                        } else if is_large || bytes > 10_000_000 {
-                            format_file_size(bytes)
                         } else if let Some(chars) = stats.total_chars {
                             format!("全 {chars}文字")
                         } else if stats.counting {
