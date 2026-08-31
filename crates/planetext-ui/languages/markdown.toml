@@ -1,0 +1,48 @@
+name = "Markdown"
+extensions = ["md", "markdown"]
+line_comments = []
+block_comments = [["<!--", "-->"]]
+string_delimiters = ["`"]
+
+keywords = []
+types = []
+builtins = []
+constants = []
+operators = []
+
+[[line_rules]]
+prefix = "#"
+whole_line = true
+kind = "Keyword"
+
+[[line_rules]]
+prefix = "```"
+whole_line = true
+kind = "Builtin"
+
+[[line_rules]]
+prefix = "- "
+whole_line = false
+kind = "Keyword"
+
+[[line_rules]]
+prefix = "* "
+whole_line = false
+kind = "Keyword"
+
+[[line_rules]]
+prefix = "+ "
+whole_line = false
+kind = "Keyword"
+
+[[line_rules]]
+prefix = "> "
+whole_line = false
+kind = "Keyword"
+
+[[embedded_languages]]
+open = "```"
+close = "```"
+dynamic = true
+
+

@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.planetext.editor",
   "build": {
-    "beforeDevCommand": "trunk serve",
+    "beforeDevCommand": "trunk serve --config crates/planetext-ui/Trunk.toml",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "trunk build --release",
+    "beforeBuildCommand": "trunk build --release --config crates/planetext-ui/Trunk.toml",
     "frontendDist": "../dist"
   },
   "app": {
