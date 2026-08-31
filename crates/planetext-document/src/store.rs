@@ -1831,12 +1831,10 @@ mod tests {
     #[test]
     fn a_failed_overwrite_keeps_the_open_source_readable() {
         let (mut doc, path) = disk_doc("failed-save", &["a", "b"]);
-        let original_permissions = std::fs::metadata(&path).unwrap().permissions();
-        let mut readonly = original_permissions.clone();
-        readonly.set_readonly(true);
-        std::fs::set_permissions(&path, readonly).unwrap();
+        let tmp = format!("{path}.saving");
+        std::fs::create_dir(&tmp).unwrap();
         assert!(doc.save(&path).is_err());
-        std::fs::set_permissions(&path, original_permissions).unwrap();
+        std::fs::remove_dir(tmp).unwrap();
         assert_eq!(doc.read(0, 2).unwrap(), vec!["a", "b"]);
         std::fs::remove_file(path).ok();
     }
