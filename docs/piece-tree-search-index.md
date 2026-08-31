@@ -126,3 +126,110 @@ flowchart TB
 - 固定インデックス: 開いた時点の不変な検索情報
 - 編集イベントログ: 編集による差分の蓄積
 - 件数推定: 上記 3 つを合成した推定値
+
+## ピースツリーの編集側
+
+### Piece
+
+```rust
+struct Piece {
+    source: SourceRef,
+    start: ByteIndex,
+    end: ByteIndex,
+    lines: usize,                  // ピース内行数
+    line_breaks: Vec<ByteIndex>,   // 改行文字の直後のバイト位置
+    block_id: BlockId,
+}
+
+enum SourceRef {
+    Disk,
+    Edit(EditBufferId),
+}
+```
+
+- `start_line` は持たず、行番号は B ツリーの `subtree_lines` から計算
+- バイト位置が主座標
+
+### BufferRef
+
+`BufferRef` は「テキスト実体を指す参照」です。`Piece` や `Operation` が実際の文字列を持たず、どのバッファのどの範囲かを指します。
+
+```rust
+enum BufferId {
+    Disk,
+    Insert,
+    Delete,
+}
+
+struct BufferRef {
+    buffer: BufferId,
+    start: ByteIndex,
+    end: ByteIndex,
+}
+```
+
+- `Disk`: 元ファイル内
+- `Insert`: 挿入用 `EditBuffer`
+- `Delete`: 削除用 `DeleteBuffer`
+
+### B ツリー
+
+最小度数 4、最大 8 の通常の B ツリー。
+
+```rust
+const B: usize = 4;
+const MAX_KEYS: usize = 2 * B;   // 8
+const MIN_KEYS: usize = B - 1;   // 3
+
+struct BTreeNode {
+    is_leaf: bool,
+    pieces: Vec<Piece>,
+    children: Vec<BTreeNode>,
+    subtree_bytes: usize,
+    subtree_lines: usize,
+}
+```
+
+### 操作ログ
+
+```rust
+struct OperationLog {
+    ops: Vec<Operation>,
+    head: usize,  // 現在適用されている先頭
+}
+
+struct Operation {
+    pos: ByteIndex,
+    delete_len: usize,
+    delete_text: BufferRef,
+    insert_text: BufferRef,
+}
+```
+
+- 追記専用
+- Undo: `head -= 1`
+- Redo: `head += 1`
+- 新しい編集: `ops.truncate(head)` して追加、`head += 1`
+
+### EditBuffer と DeleteBuffer
+
+- 挿入したテキストは `EditBuffer(Vec<u8>)` へ末尾追記
+- 削除したテキストは `DeleteBuffer(Vec<u8>)` へ末尾追記
+- `BufferRef` がそれぞれの範囲を指す
+- Undo 時は `delete_text` を元の位置へ戻す
+
+### 調整可能なパラメータ
+
+以下は実行時定数として定義し、後から調整可能にする。これらはユーザー設定ではなく、文書ストア内部のチューニング値とする。
+
+| 名前 | デフォルト | 説明 |
+| --- | --- | --- |
+| `BTREE_MAX_KEYS` | 8 | B ツリー 1 ノードあたりの最大ピース数 |
+| `BTREE_MIN_KEYS` | 4 | B ツリー 1 ノードあたりの最小ピース数 |
+| `BLOCK_SIZE_BYTES` | 524_288 (512KB) | 検索インデックスのブロックサイズ |
+| `INDEX_BUILD_THRESHOLD` | 10_485_760 (10MB) | 索引を育て始めるファイルサイズ |
+| `EDIT_BUFFER_INITIAL` | 4_096 (4KB) | 挿入バッファ初期容量 |
+| `DELETE_BUFFER_INITIAL` | 4_096 (4KB) | 削除バッファ初期容量 |
+| `MEMORY_BUDGET_BYTES` | 33_554_432 (32MB) | 文書ストア全体のメモリ予算 |
+| `IDLE_TIMEOUT_MS` | 500 | 入力アイドル判定時間 |
+| `LONG_LINE_THRESHOLD` | 1_048_576 (1MB) | 異常に長い 1 行の閾値 |
