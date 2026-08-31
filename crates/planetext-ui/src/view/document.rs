@@ -224,8 +224,8 @@ impl View {
             let active = (caret.at.line == line).then_some(path.as_slice());
             let ghost_on_line = state.ghost.filter(|g| g.line == line && active.is_some());
             let row_nodes = text.line(line);
-            let is_aligned =
-                has_tab(row_nodes) || (is_markdown && is_markdown_table_line(row_nodes));
+            let is_aligned = tab_block_line(text, line)
+                || (is_markdown && is_markdown_table_line(row_nodes));
             let class_name = if is_aligned {
                 "mn-line mn-aligned-row"
             } else {
@@ -409,14 +409,16 @@ impl View {
             {
                 end += 1;
             }
-            self.align_block(
-                line..end,
-                if is_table {
-                    TABLE_PIPE_CLASS
-                } else {
-                    TAB_CLASS
-                },
-            );
+            if is_table || end - line >= 2 {
+                self.align_block(
+                    line..end,
+                    if is_table {
+                        TABLE_PIPE_CLASS
+                    } else {
+                        TAB_CLASS
+                    },
+                );
+            }
             line = end;
         }
     }
@@ -738,6 +740,12 @@ pub(super) fn has_tab(nodes: &[Node]) -> bool {
     nodes.iter().any(|node| matches!(node.kind, NodeKind::Tab))
 }
 
+fn tab_block_line(text: &Text, line: usize) -> bool {
+    has_tab(text.line(line))
+        && ((line > 0 && has_tab(text.line(line - 1)))
+            || (line + 1 < text.line_count() && has_tab(text.line(line + 1))))
+}
+
 fn children_of_class(holder: &Element, class: &str) -> Vec<Element> {
     let children = holder.children();
     (0..children.length())
@@ -815,4 +823,27 @@ pub fn embedded_block_lang_for_line(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tab_alignment_requires_two_adjacent_rows() {
+        let single = Text::from_lines(vec![
+            vec![Node::char('a'), Node::tab(), Node::char('b')],
+            vec![Node::char('c')],
+        ]);
+        assert!(!tab_block_line(&single, 0));
+
+        let block = Text::from_lines(vec![
+            vec![Node::char('a'), Node::tab(), Node::char('b')],
+            vec![Node::char('c'), Node::tab(), Node::char('d')],
+            vec![Node::char('e')],
+        ]);
+        assert!(tab_block_line(&block, 0));
+        assert!(tab_block_line(&block, 1));
+        assert!(!tab_block_line(&block, 2));
+    }
 }
