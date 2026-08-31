@@ -448,7 +448,6 @@ impl Application {
             GuiEvent::TraySelected(TrayAction::Open) | GuiEvent::SecondInstance => {
                 GuiAction::ShowWindow
             }
-            GuiEvent::TraySelected(TrayAction::Quit) if self.is_dirty() => GuiAction::ConfirmExit,
             GuiEvent::TraySelected(TrayAction::Quit) => GuiAction::Exit,
             GuiEvent::GlobalShortcut(_) => GuiAction::ToggleWindow,
         }
@@ -534,6 +533,7 @@ impl Application {
                 let id = path.file_stem()?.to_string_lossy().into_owned();
                 let file = std::fs::read_to_string(&path).ok()?;
                 let (first, contents) = file.split_once('\n').unwrap_or(("", file.as_str()));
+                let first = first.trim_end_matches(['\r', '\n']).trim();
                 Some(Draft {
                     id,
                     path: (!first.is_empty()).then(|| first.to_string()),
@@ -617,12 +617,12 @@ mod tests {
     }
 
     #[test]
-    fn tray_quit_asks_before_discarding_dirty_work() {
+    fn tray_quit_exits_without_confirm_dialog() {
         let application = Application::default();
         application.set_dirty(true);
         assert!(matches!(
             application.handle_gui_event(GuiEvent::TraySelected(TrayAction::Quit)),
-            GuiAction::ConfirmExit
+            GuiAction::Exit
         ));
         application.set_dirty(false);
         assert!(matches!(
@@ -646,5 +646,25 @@ mod tests {
             application.handle_gui_event(GuiEvent::GlobalShortcut("toggle".into())),
             GuiAction::ToggleWindow
         ));
+    }
+
+    #[test]
+    fn save_and_read_untitled_draft() {
+        let application = Application::default();
+        let doc = application.create_document();
+        let temp_dir = std::env::temp_dir().join(format!("planetext_test_draft_{}", doc.handle));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        application
+            .save_draft(Some(temp_dir.clone()), doc.handle, "1".into(), None)
+            .unwrap();
+
+        let drafts = application.read_drafts(Some(temp_dir.clone()));
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].id, "1");
+        assert_eq!(drafts[0].path, None);
+
+        application.clear_drafts(Some(temp_dir.clone()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
