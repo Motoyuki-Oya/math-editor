@@ -435,7 +435,7 @@ impl View {
         // パイプの場合は、行頭の最初の | (column 0) は広げず、2個目以降 (column 1..columns) を右寄せで揃える
         let start_col = if is_pipe { 1 } else { 0 };
         let gap = if is_pipe {
-            0.0
+            6.0
         } else {
             crate::settings::column_gap()
         };
