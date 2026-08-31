@@ -441,17 +441,17 @@ impl View {
             crate::settings::column_gap()
         };
         for column in start_col..columns {
-            // 一度に 1 列です。列の幅を広げるとその後の列が移動し、測定値もそれに従う必要があるためです。
             let separators: Vec<&Element> =
                 tabs.iter().filter_map(|line| line.get(column)).collect();
-            let widest = separators
+            let lefts: Vec<f64> = separators
                 .iter()
                 .map(|tab| tab.get_bounding_client_rect().left())
-                .fold(f64::MIN, f64::max);
-            for tab in separators {
-                let left = tab.get_bounding_client_rect().left();
+                .collect();
+            let widest = lefts.iter().copied().fold(f64::MIN, f64::max);
+            for (tab, left) in separators.iter().zip(lefts) {
                 let width = (widest - left + gap).max(1.0);
-                tab.set_attribute("style", &format!("width:{width}px")).ok();
+                tab.set_attribute("style", &format!("width:{width:.1}px"))
+                    .ok();
             }
         }
     }
@@ -669,7 +669,7 @@ impl View {
     }
 
     /// テーブル（整列ブロック）内でキャレットが左右にはみ出た場合に自動横スクロールします。
-    fn reveal_block(&self, caret: &Caret<'_>) {
+    fn reveal_block(&self, caret: &Caret<'_>, caret_box: Box2) {
         let (path, _) = caret.place();
         let Some(row_el) = self.row_element(caret.at.line, &path) else {
             return;
@@ -680,9 +680,6 @@ impl View {
             .flatten()
             .and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok())
         else {
-            return;
-        };
-        let Some(caret_box) = self.caret_box(caret) else {
             return;
         };
         let block_rect = block_el.get_bounding_client_rect();
@@ -699,8 +696,8 @@ impl View {
 
     /// スクロールしてキャレットが見えるようにし、入力要素がキャレットに従うことができるように**文書内の**場所を報告します (ここに IME 候補が表示されます)。画面ではなくドキュメント: input 要素は行の間に配置され、行と一緒にスクロールします。ドキュメントの上部に残された input 要素は、入力されるとすぐにブラウザがスクロールして戻ってくるものです。
     pub fn reveal(&self, caret: &Caret<'_>) -> Option<Box2> {
-        self.reveal_block(caret);
         let rect = self.caret_box(caret)?;
+        self.reveal_block(caret, rect);
         Some(self.viewport.reveal(&self.scroller, rect))
     }
 
@@ -748,10 +745,6 @@ pub fn find_url_on_line(line_text: &str, col: usize) -> Option<(usize, usize, St
                             | '<'
                             | '>'
                             | '`'
-                            | '['
-                            | ']'
-                            | '{'
-                            | '}'
                             | '\\'
                             | '^'
                             | '）'
@@ -974,5 +967,13 @@ mod tests {
                 "https://en.wikipedia.org/wiki/Rust_(programming_language)".to_string()
             ))
         );
+
+        // IPv6 URL
+        let res = find_url_on_line("http://[::1]:8080/path", 5);
+        assert_eq!(res, Some((0, 22, "http://[::1]:8080/path".to_string())));
+
+        // IPv6 URL enclosed in markdown brackets
+        let res = find_url_on_line("[http://[::1]:8080/path]", 5);
+        assert_eq!(res, Some((1, 23, "http://[::1]:8080/path".to_string())));
     }
 }

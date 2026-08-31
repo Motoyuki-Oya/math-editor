@@ -138,12 +138,13 @@ fn show(settings: &Settings) {
     if settings.font_family.trim().is_empty() {
         style.remove_property("--setting-font-text").ok();
     } else {
-        let font = settings
-            .font_family
-            .trim()
-            .trim_matches('"')
-            .trim_matches('\'');
-        let family_val = format!("\"{font}\", monospace, var(--font-text)");
+        let trimmed = settings.font_family.trim();
+        let family_val = if trimmed.contains(',') {
+            trimmed.to_string()
+        } else {
+            let font = trimmed.trim_matches('"').trim_matches('\'');
+            format!("\"{font}\", monospace, var(--font-text)")
+        };
         style.set_property("--setting-font-text", &family_val).ok();
     }
     style
