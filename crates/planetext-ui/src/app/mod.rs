@@ -301,22 +301,23 @@ pub fn App() -> impl IntoView {
                     let stats = shell.stats.get();
                     if let Some(sel) = &stats.selection {
                         if let Some((chars_without_nl, newlines)) = sel.chars {
+                            let total_sel = chars_without_nl + newlines;
                             if newlines > 0 {
-                                format!("選択中: {chars_without_nl} 文字 / 改行 {newlines} 文字 ({} 行)", sel.lines)
+                                format!("選択 {total_sel} ( 📄{chars_without_nl} ⏎ {newlines} ) ({}行)", sel.lines)
                             } else {
-                                format!("選択中: {chars_without_nl} 文字")
+                                format!("選択 {total_sel}文字")
                             }
                         } else {
-                            format!("選択中: {} 行", sel.lines)
+                            format!("選択 {}行", sel.lines)
                         }
                     } else if stats.counting {
                         if let Some(bytes) = stats.file_bytes {
                             format_file_size(bytes)
                         } else {
-                            "全体 0 文字".to_string()
+                            "全 0文字".to_string()
                         }
                     } else if let Some(chars) = stats.total_chars {
-                        format!("全体 {chars} 文字")
+                        format!("全 {chars}文字")
                     } else if let Some(bytes) = stats.file_bytes {
                         format_file_size(bytes)
                     } else {
@@ -326,7 +327,8 @@ pub fn App() -> impl IntoView {
                 <span>{move || {
                     let stats = shell.stats.get();
                     if let Some((chars_without_nl, newlines)) = stats.caret_prefix {
-                        format!("[ {} | {} ]  (先頭から: {chars_without_nl} 文字 / 改行 {newlines} 文字)", stats.caret_line, stats.caret_col)
+                        let total_caret = chars_without_nl + newlines;
+                        format!("[ {} | {} ]  先頭から{total_caret} ( 📄{chars_without_nl} ⏎ {newlines} )", stats.caret_line, stats.caret_col)
                     } else {
                         format!("[ {} | {} ]", stats.caret_line, stats.caret_col)
                     }
