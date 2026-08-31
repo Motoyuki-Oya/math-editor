@@ -297,77 +297,90 @@ pub fn App() -> impl IntoView {
             </div>
 
             <div class="statusbar">
-                <span>{move || {
-                    let stats = shell.stats.get();
-                    let tab = shell.tab();
-                    let is_large = tab.large.get();
-                    let bytes = tab.bytes.get();
-                    if let Some(sel) = &stats.selection {
-                        if let Some((chars_without_nl, newlines)) = sel.chars {
-                            let total_sel = chars_without_nl + newlines;
-                            format!("選択 {total_sel}文字")
+                <div class="statusbar-left">
+                    <span>{move || {
+                        let stats = shell.stats.get();
+                        let tab = shell.tab();
+                        let is_large = tab.large.get();
+                        let bytes = tab.bytes.get();
+                        if let Some(sel) = &stats.selection {
+                            if let Some((chars_without_nl, newlines)) = sel.chars {
+                                let total_sel = chars_without_nl + newlines;
+                                format!("選択 {total_sel}文字")
+                            } else {
+                                format!("選択 {}行", sel.lines)
+                            }
+                        } else if is_large || bytes > 10_000_000 {
+                            format_file_size(bytes)
+                        } else if let Some(chars) = stats.total_chars {
+                            format!("全 {chars}文字")
+                        } else if stats.counting {
+                            "全 0文字".to_string()
                         } else {
-                            format!("選択 {}行", sel.lines)
+                            format_file_size(bytes)
                         }
-                    } else if is_large || bytes > 10_000_000 {
-                        format_file_size(bytes)
-                    } else if let Some(chars) = stats.total_chars {
-                        format!("全 {chars}文字")
-                    } else if stats.counting {
-                        "全 0文字".to_string()
-                    } else {
-                        format_file_size(bytes)
-                    }
-                }}</span>
-                <span>{move || {
-                    let stats = shell.stats.get();
-                    if let Some((chars_without_nl, newlines)) = stats.caret_prefix {
-                        let total_caret = chars_without_nl + newlines;
-                        format!("先頭から{total_caret} ( 📄{chars_without_nl} ⏎ {newlines} )  [ {} | {} ]", stats.caret_line, stats.caret_col)
-                    } else {
+                    }}</span>
+                    <Show when=move || shell.stats.get().caret_prefix.is_some()>
+                        {move || {
+                            let stats = shell.stats.get();
+                            let (chars_without_nl, newlines) = stats.caret_prefix?;
+                            let total_caret = chars_without_nl + newlines;
+                            Some(view! {
+                                <span>{format!("先頭から{total_caret} ( 📄{chars_without_nl} ⏎ {newlines} )")}</span>
+                            })
+                        }}
+                    </Show>
+                </div>
+
+                <div class="statusbar-center">
+                    <span class="status-message">{move || shell.status.get()}</span>
+                </div>
+
+                <div class="statusbar-right">
+                    <span>{move || {
+                        let stats = shell.stats.get();
                         format!("[ {} | {} ]", stats.caret_line, stats.caret_col)
-                    }
-                }}</span>
-                <span
-                    class="status-clickable"
-                    title="改行コードを変更"
-                    on:click=move |ev: web_sys::MouseEvent| {
-                        let x = ev.client_x() as f64;
-                        let y = ev.client_y() as f64;
-                        line_ending_menu.set(Some((x, y)));
-                        encoding_menu.set(None);
-                        language_menu.set(None);
-                    }
-                >
-                    {move || shell.tab().line_ending.get()}
-                </span>
-                <span
-                    class="status-clickable"
-                    title="文字コードを変更 / 開き直す"
-                    on:click=move |ev: web_sys::MouseEvent| {
-                        let x = ev.client_x() as f64;
-                        let y = ev.client_y() as f64;
-                        encoding_menu.set(Some((x, y)));
-                        line_ending_menu.set(None);
-                        language_menu.set(None);
-                    }
-                >
-                    {move || shell.tab().encoding.get()}
-                </span>
-                <span
-                    class="status-clickable"
-                    title="構文モード（言語）を変更"
-                    on:click=move |ev: web_sys::MouseEvent| {
-                        let x = ev.client_x() as f64;
-                        let y = ev.client_y() as f64;
-                        language_menu.set(Some((x, y)));
-                        encoding_menu.set(None);
-                        line_ending_menu.set(None);
-                    }
-                >
-                    {move || shell.tab_language_name()}
-                </span>
-                <span class="status-message">{move || shell.status.get()}</span>
+                    }}</span>
+                    <span
+                        class="status-clickable"
+                        title="構文モード（言語）を変更"
+                        on:click=move |ev: web_sys::MouseEvent| {
+                            let x = ev.client_x() as f64;
+                            let y = ev.client_y() as f64;
+                            language_menu.set(Some((x, y)));
+                            encoding_menu.set(None);
+                            line_ending_menu.set(None);
+                        }
+                    >
+                        {move || shell.tab_language_name()}
+                    </span>
+                    <span
+                        class="status-clickable"
+                        title="文字コードを変更 / 開き直す"
+                        on:click=move |ev: web_sys::MouseEvent| {
+                            let x = ev.client_x() as f64;
+                            let y = ev.client_y() as f64;
+                            encoding_menu.set(Some((x, y)));
+                            line_ending_menu.set(None);
+                            language_menu.set(None);
+                        }
+                    >
+                        {move || shell.tab().encoding.get()}
+                    </span>
+                    <span
+                        class="status-clickable"
+                        title="改行コードを変更"
+                        on:click=move |ev: web_sys::MouseEvent| {
+                            let x = ev.client_x() as f64;
+                            let y = ev.client_y() as f64;
+                            line_ending_menu.set(Some((x, y)));
+                            encoding_menu.set(None);
+                            language_menu.set(None);
+                        }
+                    >
+                        {move || shell.tab().line_ending.get()}
+                    </span>
+                </div>
             </div>
 
             <Show when=move || encoding_menu.get().is_some()>

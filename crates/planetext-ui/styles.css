@@ -971,13 +971,32 @@ body {
 .statusbar {
   display: flex;
   align-items: center;
-  gap: 16px;
+  justify-content: space-between;
   padding: 4px 12px;
   border-top: 1px solid var(--line);
   background: var(--panel);
   color: var(--muted);
   font-size: 12px;
   user-select: none;
+}
+
+.statusbar-left,
+.statusbar-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.statusbar-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 12px;
 }
 
 .status-clickable {
@@ -1001,7 +1020,6 @@ body {
 }
 
 .status-message {
-  margin-left: auto;
   color: var(--accent);
 }
 
