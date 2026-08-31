@@ -233,6 +233,7 @@ impl View {
             };
             let holder = element(doc, "div", class_name)?;
             holder.set_attribute(LINE_ATTR, &line.to_string()).ok();
+            holder.set_attribute("dir", "auto").ok();
             let line_lang = state
                 .language
                 .and_then(|lang| embedded_block_lang_for_line(text, line, lang))

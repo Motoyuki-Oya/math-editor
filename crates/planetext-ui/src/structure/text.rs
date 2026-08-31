@@ -914,6 +914,26 @@ pub fn as_char(node: &Node) -> Option<char> {
     }
 }
 
+fn extends_character(c: char) -> bool {
+    unicode_normalization::char::canonical_combining_class(c) != 0
+}
+
+pub fn character_before(row: &[Node], index: usize) -> usize {
+    let mut start = index.saturating_sub(1);
+    while start > 0 && row.get(start).and_then(as_char).is_some_and(extends_character) {
+        start -= 1;
+    }
+    start
+}
+
+pub fn character_after(row: &[Node], index: usize) -> usize {
+    let mut end = (index + 1).min(row.len());
+    while end < row.len() && row.get(end).and_then(as_char).is_some_and(extends_character) {
+        end += 1;
+    }
+    end
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -925,6 +945,15 @@ mod tests {
                 .map(|line| SourceLine::Plain(line.to_string()))
                 .collect(),
         )
+    }
+
+    #[test]
+    fn arabic_combining_marks_share_one_character_boundary() {
+        let row: Row = "اَلب".chars().map(Node::char).collect();
+        assert_eq!(character_after(&row, 0), 2);
+        assert_eq!(character_before(&row, 2), 0);
+        assert_eq!(character_after(&row, 2), 3);
+        assert_eq!(character_before(&row, 4), 3);
     }
 
     #[test]

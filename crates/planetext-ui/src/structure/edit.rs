@@ -254,29 +254,30 @@ impl<'a> Editing<'a> {
             return None;
         }
         if self.cursor.index > 0 {
-            let index = self.cursor.index - 1;
+            let end = self.cursor.index;
+            let index = super::text::character_before(self.current_row(), end);
             let row = self.current_row_mut();
             let node = row[index].clone();
-            match node.slot_count() {
+            if node.intrinsic_slot_count() == 0
+                && node.upper.is_empty()
+                && node.lower.is_empty()
+            {
+                row.drain(index..end);
+                self.caret_at(index);
+            } else {
                 // コンテナを削除すると、その内容が保持されます。ユーザーの作業が破棄されるのではなく、構造が剥がされます。
-                0 => {
-                    row.remove(index);
-                    self.caret_at(index);
-                }
-                _ => {
-                    let mut kept: Row = Vec::new();
-                    for slot in 0..node.slot_count() {
-                        if let Some(inner) = node.slot(slot) {
-                            kept.extend(inner.iter().cloned());
-                        }
+                let mut kept: Row = Vec::new();
+                for slot in 0..node.slot_count() {
+                    if let Some(inner) = node.slot(slot) {
+                        kept.extend(inner.iter().cloned());
                     }
-                    row.remove(index);
-                    let count = kept.len();
-                    for (offset, inner) in kept.into_iter().enumerate() {
-                        row.insert(index + offset, inner);
-                    }
-                    self.caret_at(index + count);
                 }
+                row.remove(index);
+                let count = kept.len();
+                for (offset, inner) in kept.into_iter().enumerate() {
+                    row.insert(index + offset, inner);
+                }
+                self.caret_at(index + count);
             }
             return None;
         }
@@ -303,7 +304,8 @@ impl<'a> Editing<'a> {
         let len = self.current_row().len();
         if self.cursor.index < len {
             let index = self.cursor.index;
-            self.current_row_mut().remove(index);
+            let end = super::text::character_after(self.current_row(), index);
+            self.current_row_mut().drain(index..end);
         }
     }
 
@@ -313,7 +315,7 @@ impl<'a> Editing<'a> {
             return None;
         }
         if self.cursor.index > 0 {
-            let index = self.cursor.index - 1;
+            let index = super::text::character_before(self.current_row(), self.cursor.index);
             let node = self.current_row()[index].clone();
             if let Some(slot) = node.horizontal_slots().last().copied() {
                 let len = node.slot(slot).map(Vec::len).unwrap_or(0);
@@ -363,7 +365,7 @@ impl<'a> Editing<'a> {
                 self.cursor.path.push((index, slot));
                 self.caret_at(0);
             } else {
-                self.caret_at(index + 1);
+                self.caret_at(super::text::character_after(self.current_row(), index));
             }
             return None;
         }
@@ -651,6 +653,16 @@ mod tests {
         let mut island = Fixture::new();
         island.type_in("x+1");
         assert_eq!(island.to_notation(), "x+1");
+    }
+
+    #[test]
+    fn backspace_removes_a_base_and_its_combining_mark_together() {
+        let mut island = Fixture::new();
+        island.type_in("اَ");
+        assert_eq!(island.cursor.index, 2);
+        island.edit().backspace();
+        assert!(island.root.is_empty());
+        assert_eq!(island.cursor.index, 0);
     }
 
     #[test]

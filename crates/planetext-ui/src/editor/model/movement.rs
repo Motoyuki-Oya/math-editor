@@ -227,7 +227,10 @@ impl Editor {
 
 pub fn before(text: &Text, at: Pos) -> Pos {
     if at.col > 0 {
-        Pos::new(at.line, at.col - 1)
+        Pos::new(
+            at.line,
+            crate::structure::text::character_before(text.line(at.line), at.col),
+        )
     } else if at.line > 0 {
         Pos::new(at.line - 1, text.line_len(at.line - 1))
     } else {
@@ -237,7 +240,10 @@ pub fn before(text: &Text, at: Pos) -> Pos {
 
 pub fn after(text: &Text, at: Pos) -> Pos {
     if at.col < text.line_len(at.line) {
-        Pos::new(at.line, at.col + 1)
+        Pos::new(
+            at.line,
+            crate::structure::text::character_after(text.line(at.line), at.col),
+        )
     } else if at.line + 1 < text.line_count() {
         Pos::new(at.line + 1, 0)
     } else {

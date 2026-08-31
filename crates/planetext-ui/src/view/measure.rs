@@ -190,10 +190,21 @@ fn boundaries(row: &Element) -> Vec<(usize, Box2)> {
         };
         match run_length(&child) {
             Some(len) => {
-                for offset in 0..=len {
+                let nodes: Vec<_> = child
+                    .text_content()
+                    .unwrap_or_default()
+                    .chars()
+                    .map(crate::structure::ast::Node::char)
+                    .collect();
+                let mut offset = 0;
+                loop {
                     if let Some(rect) = text_boundary(&child, offset) {
                         places.push((start + offset, rect));
                     }
+                    if offset >= len {
+                        break;
+                    }
+                    offset = crate::structure::text::character_after(&nodes, offset);
                 }
             }
             None => {
