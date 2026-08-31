@@ -72,6 +72,10 @@ impl Document {
         self.modified_lines.clear();
     }
 
+    pub fn set_modified_lines(&mut self, lines: Vec<usize>) {
+        self.modified_lines = lines.into_iter().collect();
+    }
+
     pub fn mark_lines_modified(&mut self, from_line: usize, to_line: usize, end_line: usize) {
         let removed_lines = to_line.saturating_sub(from_line);
         let inserted_lines = end_line.saturating_sub(from_line);

@@ -49,6 +49,8 @@ pub(super) struct TabState {
     pub(super) path: Option<String>,
     pub(super) syntax_override: Option<String>,
     pub(super) dirty: bool,
+    #[serde(default)]
+    pub(super) modified_lines: Vec<usize>,
 }
 
 /// 開いているファイルが 1 つあります。ドキュメント自体は、タブが表示されている間はエディター内に存在し、別のタブが表示されている間はここに保留されます。
@@ -1146,12 +1148,15 @@ impl Shell {
             let tabs = pane.tabs.get_untracked();
             let mut tab_states = Vec::new();
             for tab in tabs {
+                let doc = editor::get_or_create_doc(tab.id.get_untracked());
+                let modified_lines = doc.borrow().modified_lines();
                 tab_states.push(TabState {
                     id: tab.id.get_untracked(),
                     untitled_num: tab.untitled_num.get_untracked(),
                     path: tab.path.get_untracked(),
                     syntax_override: tab.syntax_override.get_untracked(),
                     dirty: tab.dirty.get_untracked(),
+                    modified_lines,
                 });
             }
             pane_states.push(PaneState {
@@ -1246,6 +1251,12 @@ impl Shell {
                             let doc = editor::get_or_create_doc(doc_id);
                             doc.borrow_mut()
                                 .load(crate::format::document::read(&draft.contents));
+                            if !t_state.modified_lines.is_empty() {
+                                doc.borrow_mut().set_modified_lines(t_state.modified_lines);
+                            } else if t_state.path.is_none() {
+                                let count = doc.borrow().text().line_count();
+                                doc.borrow_mut().set_modified_lines((0..count).collect());
+                            }
                             let tab_copy = tab;
                             let draft_contents = draft.contents.clone();
                             spawn_local(async move {
@@ -1375,6 +1386,8 @@ impl Shell {
             let doc = editor::get_or_create_doc(draft.id);
             doc.borrow_mut()
                 .load(crate::format::document::read(&draft.contents));
+            let count = doc.borrow().text().line_count();
+            doc.borrow_mut().set_modified_lines((0..count).collect());
 
             let tab_copy = tab;
             let draft_contents = draft.contents.clone();
