@@ -63,8 +63,10 @@ pub fn install(session: &Rc<RefCell<Session>>) {
         "compositionstart",
         session,
         |session, _: CompositionEvent| {
-            session.borrow_mut().composing = true;
-            session.borrow_mut().preedit.clear();
+            let mut borrowed = session.borrow_mut();
+            borrowed.composing = true;
+            borrowed.preedit.clear();
+            drop(borrowed);
             session::redraw(session);
         },
     );
@@ -91,7 +93,12 @@ pub fn install(session: &Rc<RefCell<Session>>) {
         "blur",
         session,
         |session, _: web_sys::FocusEvent| {
-            session.borrow_mut().focused = false;
+            let mut borrowed = session.borrow_mut();
+            borrowed.focused = false;
+            borrowed.composing = false;
+            borrowed.preedit.clear();
+            borrowed.textarea.set_value("");
+            drop(borrowed);
             session::redraw(session);
         },
     );

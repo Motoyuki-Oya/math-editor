@@ -709,8 +709,10 @@ pub fn redraw(session: &Rc<RefCell<Session>>) {
                 ghost: session.ghost.as_ref(),
             },
         );
-        if let Some(rect) = session.view.reveal(&caret) {
-            input::follow_caret(&session.textarea, rect);
+        if !session.composing {
+            if let Some(rect) = session.view.reveal(&caret) {
+                input::follow_caret(&session.textarea, rect);
+            }
         }
     }
     // Ctrl+End などで窓が移った場合も、移動後の drawn 範囲を検索する。
