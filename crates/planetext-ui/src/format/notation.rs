@@ -274,12 +274,14 @@ fn matrix(chars: &[char], kind: MatrixKind) -> Node {
             continue;
         }
         let Some(end) = closing(chars, i) else { break };
-        cells.push(
+        cells.push(if matches!(kind, MatrixKind::Cases) {
+            vec![row(trim(&chars[i + 1..end]))]
+        } else {
             split_args(&chars[i + 1..end])
                 .into_iter()
                 .map(row)
-                .collect(),
-        );
+                .collect()
+        });
         i = end + 1;
     }
     if cells.is_empty() {
@@ -684,7 +686,7 @@ mod tests {
     #[test]
     fn grids_and_case_splits() {
         assert_eq!(roundtrip("[a, b][c, d]"), "[a, b][c, d]");
-        assert_eq!(roundtrip("{[x>0, 正][x<0, 負]"), "{[x>0, 正][x<0, 負]");
+        assert_eq!(roundtrip("{[x>0][x<0]"), "{[x>0][x<0]");
         match parse_island("[a, b][c, d]").as_slice() {
             [Node {
                 kind: NodeKind::Matrix { kind, cells },
@@ -693,6 +695,17 @@ mod tests {
                 assert_eq!(*kind, MatrixKind::Grid);
                 assert_eq!(cells.len(), 2);
                 assert_eq!(cells[0].len(), 2);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_island("{[x>0][x<0]").as_slice() {
+            [Node {
+                kind: NodeKind::Matrix { kind, cells },
+                ..
+            }] => {
+                assert_eq!(*kind, MatrixKind::Cases);
+                assert_eq!(cells.len(), 2);
+                assert!(cells.iter().all(|row| row.len() == 1));
             }
             other => panic!("unexpected {other:?}"),
         }

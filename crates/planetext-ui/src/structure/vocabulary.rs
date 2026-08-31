@@ -196,7 +196,7 @@ pub fn structure_for(name: &str) -> Option<Node> {
         "sqrt" => Some(ast::sqrt()),
         "root" | "nthroot" => Some(ast::nth_root()),
         "matrix" => Some(ast::matrix(MatrixKind::Grid, 2, 2)),
-        "cases" => Some(ast::matrix(MatrixKind::Cases, 2, 2)),
+        "cases" => Some(ast::matrix(MatrixKind::Cases, 2, 1)),
         _ if big_op(name).is_some() => Some(limits_for(name)),
         _ => None,
     }
@@ -237,7 +237,7 @@ pub fn glyph_for(name: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::structure::ast::NodeKind;
+    use crate::structure::ast::{MatrixKind, NodeKind};
 
     #[test]
     fn structures_symbols_and_functions_are_known() {
@@ -249,10 +249,14 @@ mod tests {
             structure_for("sum").map(|n| n.kind),
             Some(NodeKind::BigOp(_))
         ));
-        assert!(matches!(
-            structure_for("cases").map(|n| n.kind),
-            Some(NodeKind::Matrix { .. })
-        ));
+        match structure_for("cases").map(|node| node.kind) {
+            Some(NodeKind::Matrix { kind, cells }) => {
+                assert_eq!(kind, MatrixKind::Cases);
+                assert_eq!(cells.len(), 2);
+                assert!(cells.iter().all(|row| row.len() == 1));
+            }
+            other => panic!("expected cases, got {other:?}"),
+        }
         assert_eq!(text_for("alpha"), Some("α".into()));
         assert_eq!(text_for("sin"), Some("sin".into()));
     }

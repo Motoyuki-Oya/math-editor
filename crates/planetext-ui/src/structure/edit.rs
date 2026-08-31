@@ -553,7 +553,7 @@ impl<'a> Editing<'a> {
                 return false;
             };
             let Some(Node {
-                kind: NodeKind::Matrix { cells, .. },
+                kind: NodeKind::Matrix { kind, cells },
                 ..
             }) = row.get_mut(node_index)
             else {
@@ -561,6 +561,9 @@ impl<'a> Editing<'a> {
             };
             let cols = cells.first().map(|r| r.len()).unwrap_or(1).max(1);
             let (current_row, current_col) = (slot / cols, slot % cols);
+            if !add_row && matches!(kind, crate::structure::ast::MatrixKind::Cases) {
+                return false;
+            }
             let target = if add_row {
                 cells.insert(current_row + 1, (0..cols).map(|_| Row::new()).collect());
                 (current_row + 1) * cols + current_col
@@ -897,6 +900,28 @@ mod tests {
                 ..
             } => assert_eq!(cells[0].len(), 3),
             other => panic!("expected a matrix, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cases_grow_by_row_but_not_by_column() {
+        let mut island = Fixture::new();
+        island.edit().insert(super::super::ast::matrix(
+            super::super::ast::MatrixKind::Cases,
+            2,
+            1,
+        ));
+        assert!(island.edit().grow_matrix(true));
+        assert!(!island.edit().grow_matrix(false));
+        match &island.root[0] {
+            Node {
+                kind: NodeKind::Matrix { cells, .. },
+                ..
+            } => {
+                assert_eq!(cells.len(), 3);
+                assert!(cells.iter().all(|row| row.len() == 1));
+            }
+            other => panic!("expected cases, got {other:?}"),
         }
     }
 }

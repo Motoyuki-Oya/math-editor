@@ -82,7 +82,7 @@ impl Structure {
             Structure::Int => ast::limits("∫"),
             Structure::Lim => ast::limits("lim"),
             Structure::Matrix => ast::matrix(MatrixKind::Grid, 2, 2),
-            Structure::Cases => ast::matrix(MatrixKind::Cases, 2, 2),
+            Structure::Cases => ast::matrix(MatrixKind::Cases, 2, 1),
         }
     }
 }
