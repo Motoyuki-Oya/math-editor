@@ -417,12 +417,7 @@ impl<'a> Renderer<'a> {
                     sqrt.append_child(&degree).ok();
                 }
                 // 記号は本体の上に配置され、テキスト内に本体が残ります。つまり、ルートはその周囲にあるものと同じベースライン上にあります。キック、下降、および長い上昇ストローク。直立ではなく傾斜しています。この傾斜により、記号は括弧ではなく部首として読み取られます。
-                sqrt.append_child(&self.svg(
-                    "mn-radical",
-                    "0 0 26 100",
-                    "M0 58 L5 60 L11 96 L25 3",
-                ))
-                .ok();
+                sqrt.append_child(&self.radical()).ok();
                 let body = self.el("span", "mn-sqrt-body");
                 body.append_child(&self.child_row(node, body_slot, path, index, font_size))
                     .ok();
@@ -633,6 +628,34 @@ impl<'a> Renderer<'a> {
             }
         }
         holder
+    }
+
+    fn radical(&self) -> Element {
+        let svg = self
+            .doc
+            .create_element_ns(Some(SVG_NS), "svg")
+            .expect("create radical");
+        svg.set_attribute("class", "mn-radical").ok();
+        for (x1, y1, x2, y2) in [
+            ("0", "58%", "0.16em", "60%"),
+            ("0.16em", "60%", "0.38em", "96%"),
+            ("0.38em", "96%", "0.82em", "0"),
+            ("0.82em", "0", "100%", "0"),
+        ] {
+            let line = self
+                .doc
+                .create_element_ns(Some(SVG_NS), "line")
+                .expect("create radical line");
+            for (name, value) in [("x1", x1), ("y1", y1), ("x2", x2), ("y2", y2)] {
+                line.set_attribute(name, value).ok();
+            }
+            line.set_attribute("stroke", "currentColor").ok();
+            line.set_attribute("stroke-width", "1").ok();
+            line.set_attribute("stroke-linecap", "round").ok();
+            line.set_attribute("vector-effect", "non-scaling-stroke").ok();
+            svg.append_child(&line).ok();
+        }
+        svg
     }
 
     fn delimiter(&self, delim: &Delim, open: bool) -> Element {

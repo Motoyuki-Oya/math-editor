@@ -1102,7 +1102,7 @@ body {
   left: 0;
   top: 0;
   /* それが収まるパディングと同じ幅なので、その先端は 本体上のバーに正確に接触する。 */
-  width: 0.8em;
+  width: 100%;
   height: 100%;
   overflow: visible;
   shape-rendering: geometricPrecision;
@@ -1110,7 +1110,6 @@ body {
 
 .mn-sqrt-body {
   display: inline-block;
-  border-top: 1px solid currentColor;
   /* バーの下、および記号と最初の 文字の間のすべての面に空気があるため、記号はルートの下にあるものに触れることは決してない。 */
   padding: 0.08em 0.3em 0.08em 0.22em;
 }
