@@ -303,7 +303,7 @@ pub fn App() -> impl IntoView {
                         if let Some((chars_without_nl, newlines)) = sel.chars {
                             let total_sel = chars_without_nl + newlines;
                             if newlines > 0 {
-                                format!("選択 {total_sel} ( 📄{chars_without_nl} ⏎ {newlines} ) ({}行)", sel.lines)
+                                format!("選択 {total_sel}文字 ({}行)", sel.lines)
                             } else {
                                 format!("選択 {total_sel}文字")
                             }
