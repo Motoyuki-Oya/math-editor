@@ -213,20 +213,7 @@ struct BTreeNode {
 
 ### 操作ログ
 
-```rust
-struct OperationLog {
-    ops: Vec<Operation>,
-    head: usize,  // 現在適用されている先頭
-}
-
-struct Operation {
-    base_revision: Revision,
-    pos: ByteIndex,        // base_revision 時点の文書座標
-    delete_len: usize,
-    delete_text: BufferRef,
-    insert_text: BufferRef,
-}
-```
+操作ログは、現在適用されている位置(`head`)を持つトランザクション列として扱う。
 
 - 各トランザクションは、生成時点の `base_revision` を持つ
 - 単一編集、複数編集、規則的な大量マルチカーソル編集を同じ操作ログで表現する
@@ -234,11 +221,8 @@ struct Operation {
 - 各編集位置は `base_revision` 時点の文書座標で表す
 - 操作を適用すると revision が進む
 - 古い revision を基準にした操作を適用する場合は、操作ログで現在座標へ写像してから適用する
-- 追記専用
-- Undo: `head -= 1`
-- Redo: `head += 1`
-- 新しい編集: `ops.truncate(head)` して追加、`head += 1`
 - Undo/Redo は操作ログの適用範囲を変更し、ピースツリーと検索差分を同じ範囲から再構成する
+- 現在位置より後ろに新しい編集が入った場合、その Redo 枝を破棄する
 
 ### 操作ログの生存期間
 
