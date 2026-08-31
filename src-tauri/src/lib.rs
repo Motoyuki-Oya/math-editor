@@ -44,9 +44,23 @@ async fn pick_open_path(app: tauri::AppHandle) -> Option<String> {
             .file()
             .set_title("開く")
             .add_filter(
-                "テキスト",
-                &["txt", "md", "markdown", "text", "log", "csv", "tex"],
+                "サポートされているファイル",
+                &[
+                    "txt", "md", "markdown", "text", "log", "csv", "tex", "rs", "py", "js", "ts",
+                    "jsx", "tsx", "html", "htm", "css", "json", "toml", "kt", "kts", "c", "cpp",
+                    "h", "hpp",
+                ],
             )
+            .add_filter("テキスト", &["txt", "text", "log", "csv"])
+            .add_filter("Markdown", &["md", "markdown"])
+            .add_filter("Rust", &["rs"])
+            .add_filter("Python", &["py"])
+            .add_filter("TypeScript / JavaScript", &["ts", "js", "tsx", "jsx"])
+            .add_filter("HTML / CSS", &["html", "htm", "css"])
+            .add_filter("JSON / TOML", &["json", "toml"])
+            .add_filter("Kotlin", &["kt", "kts"])
+            .add_filter("LaTeX", &["tex"])
+            .add_filter("C / C++", &["c", "cpp", "h", "hpp"])
             .add_filter("すべてのファイル", &["*"])
             .pick_file(cb);
     })
@@ -60,12 +74,35 @@ async fn pick_save_path(app: tauri::AppHandle, default_name: String) -> Option<S
             .file()
             .set_title("名前を付けて保存")
             .set_file_name(default_name)
-            .add_filter("テキスト", &["txt"])
-            .add_filter("Markdown", &["md"])
             .add_filter("すべてのファイル", &["*"])
+            .add_filter("テキスト", &["txt", "text", "log"])
+            .add_filter("Markdown", &["md", "markdown"])
+            .add_filter("Rust", &["rs"])
+            .add_filter("Python", &["py"])
+            .add_filter("TypeScript / JavaScript", &["ts", "js", "tsx", "jsx"])
+            .add_filter("HTML", &["html", "htm"])
+            .add_filter("CSS", &["css"])
+            .add_filter("JSON", &["json"])
+            .add_filter("TOML", &["toml"])
+            .add_filter("Kotlin", &["kt", "kts"])
+            .add_filter("LaTeX", &["tex"])
+            .add_filter("C / C++", &["c", "cpp", "h", "hpp"])
             .save_file(cb);
     })
     .map(|p| p.to_string_lossy().into_owned())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn save_session_state(app: tauri::AppHandle, state_json: String) -> Result<(), String> {
+    let dir = app_config_dir(&app).ok_or_else(|| "設定ディレクトリがありません".to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("session.json"), state_json).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn read_session_state(app: tauri::AppHandle) -> Option<String> {
+    let dir = app_config_dir(&app)?;
+    std::fs::read_to_string(dir.join("session.json")).ok()
 }
 
 /// 文書を全部 1 つの文字列で webview へ渡さずに開きます。本体はネイティブ側の
@@ -101,7 +138,7 @@ async fn set_document_encoding(
 }
 
 /// 文書の改行コードを設定します（保存時に使われます）。
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 async fn set_document_line_ending(
     application: State<'_, Application>,
     handle: u64,
@@ -687,6 +724,8 @@ pub fn run() {
             save_draft,
             remove_draft,
             read_drafts,
+            save_session_state,
+            read_session_state,
             file_size,
             reopen_document_encoding,
             set_document_encoding,
