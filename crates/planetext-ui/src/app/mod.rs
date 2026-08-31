@@ -299,6 +299,9 @@ pub fn App() -> impl IntoView {
             <div class="statusbar">
                 <span>{move || {
                     let stats = shell.stats.get();
+                    let tab = shell.tab();
+                    let is_large = tab.large.get();
+                    let bytes = tab.bytes.get();
                     if let Some(sel) = &stats.selection {
                         if let Some((chars_without_nl, newlines)) = sel.chars {
                             let total_sel = chars_without_nl + newlines;
@@ -306,18 +309,14 @@ pub fn App() -> impl IntoView {
                         } else {
                             format!("選択 {}行", sel.lines)
                         }
-                    } else if stats.counting {
-                        if let Some(bytes) = stats.file_bytes {
-                            format_file_size(bytes)
-                        } else {
-                            "全 0文字".to_string()
-                        }
+                    } else if is_large || bytes > 10_000_000 {
+                        format_file_size(bytes)
                     } else if let Some(chars) = stats.total_chars {
                         format!("全 {chars}文字")
-                    } else if let Some(bytes) = stats.file_bytes {
-                        format_file_size(bytes)
+                    } else if stats.counting {
+                        "全 0文字".to_string()
                     } else {
-                        format!("{} 行", stats.total_lines)
+                        format_file_size(bytes)
                     }
                 }}</span>
                 <span>{move || {

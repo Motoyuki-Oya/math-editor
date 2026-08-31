@@ -1172,11 +1172,7 @@ pub fn stats() -> DocStats {
         let start = primary.start();
         let end = primary.end();
         let lines = end.line.saturating_sub(start.line) + 1;
-        let chars = if !is_large && !is_counting {
-            text.chars_between(start, end)
-        } else {
-            None
-        };
+        let chars = text.chars_between(start, end);
         Some(SelectionStats { lines, chars })
     } else {
         None
