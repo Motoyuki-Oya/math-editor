@@ -625,7 +625,7 @@ body {
   min-height: 100%;
   width: 100%;
   max-width: 100%;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .mn-content.mn-nowrap {
@@ -649,7 +649,7 @@ body {
   grid-row: 1;
   min-width: 0;
   max-width: 100%;
-  overflow-x: hidden;
+  overflow-x: visible;
   padding: 0 18px 18px 10px;
   box-sizing: border-box;
 }
@@ -1006,6 +1006,11 @@ body {
 /* 行は、あらゆる深さの通常のインライン テキストです。その中にあるものは、テキストと同じように ベースラインに並び、構造は、必要なボックスの中央に配置されるのではなく、独自のベースラインがどこにあるのかを示します。 */
 .mn-row {
   display: inline;
+}
+
+.mn-row .mn-row {
+  white-space: pre;
+  overflow-wrap: normal;
 }
 
 .mn-placeholder {
