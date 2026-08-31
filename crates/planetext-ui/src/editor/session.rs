@@ -792,8 +792,21 @@ pub(super) fn move_visual(
     };
     let did = session.borrow_mut().edit(|editor| match target {
         Hit::Text(at) => {
+            let current = editor.primary();
+            if !extend && current.is_caret() && editor.nested_cursor().is_none() {
+                let entered = if at.line == current.head.line && at.col == current.head.col + 1 {
+                    editor.enter_node(current.head, true)
+                } else if at.line == current.head.line && at.col + 1 == current.head.col {
+                    editor.enter_node(at, false)
+                } else {
+                    false
+                };
+                if entered {
+                    return super::model::Did::Moved;
+                }
+            }
             if extend {
-                let anchor = editor.primary().anchor;
+                let anchor = current.anchor;
                 editor.set_sels(vec![Sel { anchor, head: at }]);
             } else {
                 editor.set_caret(at);
