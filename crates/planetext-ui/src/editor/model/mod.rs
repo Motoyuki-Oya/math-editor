@@ -561,7 +561,6 @@ pub(crate) mod tests {
                 path: vec![(1, lower)],
                 index: 0,
                 anchor: 0,
-
             },
         ));
 

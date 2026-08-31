@@ -487,8 +487,7 @@ impl Editor {
                 };
                 let line = editor.cursors[index].head.line;
                 let from_root = before.path.is_empty();
-                let before_len =
-                    row_at(editor.text.line(line), &before.path).map(|row| row.len());
+                let before_len = row_at(editor.text.line(line), &before.path).map(|row| row.len());
                 editor.with_cursor_at(index, Inside::Change, |editing| {
                     apply_trigger(editing, c);
                     None
@@ -527,7 +526,8 @@ impl Editor {
 }
 
 fn apply_trigger(editing: &mut Editing<'_>, c: char) -> bool {
-    let Some((consume, conversion)) = trigger::conversion_for(editing.current_row(), editing.cursor.index, c)
+    let Some((consume, conversion)) =
+        trigger::conversion_for(editing.current_row(), editing.cursor.index, c)
     else {
         return false;
     };
@@ -607,15 +607,14 @@ mod tests {
             editor.insert_text(&c.to_string());
         }
         let body = row_at(editor.text().line(0), &[(0, 0)]).unwrap();
-        assert!(body.iter().all(|node| matches!(node.kind, NodeKind::Char(_))));
+        assert!(body
+            .iter()
+            .all(|node| matches!(node.kind, NodeKind::Char(_))));
     }
 
     #[test]
     fn structure_before_slash_converts_inside_another_structure() {
-        let inner = Node::sqrt(
-            None,
-            "x+1".chars().map(Node::char).collect(),
-        );
+        let inner = Node::sqrt(None, "x+1".chars().map(Node::char).collect());
         let mut editor = with_rows(vec![vec![Node::sqrt(
             None,
             vec![inner.clone(), Node::char('/')],
@@ -645,7 +644,6 @@ mod tests {
             path: vec![(0, 0)],
             index: 0,
             anchor: 0,
-
         };
         assert!(editor.enter_at(Pos::new(0, 0), &cursor));
         assert!(editor.add_nested(Pos::new(1, 0), cursor));
@@ -668,7 +666,6 @@ mod tests {
             path: vec![(0, 0)],
             index: 1,
             anchor: 1,
-
         };
         assert!(editor.enter_at(Pos::new(0, 0), &cursor));
         assert!(editor.add_nested(Pos::new(1, 0), cursor));
@@ -690,7 +687,6 @@ mod tests {
             path: vec![(0, 0)],
             index: 1,
             anchor: 1,
-
         };
         let second = Cursor {
             index: 3,
@@ -723,7 +719,6 @@ mod tests {
             path: vec![(0, 0)],
             index: 0,
             anchor: 0,
-
         };
         assert!(editor.enter_at(Pos::new(0, 0), &cursor));
         assert!(editor.add_nested(Pos::new(1, 0), cursor));
@@ -767,7 +762,6 @@ mod tests {
                 path: vec![(0, 0)],
                 index: 1,
                 anchor: 0,
-    
             },
             "a\nb\tc",
         ));

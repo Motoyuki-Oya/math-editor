@@ -920,7 +920,12 @@ fn extends_character(c: char) -> bool {
 
 pub fn character_before(row: &[Node], index: usize) -> usize {
     let mut start = index.saturating_sub(1);
-    while start > 0 && row.get(start).and_then(as_char).is_some_and(extends_character) {
+    while start > 0
+        && row
+            .get(start)
+            .and_then(as_char)
+            .is_some_and(extends_character)
+    {
         start -= 1;
     }
     start
@@ -928,7 +933,12 @@ pub fn character_before(row: &[Node], index: usize) -> usize {
 
 pub fn character_after(row: &[Node], index: usize) -> usize {
     let mut end = (index + 1).min(row.len());
-    while end < row.len() && row.get(end).and_then(as_char).is_some_and(extends_character) {
+    while end < row.len()
+        && row
+            .get(end)
+            .and_then(as_char)
+            .is_some_and(extends_character)
+    {
         end += 1;
     }
     end

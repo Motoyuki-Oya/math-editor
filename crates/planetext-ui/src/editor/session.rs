@@ -786,7 +786,10 @@ pub(super) fn move_visual(
         let cursor = borrowed.primary_cursor();
         if !extend
             && (!cursor.sel.is_caret()
-                || cursor.inside.as_ref().is_some_and(|inside| !inside.is_caret()))
+                || cursor
+                    .inside
+                    .as_ref()
+                    .is_some_and(|inside| !inside.is_caret()))
         {
             return None;
         }

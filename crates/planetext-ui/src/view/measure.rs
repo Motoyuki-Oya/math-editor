@@ -232,11 +232,7 @@ pub(super) fn visual_neighbor(row: &Element, index: usize, right: bool) -> Optio
     visual_neighbor_in(boundaries(row), index, right)
 }
 
-fn visual_neighbor_in(
-    mut places: Vec<(usize, Box2)>,
-    index: usize,
-    right: bool,
-) -> Option<usize> {
+fn visual_neighbor_in(mut places: Vec<(usize, Box2)>, index: usize, right: bool) -> Option<usize> {
     let mut seen = std::collections::HashSet::new();
     places.retain(|(index, _)| seen.insert(*index));
     places.sort_by(|(_, a), (_, b)| {
@@ -244,7 +240,9 @@ fn visual_neighbor_in(
             .total_cmp(&b.top)
             .then_with(|| a.left.total_cmp(&b.left))
     });
-    let current = places.iter().position(|(candidate, _)| *candidate == index)?;
+    let current = places
+        .iter()
+        .position(|(candidate, _)| *candidate == index)?;
     let next = if right {
         current.checked_add(1)
     } else {

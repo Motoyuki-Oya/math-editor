@@ -67,10 +67,7 @@ fn configured_literal(slice: &str, lang: &LanguageDef) -> Option<(usize, TokenKi
     .filter_map(|(word, kind)| {
         let width = word.chars().count();
         let has_symbol = word.chars().any(|c| !word_char(c));
-        let boundary = word
-            .chars()
-            .next_back()
-            .is_none_or(|last| !word_char(last))
+        let boundary = word.chars().next_back().is_none_or(|last| !word_char(last))
             || slice.chars().nth(width).is_none_or(|next| !word_char(next));
         (has_symbol && boundary && slice.starts_with(word)).then_some((width, kind))
     })

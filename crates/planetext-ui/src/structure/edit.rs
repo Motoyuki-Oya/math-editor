@@ -221,12 +221,7 @@ impl<'a> Editing<'a> {
 
     /// 直前の `consume` 個のノードを置き換え、必要なら新しい構造のスロットへ入ります。
     /// トリガー変換(`1/` + スペース)が深さによらず同じ手順で構造を置くために使います。
-    pub fn convert_preceding(
-        &mut self,
-        consume: usize,
-        nodes: Row,
-        enter: Option<(usize, usize)>,
-    ) {
+    pub fn convert_preceding(&mut self, consume: usize, nodes: Row, enter: Option<(usize, usize)>) {
         self.take_selection();
         let end = self.cursor.index;
         let start = end.saturating_sub(consume);
@@ -258,10 +253,7 @@ impl<'a> Editing<'a> {
             let index = super::text::character_before(self.current_row(), end);
             let row = self.current_row_mut();
             let node = row[index].clone();
-            if node.intrinsic_slot_count() == 0
-                && node.upper.is_empty()
-                && node.lower.is_empty()
-            {
+            if node.intrinsic_slot_count() == 0 && node.upper.is_empty() && node.lower.is_empty() {
                 row.drain(index..end);
                 self.caret_at(index);
             } else {
@@ -627,7 +619,8 @@ mod tests {
 
         fn apply_trigger(&mut self, c: char) -> bool {
             let index = self.cursor.index;
-            let Some((consume, conversion)) = trigger::conversion_for(self.edit().current_row(), index, c)
+            let Some((consume, conversion)) =
+                trigger::conversion_for(self.edit().current_row(), index, c)
             else {
                 return false;
             };

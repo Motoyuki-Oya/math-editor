@@ -224,8 +224,8 @@ impl View {
             let active = (caret.at.line == line).then_some(path.as_slice());
             let ghost_on_line = state.ghost.filter(|g| g.line == line && active.is_some());
             let row_nodes = text.line(line);
-            let is_aligned = tab_block_line(text, line)
-                || (is_markdown && is_markdown_table_line(row_nodes));
+            let is_aligned =
+                tab_block_line(text, line) || (is_markdown && is_markdown_table_line(row_nodes));
             let class_name = if is_aligned {
                 "mn-line mn-aligned-row"
             } else {

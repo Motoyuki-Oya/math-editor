@@ -507,7 +507,11 @@ mod tests {
         let mut annotated = Node::container(vec![Node::char('a'), Node::char('b')]);
         annotated.upper = vec![Node::char('u')];
         let rows = [
-            vec![Node::stack(nested.clone(), vec![Node::char('2')], Between::Rule)],
+            vec![Node::stack(
+                nested.clone(),
+                vec![Node::char('2')],
+                Between::Rule,
+            )],
             vec![Node::stack(
                 vec![Node::char('a')],
                 vec![Node::char('b')],
@@ -519,7 +523,10 @@ mod tests {
                 Between::Arrow('→'),
             )],
             nested,
-            vec![Node::sqrt(Some(vec![Node::char('3')]), vec![Node::char('x')])],
+            vec![Node::sqrt(
+                Some(vec![Node::char('3')]),
+                vec![Node::char('x')],
+            )],
             vec![Node::sup(vec![Node::char('n')])],
             vec![Node::sub(vec![Node::char('i')])],
             vec![Node::big_op("∑".into())],
@@ -619,10 +626,7 @@ mod tests {
             [Node {
                 kind: NodeKind::Sqrt { body, .. },
                 ..
-            }] => assert_eq!(
-                body,
-                &"(x+1)".chars().map(Node::char).collect::<Vec<_>>()
-            ),
+            }] => assert_eq!(body, &"(x+1)".chars().map(Node::char).collect::<Vec<_>>()),
             other => panic!("unexpected {other:?}"),
         }
     }
