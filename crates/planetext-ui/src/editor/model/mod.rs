@@ -198,6 +198,7 @@ impl Editor {
     }
 
     /// ファイルから読み取られたばかりのドキュメントを表示します。
+    #[allow(dead_code)]
     pub fn load(&mut self, text: Text) {
         self.document.load(text);
         self.cursors = vec![UnifiedCursor::caret(Pos::default())];
@@ -205,6 +206,7 @@ impl Editor {
 
     /// 読み込んだ内容をまるごと文書の本体へ届くようにする。本体が
     /// 1 行の空文書のときに使う（下書きの復元）。
+    #[allow(dead_code)]
     pub fn load_contents(&mut self, text: Text) {
         self.load(text);
         self.record(Step::Other);

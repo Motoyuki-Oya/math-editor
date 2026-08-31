@@ -3,6 +3,7 @@
 use leptos::prelude::*;
 use leptos::reactive::owner::{LocalStorage, Owner};
 use leptos::task::spawn_local;
+use serde::{Deserialize, Serialize};
 
 use super::drafts;
 use super::sync;
@@ -17,7 +18,7 @@ const LARGE_BYTES: usize = 5_000_000;
 
 thread_local! {
     /// 次のタブに名前を付けます。タブの番号はそのドラフトの名前でもあるため、タブ自体よりも存続する必要があります。復元されたドラフトではその番号が保持されます。
-    static NEXT_ID: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static NEXT_ID: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
 }
 
 fn next_id() -> usize {
@@ -26,11 +27,37 @@ fn next_id() -> usize {
     id
 }
 
+/// ワークスペース全体の保存・復元用データ構造
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub(super) struct SessionState {
+    pub(super) split_ratio: f64,
+    pub(super) focused_pane: usize,
+    pub(super) panes: Vec<PaneState>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub(super) struct PaneState {
+    pub(super) current: usize,
+    pub(super) tabs: Vec<TabState>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub(super) struct TabState {
+    pub(super) id: usize,
+    #[serde(default)]
+    pub(super) untitled_num: Option<usize>,
+    pub(super) path: Option<String>,
+    pub(super) syntax_override: Option<String>,
+    pub(super) dirty: bool,
+}
+
 /// 開いているファイルが 1 つあります。ドキュメント自体は、タブが表示されている間はエディター内に存在し、別のタブが表示されている間はここに保留されます。
 #[derive(Clone, Copy)]
 pub(super) struct Tab {
     /// ディスク上のこのタブのドラフトに名前を付けます。
     pub(super) id: RwSignal<usize>,
+    /// 無題ドキュメントの連番（1なら「無題」、2なら「無題 2」）。
+    pub(super) untitled_num: RwSignal<Option<usize>>,
     pub(super) path: RwSignal<Option<String>>,
     pub(super) dirty: RwSignal<bool>,
     /// 下書きを書くには大きすぎる文書。
@@ -48,6 +75,7 @@ impl Tab {
     pub(super) fn new() -> Tab {
         Tab {
             id: RwSignal::new(next_id()),
+            untitled_num: RwSignal::new(Some(1)),
             path: RwSignal::new(None),
             dirty: RwSignal::new(false),
             large: RwSignal::new(false),
@@ -93,7 +121,14 @@ impl Tab {
             .get()
             .as_deref()
             .and_then(|path| path.rsplit(['/', '\\']).next().map(str::to_string))
-            .unwrap_or_else(|| format!("{UNTITLED}.txt"))
+            .unwrap_or_else(|| {
+                let num = self.untitled_num.get().unwrap_or(1);
+                if num <= 1 {
+                    UNTITLED.to_string()
+                } else {
+                    format!("{UNTITLED} {num}")
+                }
+            })
     }
 
     pub(super) fn language_name(&self) -> String {
@@ -190,6 +225,8 @@ pub(super) struct Shell {
     pub(super) split_ratio: RwSignal<f64>,
     /// 分割線のドラッグ中フラグ。
     pub(super) resizing_split: RwSignal<bool>,
+    /// セッション復元完了フラグ（初期化中の誤上書きを防止）。
+    pub(super) restored: RwSignal<bool>,
 }
 
 /// ドラッグ中のタブ状態。
@@ -229,8 +266,37 @@ impl Shell {
         self.find_focus.set(Some(field));
     }
 
+    pub(super) fn next_untitled_num(&self) -> usize {
+        let used_numbers: std::collections::HashSet<usize> = self.panes.with_untracked(|panes| {
+            panes
+                .iter()
+                .flat_map(|p| {
+                    p.tabs.with_untracked(|tabs| {
+                        tabs.iter()
+                            .filter_map(|t| {
+                                if t.path.get_untracked().is_none() {
+                                    t.untitled_num.get_untracked()
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect()
+        });
+
+        let mut num = 1;
+        while used_numbers.contains(&num) {
+            num += 1;
+        }
+        num
+    }
+
     pub(super) fn new_tab(&self) -> Tab {
         let tab = self.root.with_value(|owner| owner.with(Tab::new));
+        let num = self.next_untitled_num();
+        tab.untitled_num.set(Some(num));
         tab.assign_document();
         tab
     }
@@ -274,6 +340,7 @@ impl Shell {
 
     /// ウィンドウを閉じると作業が失われるかどうかをネイティブ側に伝えます。
     pub(super) fn sync_dirty(&self) {
+        drafts::flush();
         let any = self.panes.with_untracked(|panes| {
             panes.iter().any(|pane| {
                 pane.tabs
@@ -396,6 +463,7 @@ impl Shell {
         }
         drafts::touch(tab);
         self.refresh();
+        self.save_session();
     }
 
     /// ドキュメントがそのファイルと一致するようになったので、そのドラフトには復元するものは何もありません。
@@ -411,12 +479,14 @@ impl Shell {
         }
         self.sync_dirty();
         self.refresh();
+        self.save_session();
     }
 
     /// クリックされたペインに入力内容を送信します。
     pub(super) fn focus_on(&self, pane: Pane) {
         if let Some(index) = self.index_of(pane) {
             self.focused.set(index);
+            self.save_session();
         }
     }
 
@@ -447,6 +517,7 @@ impl Shell {
         }
         self.focused.set(index);
         self.refresh();
+        self.save_session();
     }
 
     /// 入力内容をペインに送信します。
@@ -457,6 +528,7 @@ impl Shell {
         self.focused.set(index);
         editor::focus_pane(pane.editor_pane());
         self.refresh();
+        self.save_session();
     }
 
     /// `pane` の `index` にあるタブを表示し、そのタブを画面上に駐車します。
@@ -472,6 +544,7 @@ impl Shell {
         pane.park();
         pane.current.set(index);
         self.show(pane, next);
+        self.save_session();
     }
 
     /// タブのドキュメントを `pane` の画面に置き、未保存のマークを保持します。
@@ -482,7 +555,7 @@ impl Shell {
         editor::set_doc_path(doc_id, path);
         editor::bind_doc(pane.editor_pane(), doc_id);
         tab.dirty.set(dirty);
-        if !dirty {
+        if self.restored.get_untracked() && !dirty {
             drafts::forget(tab);
         }
         self.sync_dirty();
@@ -502,6 +575,7 @@ impl Shell {
         pane.current
             .set(pane.tabs.with_untracked(|tabs| tabs.len() - 1));
         self.show(pane, tab);
+        self.save_session();
         tab
     }
 
@@ -560,6 +634,7 @@ impl Shell {
                 shell.sync_dirty();
                 shell.refresh();
                 editor::focus_pane(pane.editor_pane());
+                shell.save_session();
                 return;
             }
             pane.tabs.update(|tabs| {
@@ -578,6 +653,7 @@ impl Shell {
                 });
                 shell.sync_dirty();
             }
+            shell.save_session();
         });
     }
 
@@ -606,6 +682,7 @@ impl Shell {
         }
         self.sync_dirty();
         self.refresh();
+        self.save_session();
     }
 
     /// 指定したタブ以外のタブをすべて閉じます。
@@ -652,6 +729,7 @@ impl Shell {
             shell.show(pane, keep_tab);
             shell.sync_dirty();
             shell.refresh();
+            shell.save_session();
         });
     }
 
@@ -698,6 +776,7 @@ impl Shell {
             shell.show(pane, curr_tab);
             shell.sync_dirty();
             shell.refresh();
+            shell.save_session();
         });
     }
 
@@ -711,6 +790,7 @@ impl Shell {
         };
         let split_tab = Tab {
             id: src_tab.id,
+            untitled_num: src_tab.untitled_num,
             path: src_tab.path,
             dirty: src_tab.dirty,
             large: src_tab.large,
@@ -750,6 +830,7 @@ impl Shell {
         }
         self.sync_dirty();
         self.refresh();
+        self.save_session();
     }
 
     /// タブを並べ替えるか、別のペインへ移動します。
@@ -796,6 +877,7 @@ impl Shell {
             }) {
                 src_pane.current.set(new_curr);
             }
+            self.save_session();
         } else {
             // 分割ペイン間でのタブ移動
             let Some(tab) = src_pane
@@ -852,6 +934,7 @@ impl Shell {
             self.focus_on(dst_pane);
             self.sync_dirty();
             self.refresh();
+            self.save_session();
         }
     }
 
@@ -900,6 +983,7 @@ impl Shell {
         editor::focus_pane(staying.editor_pane());
         self.sync_dirty();
         self.refresh();
+        self.save_session();
     }
 
     pub(super) fn open(&self) {
@@ -908,6 +992,21 @@ impl Shell {
             let Some(path) = gui().pick_open_file().await.ok().flatten() else {
                 return;
             };
+            let pane = shell.pane_untracked();
+            // 同一ペイン内に既に開かれているか判定（同一ペインなら既存タブへ切り替え）
+            if let Some(existing_idx) = pane.tabs.with_untracked(|tabs| {
+                tabs.iter()
+                    .position(|t| t.path.with_untracked(|p| p.as_deref() == Some(&path)))
+            }) {
+                pane.current.set(existing_idx);
+                let tab = pane.tabs.with_untracked(|tabs| tabs[existing_idx]);
+                editor::bind_doc(pane.editor_pane(), tab.id.get_untracked());
+                editor::focus_pane(pane.editor_pane());
+                shell.refresh();
+                shell.save_session();
+                return;
+            }
+
             match framework::open_document(&path).await {
                 Ok(doc) => {
                     let pane = shell.pane_untracked();
@@ -927,9 +1026,11 @@ impl Shell {
                     editor::set_doc_path(doc_id, Some(path.clone()));
                     editor::set_doc_file_size(doc_id, Some(doc.bytes));
                     tab.path.set(Some(path));
+                    tab.untitled_num.set(None);
                     editor::redraw_all();
                     shell.status.set("開きました".into());
                     shell.mark_clean();
+                    shell.save_session();
                     // 行数はバックグラウンドで走査中。確定したら手元へ合わせる。
                     let handle = doc.handle;
                     spawn_local(async move {
@@ -1023,10 +1124,229 @@ impl Shell {
         };
         editor::set_doc_path(doc_id, path);
         editor::redraw_all();
+        self.save_session();
     }
 
     pub(super) fn tab_language_name(&self) -> String {
         self.tab().language_name()
+    }
+
+    /// ワークスペース状態（セッション）をディスクに保存します。
+    pub(super) fn save_session(&self) {
+        if !self.restored.get_untracked() {
+            return;
+        }
+        let split_ratio = self.split_ratio.get_untracked();
+        let focused_pane = self.focused.get_untracked();
+        let panes = self.panes.get_untracked();
+        let mut pane_states = Vec::new();
+
+        for pane in panes {
+            let current = pane.current.get_untracked();
+            let tabs = pane.tabs.get_untracked();
+            let mut tab_states = Vec::new();
+            for tab in tabs {
+                tab_states.push(TabState {
+                    id: tab.id.get_untracked(),
+                    untitled_num: tab.untitled_num.get_untracked(),
+                    path: tab.path.get_untracked(),
+                    syntax_override: tab.syntax_override.get_untracked(),
+                    dirty: tab.dirty.get_untracked(),
+                });
+            }
+            pane_states.push(PaneState {
+                current,
+                tabs: tab_states,
+            });
+        }
+
+        let state = SessionState {
+            split_ratio,
+            focused_pane,
+            panes: pane_states,
+        };
+
+        if let Ok(json) = serde_json::to_string(&state) {
+            spawn_local(async move {
+                framework::save_session_state(&json).await;
+            });
+        }
+    }
+
+    /// ワークスペース全体（ペイン構成・分割比率・開いていたタブ・ドラフト内容・シンタックス）を復元します。
+    pub(super) fn restore_workspace(
+        &self,
+        session_json: Option<String>,
+        drafts: Vec<framework::Draft>,
+    ) {
+        let draft_map: std::collections::HashMap<usize, framework::Draft> =
+            drafts.into_iter().map(|d| (d.id, d)).collect();
+
+        let session_state: Option<SessionState> = session_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
+
+        if let Some(session) = session_state {
+            if !session.panes.is_empty() {
+                self.split_ratio.set(session.split_ratio);
+                let highest_id = session
+                    .panes
+                    .iter()
+                    .flat_map(|p| p.tabs.iter().map(|t| t.id))
+                    .max()
+                    .unwrap_or(0);
+                let draft_highest = draft_map.keys().copied().max().unwrap_or(0);
+                NEXT_ID.set(NEXT_ID.get().max(highest_id.max(draft_highest) + 1));
+
+                let initial_pane = self.pane_untracked();
+                let mut created_panes = Vec::new();
+
+                for (p_idx, p_state) in session.panes.into_iter().enumerate() {
+                    let pane = if p_idx == 0 {
+                        initial_pane
+                    } else {
+                        let key = self.next_key.get_untracked();
+                        self.next_key.set(key + 1);
+                        let dummy_tab = self.new_tab();
+                        self.new_pane_with_tab(key, dummy_tab)
+                    };
+
+                    let mut pane_tabs = Vec::new();
+                    for t_state in p_state.tabs {
+                        let tab = self.root.with_value(|owner| owner.with(Tab::new));
+                        tab.id.set(t_state.id);
+                        tab.untitled_num.set(t_state.untitled_num);
+                        tab.path.set(t_state.path.clone());
+                        tab.syntax_override.set(t_state.syntax_override.clone());
+
+                        let doc_id = t_state.id;
+                        let syntax_path = if let Some(ref lang_name) = t_state.syntax_override {
+                            let ext = match lang_name.as_str() {
+                                "Rust" => "rs",
+                                "Kotlin" => "kt",
+                                "TypeScript" => "ts",
+                                "JavaScript" => "js",
+                                "Python" => "py",
+                                "TOML" => "toml",
+                                "JSON" => "json",
+                                "HTML" => "html",
+                                "CSS" => "css",
+                                "Markdown" => "md",
+                                "LaTeX" => "tex",
+                                _ => "txt",
+                            };
+                            Some(format!("virtual.{ext}"))
+                        } else {
+                            t_state.path.clone()
+                        };
+                        editor::set_doc_path(doc_id, syntax_path);
+
+                        if let Some(draft) = draft_map.get(&t_state.id) {
+                            tab.dirty.set(true);
+                            let doc = editor::get_or_create_doc(doc_id);
+                            doc.borrow_mut()
+                                .load(crate::format::document::read(&draft.contents));
+                            let tab_copy = tab;
+                            let draft_contents = draft.contents.clone();
+                            spawn_local(async move {
+                                if let Some(opened) = framework::create_document().await {
+                                    if tab_copy.doc.get_untracked().is_some() {
+                                        framework::close_document(opened.handle).await;
+                                    } else {
+                                        tab_copy.doc.set(Some(opened.handle));
+                                        tab_copy.encoding.set(opened.encoding);
+                                        tab_copy.line_ending.set(opened.line_ending);
+                                        let lines: Vec<String> =
+                                            draft_contents.lines().map(String::from).collect();
+                                        let _ = framework::replace_lines(
+                                            opened.handle,
+                                            0,
+                                            1,
+                                            &lines,
+                                            0,
+                                            "",
+                                            "",
+                                        )
+                                        .await;
+                                    }
+                                }
+                            });
+                        } else if let Some(ref path) = t_state.path {
+                            tab.dirty.set(false);
+                            let p = path.clone();
+                            let tab_copy = tab;
+                            let shell_copy = *self;
+                            spawn_local(async move {
+                                if let Ok(doc) = framework::open_document(&p).await {
+                                    tab_copy.doc.set(Some(doc.handle));
+                                    tab_copy.large.set(doc.bytes > LARGE_BYTES);
+                                    tab_copy.bytes.set(doc.bytes);
+                                    tab_copy.encoding.set(doc.encoding);
+                                    tab_copy.line_ending.set(doc.line_ending);
+                                    editor::set_doc_file_size(doc_id, Some(doc.bytes));
+                                    let doc_model = editor::get_or_create_doc(doc_id);
+                                    doc_model.borrow_mut().load_pending(doc.line_count);
+                                    editor::redraw_doc(doc_id, None);
+                                    let handle = doc.handle;
+                                    spawn_local(async move {
+                                        if let Ok(count) = framework::finish_document(handle).await
+                                        {
+                                            shell_copy.document_scanned(handle, count);
+                                        }
+                                    });
+                                }
+                            });
+                        } else {
+                            tab.dirty.set(false);
+                            tab.assign_document();
+                        }
+                        pane_tabs.push(tab);
+                    }
+
+                    if pane_tabs.is_empty() {
+                        let default_tab = self.new_tab();
+                        pane_tabs.push(default_tab);
+                    }
+
+                    pane.tabs.set(pane_tabs.clone());
+                    let curr = p_state.current.min(pane_tabs.len() - 1);
+                    pane.current.set(curr);
+                    let active_tab = pane_tabs[curr];
+                    if let Some(ep) = pane.editor.get_value() {
+                        editor::bind_doc(ep, active_tab.id.get_untracked());
+                    }
+
+                    created_panes.push(pane);
+                }
+
+                self.panes.set(created_panes);
+                let focused = session
+                    .focused_pane
+                    .min(self.panes.with_untracked(|p| p.len() - 1));
+                self.focused.set(focused);
+                if let Some(focused_pane) = self.panes.with_untracked(|p| p.get(focused).copied()) {
+                    if let Some(ep) = focused_pane.editor.get_value() {
+                        editor::focus_pane(ep);
+                    }
+                }
+                editor::redraw_all();
+                self.restored.set(true);
+                self.sync_dirty();
+                self.refresh();
+                self.save_session();
+                self.status.set("前回の作業状態を復元しました".into());
+                return;
+            }
+        }
+
+        if !draft_map.is_empty() {
+            let drafts_vec: Vec<framework::Draft> = draft_map.into_values().collect();
+            self.restore_drafts(drafts_vec);
+            return;
+        }
+
+        self.restored.set(true);
+        self.save_session();
     }
 
     /// アプリケーションが最後に停止したときに画面に表示されていたものを開きます。ドラフトは未保存のタブとして返され、番号が保持されるため、2 番目のストップで同じドラフトが上書きされます。
@@ -1037,17 +1357,50 @@ impl Shell {
         let highest = drafts.iter().map(|draft| draft.id).max().unwrap_or(0);
         NEXT_ID.set(NEXT_ID.get().max(highest + 1));
         let pane = self.pane_untracked();
-        for draft in drafts {
-            let tab = self.add_tab(pane);
+        let mut tabs = Vec::new();
+        for (i, draft) in drafts.into_iter().enumerate() {
+            let tab = self.root.with_value(|owner| owner.with(Tab::new));
             tab.id.set(draft.id);
-            editor::set_doc_path(draft.id, draft.path.clone());
-            editor::load(&draft.contents);
-            tab.path.set(draft.path);
+            if draft.path.is_none() {
+                tab.untitled_num.set(Some(i + 1));
+            } else {
+                tab.untitled_num.set(None);
+            }
+            tab.path.set(draft.path.clone());
             tab.dirty.set(true);
+            editor::set_doc_path(draft.id, draft.path.clone());
+            let doc = editor::get_or_create_doc(draft.id);
+            doc.borrow_mut()
+                .load(crate::format::document::read(&draft.contents));
+
+            let tab_copy = tab;
+            let draft_contents = draft.contents.clone();
+            spawn_local(async move {
+                if let Some(opened) = framework::create_document().await {
+                    if tab_copy.doc.get_untracked().is_some() {
+                        framework::close_document(opened.handle).await;
+                    } else {
+                        tab_copy.doc.set(Some(opened.handle));
+                        tab_copy.encoding.set(opened.encoding);
+                        tab_copy.line_ending.set(opened.line_ending);
+                        let lines: Vec<String> = draft_contents.lines().map(String::from).collect();
+                        let _ =
+                            framework::replace_lines(opened.handle, 0, 1, &lines, 0, "", "").await;
+                    }
+                }
+            });
+            tabs.push(tab);
+        }
+        if !tabs.is_empty() {
+            pane.tabs.set(tabs.clone());
+            pane.current.set(0);
+            editor::bind_doc(pane.editor_pane(), tabs[0].id.get_untracked());
         }
         editor::redraw_all();
+        self.restored.set(true);
         self.sync_dirty();
         self.refresh();
+        self.save_session();
         self.status.set("前回の編集内容を復元しました".into());
     }
 

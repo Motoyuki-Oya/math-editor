@@ -301,6 +301,7 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
             Ok(()) => {
                 editor::set_doc_path(tab.id.get_untracked(), Some(path.clone()));
                 tab.path.set(Some(path));
+                tab.untitled_num.set(None);
                 shell.status.set("保存しました".into());
                 shell.mark_clean_tab(tab);
             }

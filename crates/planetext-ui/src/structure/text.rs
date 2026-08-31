@@ -328,6 +328,7 @@ impl Text {
 
     /// 文書全体を 1 つの入れ替えとして控える。読み込んだ内容を、1 行の空文書
     /// しか持っていない本体へまるごと届けるときに使う。
+    #[allow(dead_code)]
     pub fn mark_all_changed(&mut self) {
         self.changes = vec![LineChange {
             from: 0,
