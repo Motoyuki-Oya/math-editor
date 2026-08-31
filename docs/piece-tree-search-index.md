@@ -220,17 +220,22 @@ struct OperationLog {
 }
 
 struct Operation {
-    pos: ByteIndex,
+    base_revision: Revision,
+    pos: ByteIndex,        // base_revision 時点の文書座標
     delete_len: usize,
     delete_text: BufferRef,
     insert_text: BufferRef,
 }
 ```
 
+- 各操作は、その操作を生成した時点の `base_revision` と、その時点の文書座標を持つ
+- 操作を適用すると revision が進む
+- 古い revision を基準にした操作を適用する場合は、操作ログで現在座標へ写像してから適用する
 - 追記専用
 - Undo: `head -= 1`
 - Redo: `head += 1`
 - 新しい編集: `ops.truncate(head)` して追加、`head += 1`
+- Undo/Redo は操作ログの適用範囲を変更し、ピースツリーと検索差分を同じ範囲から再構成する
 
 ### EditBuffer と DeleteBuffer
 
