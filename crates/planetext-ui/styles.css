@@ -1105,6 +1105,7 @@ body {
   width: 0.8em;
   height: 100%;
   overflow: visible;
+  shape-rendering: geometricPrecision;
 }
 
 .mn-sqrt-body {
@@ -1146,6 +1147,7 @@ body {
   width: 0.36em;
   height: 100%;
   overflow: visible;
+  shape-rendering: geometricPrecision;
 }
 
 .mn-delim-open {

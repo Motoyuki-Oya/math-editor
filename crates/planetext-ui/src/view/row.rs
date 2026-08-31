@@ -682,9 +682,7 @@ impl<'a> Renderer<'a> {
         shape.set_attribute("stroke", "currentColor").ok();
         shape.set_attribute("stroke-width", "1.4").ok();
         shape.set_attribute("stroke-linecap", "round").ok();
-        shape
-            .set_attribute("vector-effect", "non-scaling-stroke")
-            .ok();
+        shape.set_attribute("stroke-linejoin", "round").ok();
         svg.append_child(&shape).ok();
         svg
     }
