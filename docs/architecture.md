@@ -239,6 +239,9 @@ tail を読めることを常に保証する。mmap は同じ読み出し界面�
 「元ファイルのバイト範囲」か「編集バッファ」を参照する。中身は必要時に読み出す
 (遅延読込)。行位置の解決と編集を O(log ピース数) にする。
 
+文書エンジン内部のモジュール責務と、Phase 4 以降の Document Model・Slice Model・View
+からの利用関係は [文書エンジンのモジュール境界](document-engine-modules.md) に定める。
+
 ```mermaid
 flowchart TB
     Tree[ピースツリー<br/>行数・バイト長のみ]
