@@ -282,13 +282,17 @@ impl Document {
     /// 置き換えの本体。履歴には触らず、逆操作を返す。取り除く行の中身は
     /// ここでディスクから控える（元に戻すために要る）。
     fn splice(&mut self, from: usize, to: usize, lines: Vec<String>) -> Result<Edit, String> {
-        let removed = self.read(from, to - from)?;
+        let removed_count = to - from;
+        let removed = self.read(from, removed_count)?;
+        if removed.len() != removed_count {
+            return Err("置き換える範囲が大きすぎます".to_string());
+        }
         let a = self.split(from);
         let b = self.split(to);
         let inserted = lines.len();
         let fresh = (!lines.is_empty()).then(|| Piece::Fresh(EditBuffer::new(lines)));
         self.pieces.splice(a..b, fresh);
-        self.count = self.count - removed.len() + inserted;
+        self.count = self.count - removed_count + inserted;
         if self.count == 0 {
             // 文書は少なくとも 1 行。frontend のモデルも空文書を 1 行と数える。
             self.pieces

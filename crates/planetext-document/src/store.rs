@@ -433,6 +433,29 @@ mod tests {
         println!("estimate ({estimate} matches): {:?}", start.elapsed());
     }
 
+    #[test]
+    fn oversized_delete_is_rejected_without_mutating_the_document() {
+        let mut doc = Document::empty();
+        let line = "a".repeat(5 * 1024 * 1024);
+        doc.replace(
+            0,
+            1,
+            vec![line.clone(), line.clone(), line.clone(), line.clone(), line],
+            1,
+            "before",
+            "after",
+        )
+        .unwrap();
+        let undo_len = doc.log.undo.len();
+
+        assert!(doc
+            .replace(0, 5, Vec::new(), 2, "before delete", "after delete")
+            .is_err());
+        assert_eq!(doc.line_count(), 5);
+        assert_eq!(doc.read(4, 1).unwrap().len(), 1);
+        assert_eq!(doc.log.undo.len(), undo_len);
+    }
+
     /// 巨大な行を含むファイルで MAX_READ_BYTES ガードが正しく働き、
     /// 1回の read で 20MB を超えずに安全に打ち切られることを検証する。
     #[test]
