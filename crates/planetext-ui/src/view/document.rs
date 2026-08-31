@@ -643,6 +643,23 @@ impl View {
         self.place_box(caret.at.line, &path, index)
     }
 
+    pub fn visual_neighbor(&self, caret: &Caret<'_>, right: bool) -> Option<Hit> {
+        let (path, index) = caret.place();
+        let row = self.row_element(caret.at.line, &path)?;
+        let index = measure::visual_neighbor(&row, index, right)?;
+        match path.first() {
+            None => Some(Hit::Text(Pos::new(caret.at.line, index))),
+            Some((col, _)) => Some(Hit::Inside(
+                Pos::new(caret.at.line, *col),
+                Cursor {
+                    path,
+                    index,
+                    anchor: index,
+                },
+            )),
+        }
+    }
+
     /// スクロールしてキャレットが見えるようにし、入力要素がキャレットに従うことができるように**文書内の**場所を報告します (ここに IME 候補が表示されます)。画面ではなくドキュメント: input 要素は行の間に配置され、行と一緒にスクロールします。ドキュメントの上部に残された input 要素は、入力されるとすぐにブラウザがスクロールして戻ってくるものです。
     pub fn reveal(&self, caret: &Caret<'_>) -> Option<Box2> {
         let rect = self.caret_box(caret)?;

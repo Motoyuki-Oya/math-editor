@@ -14,6 +14,7 @@ use crate::format::document;
 use crate::structure::ast::Cursor;
 use crate::structure::text::{Pos, Sel};
 use crate::view::document::{Caret, Overlay, View};
+use crate::view::measure::Hit;
 
 pub struct Session {
     /// このドキュメントが表示されているペインに名前を付けます。
@@ -768,6 +769,47 @@ pub fn scrolled(session: &Rc<RefCell<Session>>) {
     request_missing(session);
     let pane = session.borrow().pane;
     notify_redraw(pane);
+}
+
+pub(super) fn move_visual(
+    session: &Rc<RefCell<Session>>,
+    right: bool,
+    extend: bool,
+) -> Option<super::model::Did> {
+    let target = {
+        let borrowed = session.borrow();
+        if borrowed.cursors.len() != 1 {
+            return None;
+        }
+        let cursor = borrowed.primary_cursor();
+        if !extend
+            && (!cursor.sel.is_caret()
+                || cursor.inside.as_ref().is_some_and(|inside| !inside.is_caret()))
+        {
+            return None;
+        }
+        borrowed.view.visual_neighbor(&caret_of(&borrowed), right)?
+    };
+    let did = session.borrow_mut().edit(|editor| match target {
+        Hit::Text(at) => {
+            if extend {
+                let anchor = editor.primary().anchor;
+                editor.set_sels(vec![Sel { anchor, head: at }]);
+            } else {
+                editor.set_caret(at);
+            }
+            super::model::Did::Moved
+        }
+        Hit::Inside(at, cursor) => {
+            let moved = if extend {
+                editor.extend_nested(&cursor)
+            } else {
+                editor.enter_at(at, &cursor)
+            };
+            super::model::Did::moved(moved)
+        }
+    });
+    Some(did)
 }
 
 /// 1 つのキャレットで両方のケースを説明するため、描画に選択するモードはありません。

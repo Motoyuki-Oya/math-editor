@@ -228,6 +228,34 @@ fn boundaries(row: &Element) -> Vec<(usize, Box2)> {
     places
 }
 
+pub(super) fn visual_neighbor(row: &Element, index: usize, right: bool) -> Option<usize> {
+    visual_neighbor_in(boundaries(row), index, right)
+}
+
+fn visual_neighbor_in(
+    mut places: Vec<(usize, Box2)>,
+    index: usize,
+    right: bool,
+) -> Option<usize> {
+    let mut seen = std::collections::HashSet::new();
+    places.retain(|(index, _)| seen.insert(*index));
+    places.sort_by(|(_, a), (_, b)| {
+        a.top
+            .total_cmp(&b.top)
+            .then_with(|| a.left.total_cmp(&b.left))
+    });
+    let current = places.iter().position(|(candidate, _)| *candidate == index)?;
+    let next = if right {
+        current.checked_add(1)
+    } else {
+        current.checked_sub(1)
+    };
+    Some(
+        next.and_then(|next| places.get(next).map(|(index, _)| *index))
+            .unwrap_or(index),
+    )
+}
+
 /// `index` の項目の直前の場所。 `usize::MAX` は終了を意味します。
 pub(super) fn first_base_fragment(holder: &Element) -> Option<Box2> {
     let nodes = holder.query_selector_all(&format!("[{START_ATTR}]")).ok()?;
@@ -325,5 +353,39 @@ fn empty_run_box(run: &Element) -> Box2 {
         top: holder.top,
         width: rect.width,
         height: holder.height,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(index: usize, left: f64) -> (usize, Box2) {
+        (
+            index,
+            Box2 {
+                left,
+                top: 0.0,
+                width: 1.0,
+                height: 10.0,
+            },
+        )
+    }
+
+    #[test]
+    fn visual_neighbors_follow_mixed_bidi_positions() {
+        let places = vec![
+            at(0, 100.0),
+            at(1, 90.0),
+            at(2, 80.0),
+            at(3, 40.0),
+            at(4, 50.0),
+            at(5, 60.0),
+            at(6, 70.0),
+        ];
+        assert_eq!(visual_neighbor_in(places.clone(), 0, false), Some(1));
+        assert_eq!(visual_neighbor_in(places.clone(), 0, true), Some(0));
+        assert_eq!(visual_neighbor_in(places.clone(), 4, true), Some(5));
+        assert_eq!(visual_neighbor_in(places, 4, false), Some(3));
     }
 }

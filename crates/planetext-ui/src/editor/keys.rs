@@ -58,6 +58,19 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
             return;
         }
     }
+    if let Some(right) = match key.as_str() {
+        "ArrowLeft" => Some(false),
+        "ArrowRight" => Some(true),
+        _ => None,
+    } {
+        if let Some(did) = session::move_visual(session, right, shift) {
+            if did != Did::Nothing {
+                redraw(session);
+                event.prevent_default();
+                return;
+            }
+        }
+    }
     let did = session.borrow_mut().edit(|editor| {
         match (ctrl, key.as_str()) {
             (_, "ArrowLeft") => editor.move_h(false, shift),
