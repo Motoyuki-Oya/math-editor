@@ -1168,12 +1168,44 @@ pub fn stats() -> DocStats {
         None
     };
 
-    let selection = if !primary.is_caret() {
-        let start = primary.start();
-        let end = primary.end();
-        let lines = end.line.saturating_sub(start.line) + 1;
-        let chars = text.chars_between(start, end);
-        Some(SelectionStats { lines, chars })
+    let sels = borrowed.sels();
+    let has_selection = sels.iter().any(|s| !s.is_caret());
+
+    let selection = if has_selection {
+        let mut total_chars_without_nl = 0;
+        let mut total_newlines = 0;
+        let mut total_lines = 0;
+        let mut any_absent = false;
+
+        for sel in &sels {
+            if sel.is_caret() {
+                continue;
+            }
+            let start = sel.start();
+            let end = sel.end();
+            let lines = end.line.saturating_sub(start.line) + 1;
+            total_lines += lines;
+
+            if !any_absent {
+                if let Some((c, nl)) = text.chars_between(start, end) {
+                    total_chars_without_nl += c;
+                    total_newlines += nl;
+                } else {
+                    any_absent = true;
+                }
+            }
+        }
+
+        let chars = if any_absent {
+            None
+        } else {
+            Some((total_chars_without_nl, total_newlines))
+        };
+
+        Some(SelectionStats {
+            lines: total_lines,
+            chars,
+        })
     } else {
         None
     };
