@@ -399,6 +399,14 @@ fn Tabs(
             </button>
             <button
                 class="tab-palette"
+                title="設定"
+                on:mousedown=hold_focus
+                on:click=move |_| shell.preferences.update(|open| *open = !*open)
+            >
+                "⚙"
+            </button>
+            <button
+                class="tab-palette"
                 title="構造パレット (Ctrl+M)"
                 on:mousedown=hold_focus
                 on:click=move |_| pane.palette.update(|open| *open = !*open)

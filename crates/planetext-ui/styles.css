@@ -501,6 +501,8 @@ body {
   -moz-osx-font-smoothing: grayscale;
   font-size: var(--setting-font-size, 14px);
   font-family: var(--setting-font-text, var(--font-text));
+  font-variant-ligatures: contextual common-ligatures;
+  font-feature-settings: "liga" 1, "calt" 1;
 }
 
 /* 中身を横にだけスクロールする層。入力欄もこの中で行と一緒に動く。 */
@@ -671,6 +673,8 @@ body {
   white-space: pre-wrap;
   /* 必要な箇所で下に続く行: 長い単語は のままです長い単語。 */
   overflow-wrap: anywhere;
+  font-variant-ligatures: contextual common-ligatures;
+  font-feature-settings: "liga" 1, "calt" 1;
 }
 
 .mn-run:empty::before {
@@ -948,7 +952,6 @@ body {
 
 .mn-cursor-inactive {
   background: var(--muted);
-  animation: none;
   opacity: 0.7;
 }
 

@@ -707,23 +707,73 @@ pub fn find_url_on_line(line_text: &str, col: usize) -> Option<(usize, usize, St
     {
         let abs_start_byte = search_from + rel_start;
         let url_slice = &line_text[abs_start_byte..];
-        let url_chars: String = url_slice
+        let raw_url: String = url_slice
             .chars()
             .take_while(|&c| {
                 !c.is_whitespace()
                     && !matches!(
                         c,
-                        '"' | '\'' | '<' | '>' | '`' | '）' | '」' | '』' | '】' | '、' | '。'
+                        '"' | '\''
+                            | '<'
+                            | '>'
+                            | '`'
+                            | '['
+                            | ']'
+                            | '{'
+                            | '}'
+                            | '\\'
+                            | '^'
+                            | '）'
+                            | '（'
+                            | '「'
+                            | '」'
+                            | '『'
+                            | '』'
+                            | '【'
+                            | '】'
+                            | '、'
+                            | '。'
                     )
             })
             .collect();
-        let char_len = url_chars.chars().count();
+
+        let mut trimmed_url = raw_url.as_str();
+        while let Some(last_char) = trimmed_url.chars().last() {
+            if matches!(
+                last_char,
+                '.' | ',' | ':' | ';' | '!' | '?' | ')' | ']' | '}' | '>' | '"' | '\''
+            ) {
+                if last_char == ')'
+                    && trimmed_url.chars().filter(|&c| c == '(').count()
+                        >= trimmed_url.chars().filter(|&c| c == ')').count()
+                {
+                    break;
+                }
+                if last_char == ']'
+                    && trimmed_url.chars().filter(|&c| c == '[').count()
+                        >= trimmed_url.chars().filter(|&c| c == ']').count()
+                {
+                    break;
+                }
+                if last_char == '}'
+                    && trimmed_url.chars().filter(|&c| c == '{').count()
+                        >= trimmed_url.chars().filter(|&c| c == '}').count()
+                {
+                    break;
+                }
+                trimmed_url = &trimmed_url[..trimmed_url.len() - last_char.len_utf8()];
+            } else {
+                break;
+            }
+        }
+
+        let char_len = trimmed_url.chars().count();
         let abs_char_start = line_text[..abs_start_byte].chars().count();
         let abs_char_end = abs_char_start + char_len;
         if col >= abs_char_start && col <= abs_char_end && char_len > 7 {
-            return Some((abs_char_start, abs_char_end, url_chars));
+            return Some((abs_char_start, abs_char_end, trimmed_url.to_string()));
         }
-        search_from = abs_start_byte + url_chars.len().max(1);
+        search_from = abs_start_byte + raw_url.len().max(1);
     }
     None
 }
@@ -850,5 +900,48 @@ mod tests {
         assert!(tab_block_line(&block, 0));
         assert!(tab_block_line(&block, 1));
         assert!(!tab_block_line(&block, 2));
+    }
+
+    #[test]
+    fn test_find_url_on_line() {
+        // [http://www.google.co.jp]
+        let res = find_url_on_line("[http://www.google.co.jp]", 5);
+        assert_eq!(res, Some((1, 24, "http://www.google.co.jp".to_string())));
+
+        // (https://example.com/test)
+        let res = find_url_on_line("(https://example.com/test)", 5);
+        assert_eq!(res, Some((1, 25, "https://example.com/test".to_string())));
+
+        // Trailing period
+        let res = find_url_on_line("Visit https://example.com/.", 10);
+        assert_eq!(res, Some((6, 26, "https://example.com/".to_string())));
+
+        // URL with balanced parentheses
+        let res = find_url_on_line(
+            "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+            10,
+        );
+        assert_eq!(
+            res,
+            Some((
+                0,
+                57,
+                "https://en.wikipedia.org/wiki/Rust_(programming_language)".to_string()
+            ))
+        );
+
+        // URL enclosed in brackets with balanced parentheses
+        let res = find_url_on_line(
+            "[https://en.wikipedia.org/wiki/Rust_(programming_language)]",
+            10,
+        );
+        assert_eq!(
+            res,
+            Some((
+                1,
+                58,
+                "https://en.wikipedia.org/wiki/Rust_(programming_language)".to_string()
+            ))
+        );
     }
 }

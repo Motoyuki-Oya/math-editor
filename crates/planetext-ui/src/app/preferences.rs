@@ -63,12 +63,23 @@ pub(super) fn Preferences(open: RwSignal<bool>) -> impl IntoView {
                 <input
                     class="pref-font"
                     placeholder="既定"
+                    list="font-family-list"
                     prop:value=move || font_family.get()
                     on:change=move |ev| {
                         font_family.set(event_target_value(&ev));
                         changed();
                     }
                 />
+                <datalist id="font-family-list">
+                    <option value="Cascadia Code"/>
+                    <option value="Fira Code"/>
+                    <option value="JetBrains Mono"/>
+                    <option value="Consolas"/>
+                    <option value="Source Code Pro"/>
+                    <option value="BIZ UDゴシック"/>
+                    <option value="Meiryo"/>
+                    <option value="Segoe UI"/>
+                </datalist>
             </label>
             <label class="pref">
                 <input
