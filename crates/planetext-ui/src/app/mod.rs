@@ -302,11 +302,7 @@ pub fn App() -> impl IntoView {
                     if let Some(sel) = &stats.selection {
                         if let Some((chars_without_nl, newlines)) = sel.chars {
                             let total_sel = chars_without_nl + newlines;
-                            if newlines > 0 {
-                                format!("選択 {total_sel}文字 ({}行)", sel.lines)
-                            } else {
-                                format!("選択 {total_sel}文字")
-                            }
+                            format!("選択 {total_sel}文字")
                         } else {
                             format!("選択 {}行", sel.lines)
                         }
@@ -328,7 +324,7 @@ pub fn App() -> impl IntoView {
                     let stats = shell.stats.get();
                     if let Some((chars_without_nl, newlines)) = stats.caret_prefix {
                         let total_caret = chars_without_nl + newlines;
-                        format!("[ {} | {} ]  先頭から{total_caret} ( 📄{chars_without_nl} ⏎ {newlines} )", stats.caret_line, stats.caret_col)
+                        format!("先頭から{total_caret} ( 📄{chars_without_nl} ⏎ {newlines} )  [ {} | {} ]", stats.caret_line, stats.caret_col)
                     } else {
                         format!("[ {} | {} ]", stats.caret_line, stats.caret_col)
                     }
