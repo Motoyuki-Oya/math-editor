@@ -35,6 +35,7 @@ pub(super) struct Tab {
     pub(super) dirty: RwSignal<bool>,
     /// 下書きを書くには大きすぎる文書。
     pub(super) large: RwSignal<bool>,
+    pub(super) bytes: RwSignal<usize>,
     /// このタブの文書の本体を指す、ネイティブ側ストアの取っ手。
     /// 新しいタブでは作成が非同期に届くまで `None`。
     pub(super) doc: RwSignal<Option<u64>>,
@@ -50,6 +51,7 @@ impl Tab {
             path: RwSignal::new(None),
             dirty: RwSignal::new(false),
             large: RwSignal::new(false),
+            bytes: RwSignal::new(0),
             doc: RwSignal::new(None),
             encoding: RwSignal::new("UTF-8".into()),
             line_ending: RwSignal::new(if cfg!(windows) {
@@ -176,7 +178,7 @@ pub(super) struct Shell {
     pub(super) focused: RwSignal<usize>,
     pub(super) next_key: RwSignal<usize>,
     pub(super) status: RwSignal<String>,
-    pub(super) stats: RwSignal<(usize, usize)>,
+    pub(super) stats: RwSignal<editor::DocStats>,
     pub(super) searching: RwSignal<bool>,
     /// 設定が画面上に表示されるかどうか。
     pub(super) preferences: RwSignal<bool>,
@@ -712,6 +714,7 @@ impl Shell {
             path: src_tab.path,
             dirty: src_tab.dirty,
             large: src_tab.large,
+            bytes: src_tab.bytes,
             doc: src_tab.doc,
             encoding: src_tab.encoding,
             line_ending: src_tab.line_ending,
@@ -914,6 +917,7 @@ impl Shell {
                     tab.release_document();
                     tab.doc.set(Some(doc.handle));
                     tab.large.set(doc.bytes > LARGE_BYTES);
+                    tab.bytes.set(doc.bytes);
                     tab.encoding.set(doc.encoding);
                     tab.line_ending.set(doc.line_ending);
                     // 行は見えた場所から取り寄せられる。最初の描き直しが
@@ -921,6 +925,7 @@ impl Shell {
                     editor::load_pending(doc.line_count);
                     let doc_id = tab.id.get_untracked();
                     editor::set_doc_path(doc_id, Some(path.clone()));
+                    editor::set_doc_file_size(doc_id, Some(doc.bytes));
                     tab.path.set(Some(path));
                     editor::redraw_all();
                     shell.status.set("開きました".into());

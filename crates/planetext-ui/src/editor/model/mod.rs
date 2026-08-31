@@ -42,6 +42,7 @@ pub struct Document {
     pub(crate) text: Text,
     pub(crate) recorder: Recorder,
     pub(crate) modified_lines: std::collections::BTreeSet<usize>,
+    pub(crate) file_bytes: Option<usize>,
 }
 
 impl Document {
@@ -52,6 +53,15 @@ impl Document {
     #[allow(dead_code)]
     pub fn text_mut(&mut self) -> &mut Text {
         &mut self.text
+    }
+
+    #[allow(dead_code)]
+    pub fn file_bytes(&self) -> Option<usize> {
+        self.file_bytes
+    }
+
+    pub fn set_file_bytes(&mut self, bytes: Option<usize>) {
+        self.file_bytes = bytes;
     }
 
     pub fn modified_lines(&self) -> Vec<usize> {
