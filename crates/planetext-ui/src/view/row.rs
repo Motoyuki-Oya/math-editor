@@ -207,6 +207,9 @@ impl<'a> Renderer<'a> {
         let nested = !path.is_empty();
         let container = self.el("span", ROW_CLASS);
         container.set_attribute(PATH_ATTR, &encode_path(path)).ok();
+        if nested {
+            container.set_attribute("dir", "auto").ok();
+        }
         if cells.is_empty() {
             container.append_child(&self.empty(nested)).ok();
         }
@@ -391,9 +394,7 @@ impl<'a> Renderer<'a> {
                     .ok();
                 frac.append_child(&num).ok();
                 match between {
-                    Between::Rule => frac
-                        .append_child(&self.el("span", "mn-frac-rule"))
-                        .ok(),
+                    Between::Rule => frac.append_child(&self.el("span", "mn-frac-rule")).ok(),
                     Between::Arrow(arrow) => frac.append_child(&self.arrow(*arrow)).ok(),
                     Between::Nothing => None,
                 };
@@ -652,7 +653,8 @@ impl<'a> Renderer<'a> {
             line.set_attribute("stroke", "currentColor").ok();
             line.set_attribute("stroke-width", "1").ok();
             line.set_attribute("stroke-linecap", "round").ok();
-            line.set_attribute("vector-effect", "non-scaling-stroke").ok();
+            line.set_attribute("vector-effect", "non-scaling-stroke")
+                .ok();
             svg.append_child(&line).ok();
         }
         svg
@@ -660,13 +662,10 @@ impl<'a> Renderer<'a> {
 
     fn delimiter(&self, delim: &Delim, open: bool) -> Element {
         let (view_box, path) = match (delim, open) {
-            (Delim::Paren, true) => ("0 0 12 100", "M9 2 C3 26 3 74 9 98"),
-            (Delim::Paren, false) => ("0 0 12 100", "M3 2 C9 26 9 74 3 98"),
             (Delim::Bracket, true) => ("0 0 12 100", "M9 2 L3 2 L3 98 L9 98"),
             (Delim::Bracket, false) => ("0 0 12 100", "M3 2 L9 2 L9 98 L3 98"),
             (Delim::Brace, true) => ("0 0 14 100", "M11 2 C6 6 8 40 3 50 C8 60 6 94 11 98"),
             (Delim::Brace, false) => ("0 0 14 100", "M3 2 C8 6 6 40 11 50 C6 60 8 94 3 98"),
-            (Delim::Bar, _) => ("0 0 8 100", "M4 2 L4 98"),
         };
         let side = if open {
             "mn-delim-open"

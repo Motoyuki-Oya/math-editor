@@ -13,29 +13,15 @@ pub fn is_arrow(c: char) -> bool {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Delim {
-    Paren,
     Bracket,
     Brace,
-    Bar,
 }
 
 impl Delim {
     pub fn pair(&self) -> (char, char) {
         match self {
-            Delim::Paren => ('(', ')'),
             Delim::Bracket => ('[', ']'),
             Delim::Brace => ('{', '}'),
-            Delim::Bar => ('|', '|'),
-        }
-    }
-
-    pub fn from_open(c: char) -> Option<Delim> {
-        match c {
-            '(' => Some(Delim::Paren),
-            '[' => Some(Delim::Bracket),
-            '{' => Some(Delim::Brace),
-            '|' => Some(Delim::Bar),
-            _ => None,
         }
     }
 }

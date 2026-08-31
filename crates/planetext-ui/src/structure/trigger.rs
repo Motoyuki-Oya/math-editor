@@ -45,11 +45,15 @@ fn trailing_typed(row: &[Node], index: usize) -> Option<(usize, Conversion)> {
             },
         ));
     }
-    let node = match trigger {
-        // `^` `_` は直前の文字を構造へ移さない。トリガー文字だけを空のスロットに替える。
-        '^' => Node::sup(Row::new()),
-        '_' => Node::sub(Row::new()),
-        _ => return None,
+    if !matches!(trigger, '^' | '_') {
+        return None;
+    }
+    preceding(row, index - 1)?;
+    // `^` `_` は直前の文字を構造へ移さない。トリガー文字だけを空のスロットに替える。
+    let node = if trigger == '^' {
+        Node::sup(Row::new())
+    } else {
+        Node::sub(Row::new())
     };
     let enter = first_entry(&node);
     Some((
@@ -71,8 +75,7 @@ fn preceding(row: &[Node], before: usize) -> Option<(usize, Row)> {
     }
     let start = before.checked_sub(1)?;
     let node = row.get(start)?;
-    (!matches!(node.kind, NodeKind::Char(_) | NodeKind::Tab))
-        .then(|| (start, vec![node.clone()]))
+    (!matches!(node.kind, NodeKind::Char(_) | NodeKind::Tab)).then(|| (start, vec![node.clone()]))
 }
 
 /// `(x+1)/` の括弧は文字なので、スペースで分数にするときに中身を持ち上げる。
@@ -244,10 +247,7 @@ mod tests {
 
     #[test]
     fn slash_takes_the_preceding_structure_as_its_upper_row() {
-        let root = Node::sqrt(
-            None,
-            "x+1".chars().map(Node::char).collect(),
-        );
+        let root = Node::sqrt(None, "x+1".chars().map(Node::char).collect());
         let row = vec![root.clone(), Node::char('/')];
         let Some((consume, Conversion::Structure { nodes, enter })) =
             conversion_for(&row, row.len(), ' ')
@@ -265,6 +265,22 @@ mod tests {
     #[test]
     fn slash_after_punctuation_stays_text() {
         assert!(kind_of(' ', "+/").is_none());
+    }
+
+    #[test]
+    fn scripts_require_the_same_preceding_item_at_every_depth() {
+        assert!(kind_of(' ', "^").is_none());
+        assert!(kind_of(' ', "_").is_none());
+        assert!(kind_of(' ', "+^").is_none());
+        assert_eq!(kind_of(' ', "x^"), Some("sup".into()));
+        assert_eq!(kind_of(' ', "日本_"), Some("sub".into()));
+
+        let root = Node::sqrt(None, vec![Node::char('x')]);
+        let row = vec![root, Node::char('^')];
+        assert!(matches!(
+            conversion_for(&row, row.len(), ' '),
+            Some((1, Conversion::Structure { .. }))
+        ));
     }
 
     #[test]

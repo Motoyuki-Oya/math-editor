@@ -79,7 +79,7 @@ fn node(node: &Node) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::structure::ast::{Delim, MatrixKind};
+    use crate::structure::ast::MatrixKind;
 
     fn stack(above: Row, below: Row) -> Node {
         Node::stack(above, below, Between::Rule)
@@ -113,12 +113,6 @@ mod tests {
             vec![vec![chars("a"), chars("b")], vec![chars("c"), chars("d")]],
         );
         assert_eq!(row(&[node]), "[a, b; c, d]");
-    }
-
-    #[test]
-    fn a_group_keeps_its_own_brackets() {
-        let node = Node::group(Delim::Paren, chars("x"));
-        assert_eq!(row(&[node]), "(x)");
     }
 
     /// 列の区切り文字はタブであり、他の場所でも同様です。

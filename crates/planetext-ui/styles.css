@@ -629,8 +629,11 @@ body {
 }
 
 .mn-content.mn-nowrap {
-  grid-template-columns: var(--setting-gutter, 0px) max-content;
+  grid-template-columns:
+    var(--setting-gutter, 0px)
+    minmax(calc(100% - var(--setting-gutter, 0px)), max-content);
   width: max-content;
+  min-width: 100%;
   max-width: none;
   overflow: visible;
 }
@@ -662,6 +665,7 @@ body {
 .mn-line {
   position: relative;
   min-height: 1.35em;
+  text-align: start;
   white-space: pre-wrap;
   /* 必要な箇所で下に続く行: 長い単語は のままです長い単語。 */
   overflow-wrap: anywhere;
@@ -707,7 +711,7 @@ body {
   white-space: pre !important;
   overflow-wrap: normal !important;
   min-width: max-content;
-  width: max-content;
+  width: 100%;
 }
 
 /* スクロールバー上の Overview Ruler (変更行・検索ヒット等のマーカー) */
