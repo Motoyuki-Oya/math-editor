@@ -129,6 +129,34 @@ mod tests {
     }
 
     #[test]
+    fn multiple_sequential_edits_in_one_group_undo_and_redo_correctly() {
+        let mut doc = Document::empty();
+        // 文字入力のように同一グループで順次行が置き換わる
+        doc.replace(0, 1, vec!["a".into()], 1, "0.0-0.0", "0.1-0.1")
+            .unwrap();
+        doc.replace(0, 1, vec!["ab".into()], 1, "", "0.2-0.2")
+            .unwrap();
+        doc.replace(0, 1, vec!["abc".into()], 1, "", "0.3-0.3")
+            .unwrap();
+        assert_eq!(all(&mut doc), vec!["abc"]);
+
+        // Undo 実行: 最初の "" (空) に戻る
+        let undone = doc.undo().unwrap().unwrap();
+        assert_eq!(undone.state, "0.0-0.0");
+        assert_eq!(all(&mut doc), vec![""]);
+
+        // Redo 実行: 最終状態 "abc" に正しく戻る（中間の "a" や "ab" に巻き戻らない）
+        let redone = doc.redo().unwrap().unwrap();
+        assert_eq!(redone.state, "0.3-0.3");
+        assert_eq!(all(&mut doc), vec!["abc"]);
+
+        // 再度 Undo 実行: 再び空に戻る
+        let undone2 = doc.undo().unwrap().unwrap();
+        assert_eq!(undone2.state, "0.0-0.0");
+        assert_eq!(all(&mut doc), vec![""]);
+    }
+
+    #[test]
     fn out_of_range_replacements_are_rejected() {
         let mut doc = Document::empty();
         assert!(doc.replace(0, 2, vec![], 1, "", "").is_err());
