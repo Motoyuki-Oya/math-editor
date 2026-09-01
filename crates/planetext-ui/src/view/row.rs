@@ -240,7 +240,7 @@ impl<'a> Renderer<'a> {
             match cell {
                 Cell::Char('|') if is_table_row => {
                     self.flush(&container, &mut run);
-                    let element = self.span("mn-table-pipe", "|");
+                    let element = self.span("mn-table-pipe mn-run", "|");
                     element.set_attribute(START_ATTR, &index.to_string()).ok();
                     container.append_child(&element).ok();
                 }

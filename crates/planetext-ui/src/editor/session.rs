@@ -624,13 +624,21 @@ pub fn update_ghost_text(session: &mut Session) {
         }
     }
 
+    let start_scan = pos.line.saturating_sub(40);
+    let end_scan = (pos.line + 40).min(doc.text().line_count());
     let buffer_words = if prefix.is_some() {
-        Some(super::suggest::collect_buffer_words(doc.text(), 300))
+        Some(super::suggest::collect_buffer_words_range(
+            doc.text(),
+            start_scan..end_scan,
+        ))
     } else {
         None
     };
     let buffer_rubies = if has_kanji {
-        Some(super::suggest::collect_buffer_rubies(doc.text(), 300))
+        Some(super::suggest::collect_buffer_rubies_range(
+            doc.text(),
+            start_scan..end_scan,
+        ))
     } else {
         None
     };
@@ -709,15 +717,15 @@ pub fn redraw(session: &Rc<RefCell<Session>>) {
                 ghost: session.ghost.as_ref(),
             },
         );
-        if !session.composing {
-            if let Some(rect) = session.view.reveal(&caret) {
-                input::follow_caret(&session.textarea, rect);
-            }
+        if let Some(rect) = session.view.reveal(&caret) {
+            input::follow_caret(&session.textarea, rect);
         }
     }
     // Ctrl+End などで窓が移った場合も、移動後の drawn 範囲を検索する。
-    refresh_preview(&mut session.borrow_mut());
-    redraw_preview_overlay(session);
+    if !session.borrow().preview_query.is_empty() {
+        refresh_preview(&mut session.borrow_mut());
+        redraw_preview_overlay(session);
+    }
     request_missing(session);
     let pane = session.borrow().pane;
     notify_redraw(pane);

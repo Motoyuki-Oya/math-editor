@@ -11,6 +11,7 @@
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
 
+use wasm_bindgen::JsCast;
 use web_sys::{Document, Element, HtmlElement};
 
 use crate::structure::ast::{Cursor, Node, NodeKind};
@@ -248,6 +249,7 @@ impl View {
         };
         let finish = |window: &Range<usize>| {
             self.align_columns(text, window, is_markdown);
+            self.reveal_block(state.primary);
             self.rebuild_numbers(window, state.modified, state.show_numbers);
             if let Some(doc) = self.overlay.owner_document() {
                 self.draw_overlay(&doc, state);
@@ -435,7 +437,7 @@ impl View {
         // パイプの場合は、行頭の最初の | (column 0) は広げず、2個目以降 (column 1..columns) を右寄せで揃える
         let start_col = if is_pipe { 1 } else { 0 };
         let gap = if is_pipe {
-            6.0
+            12.0
         } else {
             crate::settings::column_gap()
         };
@@ -667,8 +669,38 @@ impl View {
         }
     }
 
+    /// テーブル（整列ブロック）内でキャレットが左右にはみ出た場合に自動横スクロールします。
+    fn reveal_block(&self, caret: &Caret<'_>) {
+        let (path, _) = caret.place();
+        let Some(row_el) = self.row_element(caret.at.line, &path) else {
+            return;
+        };
+        let Some(block_el) = row_el
+            .closest(".mn-aligned-block")
+            .ok()
+            .flatten()
+            .and_then(|el| el.dyn_into::<web_sys::HtmlElement>().ok())
+        else {
+            return;
+        };
+        let Some(caret_box) = self.caret_box(caret) else {
+            return;
+        };
+        let block_rect = block_el.get_bounding_client_rect();
+        let scroll_left = block_el.scroll_left() as f64;
+        let caret_left = caret_box.left - block_rect.left() + scroll_left;
+        let width = block_el.client_width() as f64;
+        let margin = 32.0;
+        if caret_left < scroll_left + margin {
+            block_el.set_scroll_left((caret_left - margin).max(0.0) as i32);
+        } else if caret_left > scroll_left + width - margin {
+            block_el.set_scroll_left((caret_left - width + margin) as i32);
+        }
+    }
+
     /// スクロールしてキャレットが見えるようにし、入力要素がキャレットに従うことができるように**文書内の**場所を報告します (ここに IME 候補が表示されます)。画面ではなくドキュメント: input 要素は行の間に配置され、行と一緒にスクロールします。ドキュメントの上部に残された input 要素は、入力されるとすぐにブラウザがスクロールして戻ってくるものです。
     pub fn reveal(&self, caret: &Caret<'_>) -> Option<Box2> {
+        self.reveal_block(caret);
         let rect = self.caret_box(caret)?;
         Some(self.viewport.reveal(&self.scroller, rect))
     }
@@ -707,23 +739,69 @@ pub fn find_url_on_line(line_text: &str, col: usize) -> Option<(usize, usize, St
     {
         let abs_start_byte = search_from + rel_start;
         let url_slice = &line_text[abs_start_byte..];
-        let url_chars: String = url_slice
+        let raw_url: String = url_slice
             .chars()
             .take_while(|&c| {
                 !c.is_whitespace()
                     && !matches!(
                         c,
-                        '"' | '\'' | '<' | '>' | '`' | '）' | '」' | '』' | '】' | '、' | '。'
+                        '"' | '\''
+                            | '<'
+                            | '>'
+                            | '`'
+                            | '\\'
+                            | '^'
+                            | '）'
+                            | '（'
+                            | '「'
+                            | '」'
+                            | '『'
+                            | '』'
+                            | '【'
+                            | '】'
+                            | '、'
+                            | '。'
                     )
             })
             .collect();
-        let char_len = url_chars.chars().count();
+
+        let mut trimmed_url = raw_url.as_str();
+        while let Some(last_char) = trimmed_url.chars().last() {
+            if matches!(
+                last_char,
+                '.' | ',' | ':' | ';' | '!' | '?' | ')' | ']' | '}' | '>' | '"' | '\''
+            ) {
+                if last_char == ')'
+                    && trimmed_url.chars().filter(|&c| c == '(').count()
+                        >= trimmed_url.chars().filter(|&c| c == ')').count()
+                {
+                    break;
+                }
+                if last_char == ']'
+                    && trimmed_url.chars().filter(|&c| c == '[').count()
+                        >= trimmed_url.chars().filter(|&c| c == ']').count()
+                {
+                    break;
+                }
+                if last_char == '}'
+                    && trimmed_url.chars().filter(|&c| c == '{').count()
+                        >= trimmed_url.chars().filter(|&c| c == '}').count()
+                {
+                    break;
+                }
+                trimmed_url = &trimmed_url[..trimmed_url.len() - last_char.len_utf8()];
+            } else {
+                break;
+            }
+        }
+
+        let char_len = trimmed_url.chars().count();
         let abs_char_start = line_text[..abs_start_byte].chars().count();
         let abs_char_end = abs_char_start + char_len;
         if col >= abs_char_start && col <= abs_char_end && char_len > 7 {
-            return Some((abs_char_start, abs_char_end, url_chars));
+            return Some((abs_char_start, abs_char_end, trimmed_url.to_string()));
         }
-        search_from = abs_start_byte + url_chars.len().max(1);
+        search_from = abs_start_byte + raw_url.len().max(1);
     }
     None
 }
@@ -850,5 +928,56 @@ mod tests {
         assert!(tab_block_line(&block, 0));
         assert!(tab_block_line(&block, 1));
         assert!(!tab_block_line(&block, 2));
+    }
+
+    #[test]
+    fn test_find_url_on_line() {
+        // [http://www.google.co.jp]
+        let res = find_url_on_line("[http://www.google.co.jp]", 5);
+        assert_eq!(res, Some((1, 24, "http://www.google.co.jp".to_string())));
+
+        // (https://example.com/test)
+        let res = find_url_on_line("(https://example.com/test)", 5);
+        assert_eq!(res, Some((1, 25, "https://example.com/test".to_string())));
+
+        // Trailing period
+        let res = find_url_on_line("Visit https://example.com/.", 10);
+        assert_eq!(res, Some((6, 26, "https://example.com/".to_string())));
+
+        // URL with balanced parentheses
+        let res = find_url_on_line(
+            "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+            10,
+        );
+        assert_eq!(
+            res,
+            Some((
+                0,
+                57,
+                "https://en.wikipedia.org/wiki/Rust_(programming_language)".to_string()
+            ))
+        );
+
+        // URL enclosed in brackets with balanced parentheses
+        let res = find_url_on_line(
+            "[https://en.wikipedia.org/wiki/Rust_(programming_language)]",
+            10,
+        );
+        assert_eq!(
+            res,
+            Some((
+                1,
+                58,
+                "https://en.wikipedia.org/wiki/Rust_(programming_language)".to_string()
+            ))
+        );
+
+        // IPv6 URL
+        let res = find_url_on_line("http://[::1]:8080/path", 5);
+        assert_eq!(res, Some((0, 22, "http://[::1]:8080/path".to_string())));
+
+        // IPv6 URL enclosed in markdown brackets
+        let res = find_url_on_line("[http://[::1]:8080/path]", 5);
+        assert_eq!(res, Some((1, 23, "http://[::1]:8080/path".to_string())));
     }
 }

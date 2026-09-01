@@ -8,4 +8,4 @@ pub mod document;
 mod heights;
 pub mod measure;
 pub mod row;
-mod viewport;
+pub(crate) mod viewport;

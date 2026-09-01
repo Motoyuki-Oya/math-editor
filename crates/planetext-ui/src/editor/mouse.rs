@@ -28,6 +28,8 @@ fn is_on_scrollbar(event: &MouseEvent) -> bool {
     if el.class_list().contains("mn-vscroll")
         || el.class_list().contains("mn-hscroll")
         || el.class_list().contains("mn-thumb-space")
+        || el.class_list().contains("mn-block-scroll-thumb")
+        || el.class_list().contains("mn-block-scroll-track")
     {
         return true;
     }
