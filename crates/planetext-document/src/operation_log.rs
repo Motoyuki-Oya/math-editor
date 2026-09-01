@@ -18,23 +18,39 @@ pub(crate) struct Step {
     pub(crate) after: String,
 }
 
-#[derive(Default)]
 pub(crate) struct OperationLog {
     pub(crate) undo: Vec<Step>,
     pub(crate) redo: Vec<Step>,
-    pub(crate) saved_undo_len: usize,
+    pub(crate) saved_undo_len: Option<usize>,
     pub(crate) delete_buffers: EditBuffers,
+}
+
+impl Default for OperationLog {
+    fn default() -> Self {
+        Self {
+            undo: Vec::new(),
+            redo: Vec::new(),
+            saved_undo_len: Some(0),
+            delete_buffers: EditBuffers::default(),
+        }
+    }
 }
 
 impl OperationLog {
     pub(crate) fn clear(&mut self) {
         self.undo.clear();
         self.redo.clear();
-        self.saved_undo_len = 0;
+        self.saved_undo_len = Some(0);
         self.delete_buffers = EditBuffers::default();
     }
+    pub(crate) fn mark_dirty_without_history(&mut self) {
+        self.saved_undo_len = None;
+    }
+    pub(crate) fn mark_saved(&mut self) {
+        self.saved_undo_len = Some(self.undo.len());
+    }
     pub(crate) fn is_clean(&self) -> bool {
-        self.undo.len() == self.saved_undo_len
+        self.saved_undo_len == Some(self.undo.len())
     }
     pub(crate) fn append_deleted(
         &mut self,

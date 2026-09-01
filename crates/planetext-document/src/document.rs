@@ -98,6 +98,32 @@ impl Document {
         }
     }
 
+    pub(crate) fn from_draft(lines: Vec<String>) -> Document {
+        let mut doc = Self::empty();
+        let mut lines: Vec<String> = lines
+            .into_iter()
+            .map(|line| line.trim_end_matches(['\r', '\n']).to_string())
+            .collect();
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+        let (range, newlines) = doc
+            .buffers
+            .append_lines(&lines, doc.encoding, doc.line_ending);
+        doc.pieces = PieceTree::new(vec![Piece::Edit {
+            from: range.from,
+            len: range.len,
+            newlines,
+            starts_newline: false,
+            ends_newline: false,
+            encoding: range.encoding,
+            line_ending: range.line_ending,
+        }]);
+        doc.count = lines.len();
+        doc.log.mark_dirty_without_history();
+        doc
+    }
+
     pub(crate) fn encoding(&self) -> FileEncoding {
         self.encoding
     }

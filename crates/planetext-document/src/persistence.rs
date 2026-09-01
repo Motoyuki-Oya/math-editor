@@ -151,7 +151,7 @@ impl Document {
             starts_newline: false,
             ends_newline: false,
         }]);
-        self.log.saved_undo_len = self.log.undo.len();
+        self.log.mark_saved();
         Ok(())
     }
 }

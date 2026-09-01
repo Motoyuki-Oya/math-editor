@@ -222,6 +222,15 @@ pub async fn create_document() -> Option<OpenedDocument> {
     serde_wasm_bindgen::from_value(value).ok()
 }
 
+pub async fn create_document_from_draft(lines: &[String]) -> Result<OpenedDocument, String> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        lines: &'a [String],
+    }
+    let value = call("create_document_from_draft", Args { lines }).await?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
+}
+
 pub async fn read_lines(handle: u64, from: usize, count: usize) -> Result<Vec<String>, String> {
     #[derive(Serialize)]
     struct Args {

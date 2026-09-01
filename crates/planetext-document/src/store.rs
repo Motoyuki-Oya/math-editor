@@ -300,6 +300,41 @@ mod tests {
     }
 
     #[test]
+    fn draft_construction_is_dirty_without_an_undo_step() {
+        let mut doc = Document::from_draft(vec!["draft one".into(), "draft two".into()]);
+
+        assert_eq!(all(&mut doc), vec!["draft one", "draft two"]);
+        assert!(!doc.is_clean());
+        assert!(doc.undo().unwrap().is_none());
+    }
+
+    #[test]
+    fn first_edit_after_draft_construction_undoes_to_the_dirty_draft() {
+        let mut doc = Document::from_draft(vec!["draft".into()]);
+
+        doc.replace(0, 1, vec!["edited".into()], 1, "before", "after")
+            .unwrap();
+        assert!(doc.undo().unwrap().is_some());
+
+        assert_eq!(all(&mut doc), vec!["draft"]);
+        assert!(!doc.is_clean());
+    }
+
+    #[test]
+    fn saving_a_constructed_draft_marks_it_clean() {
+        let mut doc = Document::from_draft(vec!["draft".into()]);
+        let path = std::env::temp_dir().join(format!(
+            "planetext-store-{}-save-constructed-draft.txt",
+            std::process::id()
+        ));
+
+        doc.save(path.to_str().unwrap()).unwrap();
+
+        assert!(doc.is_clean());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn a_new_edit_clears_the_redo_branch() {
         let mut doc = Document::empty();
         doc.replace(0, 1, vec!["b".into()], 1, "", "").unwrap();

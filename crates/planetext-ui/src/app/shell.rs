@@ -16,6 +16,12 @@ const UNTITLED: &str = "無題";
 /// 書き出すので、巨大なファイルでは一時停止のたびに数百 MB を書くことになる。
 const LARGE_BYTES: usize = 5_000_000;
 
+async fn create_document_from_draft(contents: String) -> Result<framework::OpenedDocument, String> {
+    let normalized = contents.replace("\r\n", "\n").replace('\r', "\n");
+    let lines: Vec<String> = normalized.split('\n').map(String::from).collect();
+    framework::create_document_from_draft(&lines).await
+}
+
 thread_local! {
     /// 次のタブに名前を付けます。タブの番号はそのドラフトの名前でもあるため、タブ自体よりも存続する必要があります。復元されたドラフトではその番号が保持されます。
     static NEXT_ID: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
@@ -1259,30 +1265,19 @@ impl Shell {
                             }
                             let tab_copy = tab;
                             let draft_contents = draft.contents.clone();
+                            let shell_copy = *self;
                             spawn_local(async move {
-                                if let Some(opened) = framework::create_document().await {
-                                    if tab_copy.doc.get_untracked().is_some() {
-                                        framework::close_document(opened.handle).await;
-                                    } else {
-                                        tab_copy.doc.set(Some(opened.handle));
-                                        tab_copy.encoding.set(opened.encoding);
-                                        tab_copy.line_ending.set(opened.line_ending);
-                                        let normalized = draft_contents
-                                            .replace("\r\n", "\n")
-                                            .replace('\r', "\n");
-                                        let lines: Vec<String> =
-                                            normalized.split('\n').map(String::from).collect();
-                                        let _ = framework::replace_lines(
-                                            opened.handle,
-                                            0,
-                                            1,
-                                            &lines,
-                                            0,
-                                            "",
-                                            "",
-                                        )
-                                        .await;
+                                match create_document_from_draft(draft_contents).await {
+                                    Ok(opened) => {
+                                        if tab_copy.doc.get_untracked().is_some() {
+                                            framework::close_document(opened.handle).await;
+                                        } else {
+                                            tab_copy.doc.set(Some(opened.handle));
+                                            tab_copy.encoding.set(opened.encoding);
+                                            tab_copy.line_ending.set(opened.line_ending);
+                                        }
                                     }
+                                    Err(error) => shell_copy.status.set(error),
                                 }
                             });
                         } else if let Some(ref path) = t_state.path {
@@ -1396,19 +1391,19 @@ impl Shell {
 
             let tab_copy = tab;
             let draft_contents = draft.contents.clone();
+            let shell_copy = *self;
             spawn_local(async move {
-                if let Some(opened) = framework::create_document().await {
-                    if tab_copy.doc.get_untracked().is_some() {
-                        framework::close_document(opened.handle).await;
-                    } else {
-                        tab_copy.doc.set(Some(opened.handle));
-                        tab_copy.encoding.set(opened.encoding);
-                        tab_copy.line_ending.set(opened.line_ending);
-                        let normalized = draft_contents.replace("\r\n", "\n").replace('\r', "\n");
-                        let lines: Vec<String> = normalized.split('\n').map(String::from).collect();
-                        let _ =
-                            framework::replace_lines(opened.handle, 0, 1, &lines, 0, "", "").await;
+                match create_document_from_draft(draft_contents).await {
+                    Ok(opened) => {
+                        if tab_copy.doc.get_untracked().is_some() {
+                            framework::close_document(opened.handle).await;
+                        } else {
+                            tab_copy.doc.set(Some(opened.handle));
+                            tab_copy.encoding.set(opened.encoding);
+                            tab_copy.line_ending.set(opened.line_ending);
+                        }
                     }
+                    Err(error) => shell_copy.status.set(error),
                 }
             });
             tabs.push(tab);
