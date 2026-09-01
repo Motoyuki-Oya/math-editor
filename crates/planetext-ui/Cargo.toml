@@ -46,6 +46,8 @@ features = [
   "PointerEvent",
   "Range",
   "Selection",
+  "Response",
+  "Storage",
   "Text",
   "Window",
 ]

@@ -66,7 +66,35 @@ pub(super) fn Preferences(open: RwSignal<bool>) -> impl IntoView {
                     class="pref-font"
                     prop:value=move || font_family.get()
                     on:change=move |ev| {
-                        font_family.set(event_target_value(&ev));
+                        let new_font = event_target_value(&ev);
+                        if let Some(url) = crate::font_loader::get_download_url(&new_font) {
+                            if !crate::font_loader::is_font_cached_or_local(&new_font) {
+                                let msg = format!(
+                                    "フォント「{}」がローカルに保存されていません。\nインターネットからダウンロードしてローカルに保存しますか？",
+                                    new_font
+                                );
+                                if let Some(window) = web_sys::window() {
+                                    let confirmed = window.confirm_with_message(&msg).unwrap_or(false);
+                                    if confirmed {
+                                        let f_name = new_font.clone();
+                                        let u = url.to_string();
+                                        font_family.set(new_font);
+                                        changed();
+                                        spawn_local(async move {
+                                            if let Ok(()) = crate::font_loader::download_and_save_font(&f_name, &u).await {
+                                                editor::redraw_all();
+                                            }
+                                        });
+                                        return;
+                                    } else {
+                                        let prev = font_family.get_untracked();
+                                        font_family.set(prev);
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        font_family.set(new_font);
                         changed();
                     }
                 >

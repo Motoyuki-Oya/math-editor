@@ -1,5 +1,6 @@
 mod app;
 mod editor;
+pub(crate) mod font_loader;
 mod format;
 mod framework;
 mod settings;

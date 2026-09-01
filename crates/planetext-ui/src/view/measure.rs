@@ -235,14 +235,19 @@ pub(super) fn visual_neighbor(row: &Element, index: usize, right: bool) -> Optio
 fn visual_neighbor_in(mut places: Vec<(usize, Box2)>, index: usize, right: bool) -> Option<usize> {
     let mut seen = std::collections::HashSet::new();
     places.retain(|(index, _)| seen.insert(*index));
+    let line_height = places
+        .iter()
+        .map(|(_, r)| r.height)
+        .fold(0.0, f64::max)
+        .max(8.0);
+    let bucket_size = (line_height * 0.5).max(4.0);
     places.sort_by(|(_, a), (_, b)| {
-        let line_diff = a.top - b.top;
-        let threshold = (a.height.max(b.height) * 0.5).max(4.0);
-        if line_diff.abs() > threshold {
-            a.top.total_cmp(&b.top)
-        } else {
-            a.left.total_cmp(&b.left)
-        }
+        let bucket_a = (a.top / bucket_size).round() as i64;
+        let bucket_b = (b.top / bucket_size).round() as i64;
+        bucket_a
+            .cmp(&bucket_b)
+            .then_with(|| a.left.total_cmp(&b.left))
+            .then_with(|| a.top.total_cmp(&b.top))
     });
     let current = places
         .iter()

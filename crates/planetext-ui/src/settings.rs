@@ -121,6 +121,7 @@ pub fn apply(settings: Settings) {
 
 /// 視覚的な設定はドキュメント ルートの CSS 変数として画面に到達するため、スタイルシートは見た目を決定する唯一の場所のままです。
 fn show(settings: &Settings) {
+    crate::font_loader::load_saved_fonts();
     let Some(root) = web_sys::window()
         .and_then(|window| window.document())
         .and_then(|document| document.document_element())
@@ -140,7 +141,14 @@ fn show(settings: &Settings) {
     } else {
         let trimmed = settings.font_family.trim();
         let family_val = if trimmed.contains(',') {
-            trimmed.to_string()
+            let parts: Vec<String> = trimmed
+                .split(',')
+                .map(|part| {
+                    let p = part.trim().trim_matches('"').trim_matches('\'');
+                    format!("\"{p}\"")
+                })
+                .collect();
+            format!("{}, monospace, var(--font-text)", parts.join(", "))
         } else {
             let font = trimmed.trim_matches('"').trim_matches('\'');
             format!("\"{font}\", monospace, var(--font-text)")
