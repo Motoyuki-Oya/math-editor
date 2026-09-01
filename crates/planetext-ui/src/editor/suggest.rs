@@ -92,11 +92,11 @@ pub fn extract_prefix(line_text: &str, col: usize) -> Option<String> {
     }
 }
 
-/// ドキュメントからプログラミング識別子（単語）を収集します。
-pub fn collect_buffer_words(text: &Text, max_lines_scan: usize) -> HashSet<String> {
+/// ドキュメントの指定範囲からプログラミング識別子（単語）を収集します。
+pub fn collect_buffer_words_range(text: &Text, range: std::ops::Range<usize>) -> HashSet<String> {
     let mut words = HashSet::new();
-    let count = text.line_count().min(max_lines_scan);
-    for line_idx in 0..count {
+    let end = range.end.min(text.line_count());
+    for line_idx in range.start..end {
         let row: Row = text.line(line_idx).to_vec();
         let plain_line = plain::row(&row);
         for part in plain_line.split(|c: char| !c.is_alphanumeric() && c != '_') {
@@ -106,6 +106,12 @@ pub fn collect_buffer_words(text: &Text, max_lines_scan: usize) -> HashSet<Strin
         }
     }
     words
+}
+
+/// ドキュメントからプログラミング識別子（単語）を収集します。
+#[allow(dead_code)]
+pub fn collect_buffer_words(text: &Text, max_lines_scan: usize) -> HashSet<String> {
+    collect_buffer_words_range(text, 0..max_lines_scan)
 }
 
 /// Markdown ドキュメントにおいて、指定行がコードブロック内（``` で囲まれた範囲）にあるか判定し、指定されている言語名を返します。
@@ -287,18 +293,27 @@ pub const COMMON_RUBY_DICT: &[(&str, &str)] = &[
     ("表示", "ひょうじ"),
 ];
 
-/// ドキュメントから既存のルビ定義（漢字 -> 読み）を収集します。
-pub fn collect_buffer_rubies(
+/// ドキュメントの指定範囲から既存のルビ定義（漢字 -> 読み）を収集します。
+pub fn collect_buffer_rubies_range(
     text: &Text,
-    max_lines: usize,
+    range: std::ops::Range<usize>,
 ) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
-    let count = text.line_count().min(max_lines);
-    for line_idx in 0..count {
+    let end = range.end.min(text.line_count());
+    for line_idx in range.start..end {
         let row = text.line(line_idx);
         collect_rubies_from_row(row, &mut map);
     }
     map
+}
+
+/// ドキュメントから既存のルビ定義（漢字 -> 読み）を収集します。
+#[allow(dead_code)]
+pub fn collect_buffer_rubies(
+    text: &Text,
+    max_lines: usize,
+) -> std::collections::HashMap<String, String> {
+    collect_buffer_rubies_range(text, 0..max_lines)
 }
 
 fn collect_rubies_from_row(

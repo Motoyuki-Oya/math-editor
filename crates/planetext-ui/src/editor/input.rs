@@ -42,6 +42,20 @@ pub(super) fn follow_caret(textarea: &HtmlTextAreaElement, rect: crate::view::me
     textarea.set_attribute("style", &style).ok();
 }
 
+#[inline]
+fn mark_typing(root: &web_sys::Element) {
+    if !root.class_list().contains("mn-typing") {
+        root.class_list().add_1("mn-typing").ok();
+    }
+}
+
+#[inline]
+fn clear_typing(root: &web_sys::Element) {
+    if root.class_list().contains("mn-typing") {
+        root.class_list().remove_1("mn-typing").ok();
+    }
+}
+
 /// エディターを使用可能にするイベントを結び付けます。
 pub fn install(session: &Rc<RefCell<Session>>) {
     let textarea = session.borrow().textarea.clone();
@@ -52,10 +66,12 @@ pub fn install(session: &Rc<RefCell<Session>>) {
         "keydown",
         session,
         |session, event: KeyboardEvent| {
+            mark_typing(&session.borrow().view.root);
             keys::on_keydown(session, event);
         },
     );
     on(&textarea, "input", session, |session, event: InputEvent| {
+        mark_typing(&session.borrow().view.root);
         commands::on_input(session, event);
     });
     on(
@@ -66,6 +82,7 @@ pub fn install(session: &Rc<RefCell<Session>>) {
             let mut borrowed = session.borrow_mut();
             borrowed.composing = true;
             borrowed.preedit.clear();
+            mark_typing(&borrowed.view.root);
             drop(borrowed);
             session::redraw(session);
         },
@@ -75,6 +92,7 @@ pub fn install(session: &Rc<RefCell<Session>>) {
         "compositionupdate",
         session,
         |session, event: CompositionEvent| {
+            mark_typing(&session.borrow().view.root);
             commands::update_composition(session, &event.data().unwrap_or_default());
         },
     );
@@ -114,9 +132,11 @@ pub fn install(session: &Rc<RefCell<Session>>) {
     );
 
     on(&root, "mousedown", session, |session, event: MouseEvent| {
+        clear_typing(&session.borrow().view.root);
         mouse::on_mousedown(session, event);
     });
     on(&root, "mousemove", session, |session, event: MouseEvent| {
+        clear_typing(&session.borrow().view.root);
         mouse::on_mousemove(session, event);
     });
     on(&root, "dblclick", session, |session, event: MouseEvent| {

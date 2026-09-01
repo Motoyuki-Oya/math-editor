@@ -235,23 +235,29 @@ pub(super) fn visual_neighbor(row: &Element, index: usize, right: bool) -> Optio
 fn visual_neighbor_in(mut places: Vec<(usize, Box2)>, index: usize, right: bool) -> Option<usize> {
     let mut seen = std::collections::HashSet::new();
     places.retain(|(index, _)| seen.insert(*index));
+    let line_height = places
+        .iter()
+        .map(|(_, r)| r.height)
+        .fold(0.0, f64::max)
+        .max(8.0);
+    let bucket_size = (line_height * 0.5).max(4.0);
     places.sort_by(|(_, a), (_, b)| {
-        a.top
-            .total_cmp(&b.top)
+        let bucket_a = (a.top / bucket_size).round() as i64;
+        let bucket_b = (b.top / bucket_size).round() as i64;
+        bucket_a
+            .cmp(&bucket_b)
             .then_with(|| a.left.total_cmp(&b.left))
+            .then_with(|| a.top.total_cmp(&b.top))
     });
     let current = places
         .iter()
         .position(|(candidate, _)| *candidate == index)?;
     let next = if right {
-        current.checked_add(1)
+        current.checked_add(1)?
     } else {
-        current.checked_sub(1)
+        current.checked_sub(1)?
     };
-    Some(
-        next.and_then(|next| places.get(next).map(|(index, _)| *index))
-            .unwrap_or(index),
-    )
+    places.get(next).map(|(index, _)| *index)
 }
 
 /// `index` の項目の直前の場所。 `usize::MAX` は終了を意味します。
@@ -382,7 +388,7 @@ mod tests {
             at(6, 70.0),
         ];
         assert_eq!(visual_neighbor_in(places.clone(), 0, false), Some(1));
-        assert_eq!(visual_neighbor_in(places.clone(), 0, true), Some(0));
+        assert_eq!(visual_neighbor_in(places.clone(), 0, true), None);
         assert_eq!(visual_neighbor_in(places.clone(), 4, true), Some(5));
         assert_eq!(visual_neighbor_in(places, 4, false), Some(3));
     }

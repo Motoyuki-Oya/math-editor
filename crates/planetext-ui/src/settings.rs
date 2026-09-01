@@ -27,12 +27,14 @@ pub struct Settings {
     pub global_shortcut: bool,
     /// 半角スペース、全角スペース、タブなどの空白文字を可視化するかどうか。
     pub show_whitespace: bool,
+    /// フォントの合字（リガチャー: -> や != 等）を有効にするかどうか。
+    pub font_ligatures: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            font_size: 15.0,
+            font_size: 14.0,
             font_family: String::new(),
             caret_blink: true,
             wrap: true,
@@ -41,6 +43,7 @@ impl Default for Settings {
             history_limit: 500,
             global_shortcut: true,
             show_whitespace: false,
+            font_ligatures: true,
         }
     }
 }
@@ -93,11 +96,11 @@ pub fn zoom_out() {
     }
 }
 
-/// フォントサイズを標準（15px）にリセットします。
+/// フォントサイズを標準（14px）にリセットします。
 #[allow(dead_code)]
 pub fn zoom_reset() {
     let mut s = current();
-    s.font_size = 15.0;
+    s.font_size = 14.0;
     apply(s);
     crate::editor::redraw_all();
 }
@@ -118,6 +121,7 @@ pub fn apply(settings: Settings) {
 
 /// 視覚的な設定はドキュメント ルートの CSS 変数として画面に到達するため、スタイルシートは見た目を決定する唯一の場所のままです。
 fn show(settings: &Settings) {
+    crate::font_loader::load_saved_fonts();
     let Some(root) = web_sys::window()
         .and_then(|window| window.document())
         .and_then(|document| document.document_element())
@@ -132,12 +136,24 @@ fn show(settings: &Settings) {
     style
         .set_property("--setting-font-size", &format!("{}px", settings.font_size))
         .ok();
-    if settings.font_family.is_empty() {
+    if settings.font_family.trim().is_empty() {
         style.remove_property("--setting-font-text").ok();
     } else {
-        style
-            .set_property("--setting-font-text", &settings.font_family)
-            .ok();
+        let trimmed = settings.font_family.trim();
+        let family_val = if trimmed.contains(',') {
+            let parts: Vec<String> = trimmed
+                .split(',')
+                .map(|part| {
+                    let p = part.trim().trim_matches('"').trim_matches('\'');
+                    format!("\"{p}\"")
+                })
+                .collect();
+            format!("{}, monospace, var(--font-text)", parts.join(", "))
+        } else {
+            let font = trimmed.trim_matches('"').trim_matches('\'');
+            format!("\"{font}\", monospace, var(--font-text)")
+        };
+        style.set_property("--setting-font-text", &family_val).ok();
     }
     style
         .set_property(
@@ -149,6 +165,19 @@ fn show(settings: &Settings) {
             },
         )
         .ok();
+    if settings.font_ligatures {
+        style
+            .set_property("--setting-font-ligatures", "contextual common-ligatures")
+            .ok();
+        style
+            .set_property("--setting-font-features", "\"calt\" 1, \"liga\" 1")
+            .ok();
+    } else {
+        style.set_property("--setting-font-ligatures", "none").ok();
+        style
+            .set_property("--setting-font-features", "\"calt\" 0, \"liga\" 0")
+            .ok();
+    }
     if settings.show_whitespace {
         root.class_list().add_1("mn-show-whitespace").ok();
     } else {
@@ -161,7 +190,7 @@ fn show(settings: &Settings) {
 /// ファイルに保存されている設定を書き込みます。1 行に 1 つの `name = value` で、これは TOML の小さなコーナーです。
 pub fn write(settings: &Settings) -> String {
     format!(
-        "font_size = {}\nfont_family = \"{}\"\ncaret_blink = {}\nwrap = {}\nline_numbers = {}\ncolumn_gap = {}\nhistory_limit = {}\nglobal_shortcut = {}\nshow_whitespace = {}\n",
+        "font_size = {}\nfont_family = \"{}\"\ncaret_blink = {}\nwrap = {}\nline_numbers = {}\ncolumn_gap = {}\nhistory_limit = {}\nglobal_shortcut = {}\nshow_whitespace = {}\nfont_ligatures = {}\n",
         settings.font_size,
         settings.font_family.replace('"', ""),
         settings.caret_blink,
@@ -171,6 +200,7 @@ pub fn write(settings: &Settings) -> String {
         settings.history_limit,
         settings.global_shortcut,
         settings.show_whitespace,
+        settings.font_ligatures,
     )
 }
 
@@ -227,6 +257,11 @@ pub fn read(text: &str) -> Settings {
             "show_whitespace" => {
                 if let Ok(shown) = value.parse() {
                     settings.show_whitespace = shown;
+                }
+            }
+            "font_ligatures" => {
+                if let Ok(enabled) = value.parse() {
+                    settings.font_ligatures = enabled;
                 }
             }
             _ => {}

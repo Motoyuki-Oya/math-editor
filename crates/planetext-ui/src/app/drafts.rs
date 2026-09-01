@@ -18,7 +18,7 @@ use super::sync;
 use crate::framework::remove_draft;
 
 /// 下書きが書き込まれるまでに入力を停止する必要がある時間。そのため、下書きにはキーストロークごとに 1 回ではなく、一時停止ごとに 1 回の書き込みがかかります。
-const IDLE_MS: i32 = 1200;
+const IDLE_MS: i32 = 800;
 
 thread_local! {
     /// 最後の書き込み以降に変更されたドキュメント (タブごと)。
@@ -57,7 +57,7 @@ fn arm() {
 }
 
 /// 前回の書き込み以降に変更されたすべてのドキュメントを書き込みます。
-fn flush() {
+pub(super) fn flush() {
     let pending: Vec<Tab> =
         PENDING.with(|pending| pending.borrow_mut().drain().map(|(_, tab)| tab).collect());
     for tab in pending {

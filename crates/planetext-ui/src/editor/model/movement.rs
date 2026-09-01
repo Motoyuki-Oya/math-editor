@@ -42,15 +42,18 @@ impl Editor {
             }
         }
         self.map_sels(extend, |text, head| {
-            let line = if down {
+            let target_line_idx = if down {
                 head.line + 1
             } else {
                 head.line.checked_sub(1).unwrap_or(head.line)
             };
-            text.clamp(Pos::new(
-                line.min(text.line_count().saturating_sub(1)),
-                head.col,
-            ))
+            let line = target_line_idx.min(text.line_count().saturating_sub(1));
+            let col = if line != head.line {
+                target_col_in_aligned(text.line(head.line), text.line(line), head.col)
+            } else {
+                head.col
+            };
+            text.clamp(Pos::new(line, col))
         });
         Did::Moved
     }
@@ -248,5 +251,113 @@ pub fn after(text: &Text, at: Pos) -> Pos {
         Pos::new(at.line + 1, 0)
     } else {
         at
+    }
+}
+
+/// Markdownテーブル（`|`）やTab区切り（`\t`）の行間で上下移動する際、同じセル・同じパイプ位置を基準にターゲット列を算出します。
+fn target_col_in_aligned(
+    cur_line: &[crate::structure::ast::Node],
+    target_line: &[crate::structure::ast::Node],
+    cur_col: usize,
+) -> usize {
+    // 1. Markdown テーブル（'|' を含む行同士）
+    let cur_pipes: Vec<usize> = cur_line
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| (crate::structure::text::as_char(n) == Some('|')).then_some(i))
+        .collect();
+    let target_pipes: Vec<usize> = target_line
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| (crate::structure::text::as_char(n) == Some('|')).then_some(i))
+        .collect();
+
+    if !cur_pipes.is_empty() && !target_pipes.is_empty() {
+        let pipe_idx = cur_pipes.iter().filter(|&&pos| cur_col > pos).count();
+        if pipe_idx == 0 {
+            let first_target_pipe = target_pipes[0];
+            return cur_col.min(first_target_pipe);
+        }
+        if pipe_idx >= cur_pipes.len() {
+            let cur_last_pipe = cur_pipes[cur_pipes.len() - 1];
+            let offset_after_pipe = cur_col - (cur_last_pipe + 1);
+            let target_last_pipe = target_pipes[target_pipes.len() - 1];
+            let target_len = target_line.len();
+            return (target_last_pipe + 1 + offset_after_pipe).min(target_len);
+        }
+        let cur_prev_pipe = cur_pipes[pipe_idx - 1];
+        let offset = cur_col - (cur_prev_pipe + 1);
+        let target_pipe_idx = (pipe_idx - 1).min(target_pipes.len() - 1);
+        let target_prev_pipe = target_pipes[target_pipe_idx];
+        let target_next_pipe = if target_pipe_idx + 1 < target_pipes.len() {
+            target_pipes[target_pipe_idx + 1]
+        } else {
+            target_line.len()
+        };
+        return (target_prev_pipe + 1 + offset).min(target_next_pipe);
+    }
+
+    // 2. Tab 整列（'\t' を含む行同士）
+    let cur_tabs: Vec<usize> = cur_line
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| (crate::structure::text::as_char(n) == Some('\t')).then_some(i))
+        .collect();
+    let target_tabs: Vec<usize> = target_line
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| (crate::structure::text::as_char(n) == Some('\t')).then_some(i))
+        .collect();
+
+    if !cur_tabs.is_empty() && !target_tabs.is_empty() {
+        let tab_idx = cur_tabs.iter().filter(|&&pos| cur_col > pos).count();
+        if tab_idx == 0 {
+            let first_target_tab = target_tabs[0];
+            return cur_col.min(first_target_tab);
+        }
+        if tab_idx >= cur_tabs.len() {
+            let cur_last_tab = cur_tabs[cur_tabs.len() - 1];
+            let offset = cur_col - (cur_last_tab + 1);
+            let target_last_tab = target_tabs[target_tabs.len() - 1];
+            return (target_last_tab + 1 + offset).min(target_line.len());
+        }
+        let cur_prev_tab = cur_tabs[tab_idx - 1];
+        let offset = cur_col - (cur_prev_tab + 1);
+        let target_tab_idx = (tab_idx - 1).min(target_tabs.len() - 1);
+        let target_prev_tab = target_tabs[target_tab_idx];
+        let target_next_tab = if target_tab_idx + 1 < target_tabs.len() {
+            target_tabs[target_tab_idx + 1]
+        } else {
+            target_line.len()
+        };
+        return (target_prev_tab + 1 + offset).min(target_next_tab);
+    }
+
+    // 通常の行
+    cur_col
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::structure::ast::Node;
+
+    fn to_nodes(s: &str) -> Vec<Node> {
+        s.chars().map(Node::char).collect()
+    }
+
+    #[test]
+    fn table_vertical_movement_aligns_by_pipe() {
+        let line3 = to_nodes("| aaaaaaaaaaaaaaaaa | bdddddddddddddddddddddddddddddddddd |");
+        let line4 = to_nodes("| ddddddddddddddddd | cccc |");
+
+        // line4の末尾（最後のパイプの後ろ）から上へ移動した際、line3の末尾（最後のパイプの後ろ）に到達する
+        let col = target_col_in_aligned(&line4, &line3, line4.len());
+        assert_eq!(col, line3.len());
+
+        // line4の第2セル内から上へ移動した際、line3の第2セルの同オフセットに到達する
+        let line4_cell2 = 22;
+        let col2 = target_col_in_aligned(&line4, &line3, line4_cell2);
+        assert_eq!(col2, 22);
     }
 }

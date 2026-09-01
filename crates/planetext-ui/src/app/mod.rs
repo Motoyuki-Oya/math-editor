@@ -19,7 +19,7 @@ use preferences::Preferences;
 use shell::{Pane, Shell};
 
 use crate::editor;
-use crate::framework::{gui, read_drafts, read_settings, GuiFramework};
+use crate::framework::{gui, read_drafts, read_session_state, read_settings, GuiFramework};
 use crate::settings;
 
 #[component]
@@ -30,19 +30,23 @@ pub fn App() -> impl IntoView {
         focused: RwSignal::new(0),
         next_key: RwSignal::new(1),
         status: RwSignal::new(String::new()),
-        stats: RwSignal::new((0, 1)),
+        stats: RwSignal::new(editor::DocStats::default()),
         searching: RwSignal::new(false),
         preferences: RwSignal::new(false),
         find_focus: RwSignal::new(None),
         tab_drag: RwSignal::new(None),
         split_ratio: RwSignal::new(0.5),
         resizing_split: RwSignal::new(false),
+        restored: RwSignal::new(false),
     };
 
     Effect::new(move |_| {
         editor::set_on_change(std::rc::Rc::new(move |pane| shell.mark_dirty(pane)));
         editor::set_on_focus(std::rc::Rc::new(move |pane| {
             shell.note_focus_by_editor_pane(pane)
+        }));
+        editor::add_on_redraw(std::rc::Rc::new(move |_| {
+            shell.refresh();
         }));
         sync::install(shell);
         keys::install_shortcuts(shell);
@@ -52,7 +56,9 @@ pub fn App() -> impl IntoView {
             preferences::take_effect(settings::read(&read_settings().await));
             // 保存された設定がある場所にメニューのチェック マークが付けられます。
             menu::show_state(shell);
-            shell.restore_drafts(read_drafts().await);
+            let drafts = read_drafts().await;
+            let session_json = read_session_state().await;
+            shell.restore_workspace(session_json, drafts);
             let _ = gui().ready().await;
         });
     });
@@ -147,6 +153,7 @@ pub fn App() -> impl IntoView {
                 if shell.resizing_split.get_untracked() {
                     shell.resizing_split.set(false);
                     editor::redraw_all();
+                    shell.save_session();
                     return;
                 }
 
@@ -294,56 +301,87 @@ pub fn App() -> impl IntoView {
             </div>
 
             <div class="statusbar">
-                <span>{move || shell.file_name()}</span>
-                <span>{move || if shell.tab().dirty.get() { "未保存" } else { "保存済み" }}</span>
-                <span>{move || {
-                    let (characters, lines) = shell.stats.get();
-                    if lines == 0 {
-                        format!("{characters} 文字 / 行数確認中")
-                    } else {
-                        format!("{characters} 文字 / {lines} 行")
-                    }
-                }}</span>
-                <span
-                    class="status-clickable"
-                    title="改行コードを変更"
-                    on:click=move |ev: web_sys::MouseEvent| {
-                        let x = ev.client_x() as f64;
-                        let y = ev.client_y() as f64;
-                        line_ending_menu.set(Some((x, y)));
-                        encoding_menu.set(None);
-                        language_menu.set(None);
-                    }
-                >
-                    {move || shell.tab().line_ending.get()}
-                </span>
-                <span
-                    class="status-clickable"
-                    title="文字コードを変更 / 開き直す"
-                    on:click=move |ev: web_sys::MouseEvent| {
-                        let x = ev.client_x() as f64;
-                        let y = ev.client_y() as f64;
-                        encoding_menu.set(Some((x, y)));
-                        line_ending_menu.set(None);
-                        language_menu.set(None);
-                    }
-                >
-                    {move || shell.tab().encoding.get()}
-                </span>
-                <span
-                    class="status-clickable"
-                    title="構文モード（言語）を変更"
-                    on:click=move |ev: web_sys::MouseEvent| {
-                        let x = ev.client_x() as f64;
-                        let y = ev.client_y() as f64;
-                        language_menu.set(Some((x, y)));
-                        encoding_menu.set(None);
-                        line_ending_menu.set(None);
-                    }
-                >
-                    {move || shell.tab_language_name()}
-                </span>
-                <span class="status-message">{move || shell.status.get()}</span>
+                <div class="statusbar-left">
+                    <span>{move || {
+                        let stats = shell.stats.get();
+                        let tab = shell.tab();
+                        let bytes = tab.bytes.get();
+                        if let Some(sel) = &stats.selection {
+                            if let Some((chars_without_nl, newlines)) = sel.chars {
+                                let total_sel = chars_without_nl + newlines;
+                                format!("選択 {total_sel}文字")
+                            } else {
+                                format!("選択 {}行", sel.lines)
+                            }
+                        } else if let Some(chars) = stats.total_chars {
+                            format!("全 {chars}文字")
+                        } else if stats.counting {
+                            "全 0文字".to_string()
+                        } else {
+                            format_file_size(bytes)
+                        }
+                    }}</span>
+                    <Show when=move || shell.stats.get().caret_prefix.is_some()>
+                        {move || {
+                            let stats = shell.stats.get();
+                            let (chars_without_nl, newlines) = stats.caret_prefix?;
+                            let total_caret = chars_without_nl + newlines;
+                            Some(view! {
+                                <span>{format!("先頭から{total_caret} ( 📄{chars_without_nl} ⏎ {newlines} )")}</span>
+                            })
+                        }}
+                    </Show>
+                </div>
+
+                <div class="statusbar-center">
+                    <span class="status-message">{move || shell.status.get()}</span>
+                </div>
+
+                <div class="statusbar-right">
+                    <span>{move || {
+                        let stats = shell.stats.get();
+                        format!("[ {} | {} ]", stats.caret_line, stats.caret_col)
+                    }}</span>
+                    <span
+                        class="status-clickable"
+                        title="構文モード（言語）を変更"
+                        on:click=move |ev: web_sys::MouseEvent| {
+                            let x = ev.client_x() as f64;
+                            let y = ev.client_y() as f64;
+                            language_menu.set(Some((x, y)));
+                            encoding_menu.set(None);
+                            line_ending_menu.set(None);
+                        }
+                    >
+                        {move || shell.tab_language_name()}
+                    </span>
+                    <span
+                        class="status-clickable"
+                        title="文字コードを変更 / 開き直す"
+                        on:click=move |ev: web_sys::MouseEvent| {
+                            let x = ev.client_x() as f64;
+                            let y = ev.client_y() as f64;
+                            encoding_menu.set(Some((x, y)));
+                            line_ending_menu.set(None);
+                            language_menu.set(None);
+                        }
+                    >
+                        {move || shell.tab().encoding.get()}
+                    </span>
+                    <span
+                        class="status-clickable"
+                        title="改行コードを変更"
+                        on:click=move |ev: web_sys::MouseEvent| {
+                            let x = ev.client_x() as f64;
+                            let y = ev.client_y() as f64;
+                            line_ending_menu.set(Some((x, y)));
+                            encoding_menu.set(None);
+                            language_menu.set(None);
+                        }
+                    >
+                        {move || shell.tab().line_ending.get()}
+                    </span>
+                </div>
             </div>
 
             <Show when=move || encoding_menu.get().is_some()>
@@ -526,4 +564,16 @@ pub fn App() -> impl IntoView {
 /// ツールバー操作で、現在編集中の入れ子Rowからフォーカスが外れないようにします。
 pub(super) fn hold_focus(event: web_sys::MouseEvent) {
     event.prevent_default();
+}
+
+fn format_file_size(bytes: usize) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{:.1} GB", bytes as f64 / 1_000_000_000.0)
+    } else if bytes >= 1_000_000 {
+        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+    } else if bytes >= 1_000 {
+        format!("{:.1} KB", bytes as f64 / 1_000.0)
+    } else {
+        format!("{bytes} B")
+    }
 }

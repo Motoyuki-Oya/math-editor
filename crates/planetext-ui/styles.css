@@ -1,3 +1,11 @@
+@font-face {
+  font-family: "Fira Code";
+  src: local("Fira Code"), local("FiraCode-Regular"), local("Fira Code Regular"), local("FiraCode");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   --bg: #ffffff;
   --fg: #1b1b1f;
@@ -97,7 +105,7 @@ body {
   font-weight: 400;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  font-size: 15px;
+  font-size: 14px;
 }
 
 .app {
@@ -494,13 +502,15 @@ body {
      ページには見えている行しか無い。 */
   overflow: hidden;
   outline: none;
-  line-height: 1.5;
+  line-height: 1.35;
   cursor: text;
   font-weight: 400;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  font-size: var(--setting-font-size, 15px);
+  font-size: var(--setting-font-size, 14px);
   font-family: var(--setting-font-text, var(--font-text));
+  font-variant-ligatures: var(--setting-font-ligatures, contextual common-ligatures);
+  font-feature-settings: var(--setting-font-features, "calt" 1, "liga" 1);
 }
 
 /* 中身を横にだけスクロールする層。入力欄もこの中で行と一緒に動く。 */
@@ -655,6 +665,7 @@ body {
   overflow-x: visible;
   padding: 0 18px 18px 10px;
   box-sizing: border-box;
+  line-height: 1.35;
 }
 
 .mn-nowrap .mn-document {
@@ -664,6 +675,7 @@ body {
 
 .mn-line {
   position: relative;
+  line-height: 1.35;
   min-height: 1.35em;
   text-align: start;
   white-space: pre-wrap;
@@ -671,8 +683,14 @@ body {
   overflow-wrap: anywhere;
 }
 
+.mn-run:empty::before {
+  content: "\200b";
+  display: inline;
+}
+
 /* 連続する整列ブロック（Tab整列行またはMarkdownテーブル）を包むラッパーコンテナ */
 .mn-aligned-block {
+  position: relative;
   width: 100%;
   max-width: 100%;
   overflow-x: auto;
@@ -680,16 +698,54 @@ body {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
-  scrollbar-width: thin;
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
 }
 
 .mn-aligned-block::-webkit-scrollbar {
-  height: 6px;
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
 }
 
-.mn-aligned-block::-webkit-scrollbar-thumb {
-  background: rgba(100, 100, 100, 0.35);
+/* 行間に一切隙間を作らない（高さ0px）完全浮動オーバーレイスクロールバー */
+.mn-block-scroll-track {
+  position: sticky;
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  height: 0px;
+  margin: 0;
+  padding: 0;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.mn-block-scroll-thumb {
+  position: absolute;
+  bottom: 2px;
+  height: 5px;
   border-radius: 3px;
+  background: rgba(120, 120, 120, 0.45);
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease;
+  pointer-events: auto;
+  cursor: grab;
+}
+
+.mn-aligned-block:hover .mn-block-scroll-thumb {
+  opacity: 1;
+}
+
+.mn-block-scroll-thumb:hover,
+.mn-block-scroll-thumb:active {
+  background: rgba(120, 120, 120, 0.85);
+  cursor: grabbing;
+}
+
+.mn-typing .mn-block-scroll-thumb {
+  opacity: 0 !important;
+  pointer-events: none !important;
 }
 
 /* 整列行（Tab区切りまたはMarkdownテーブル）は折り返さずに自然な幅で右へ展開 */
@@ -941,7 +997,6 @@ body {
 
 .mn-cursor-inactive {
   background: var(--muted);
-  animation: none;
   opacity: 0.7;
 }
 
@@ -971,13 +1026,32 @@ body {
 .statusbar {
   display: flex;
   align-items: center;
-  gap: 16px;
+  justify-content: space-between;
   padding: 4px 12px;
   border-top: 1px solid var(--line);
   background: var(--panel);
   color: var(--muted);
   font-size: 12px;
   user-select: none;
+}
+
+.statusbar-left,
+.statusbar-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.statusbar-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 12px;
 }
 
 .status-clickable {
@@ -1001,7 +1075,6 @@ body {
 }
 
 .status-message {
-  margin-left: auto;
   color: var(--accent);
 }
 
@@ -1037,15 +1110,15 @@ body {
   display: inline-grid;
   grid-template-rows: auto auto auto;
   justify-items: center;
-  margin: 0 0.15em;
+  margin: 0 0.12em;
 }
 
 .mn-frac-num {
-  padding: 0 0.32em 0.22em;
+  padding: 0 0.25em 0.15em;
 }
 
 .mn-frac-den {
-  padding: 0.26em 0.32em 0;
+  padding: 0.18em 0.25em 0;
 }
 
 /* 幅の広い方と同じ幅です。 */
@@ -1090,7 +1163,7 @@ body {
   position: relative;
   /* このパディングに描画される記号用のスペース。 */
   padding-left: 0.82em;
-  margin: 0.12em 0.14em 0;
+  margin: 0.08em 0.12em 0;
 }
 
 .mn-sqrt-index {
@@ -1115,7 +1188,7 @@ body {
 .mn-sqrt-body {
   display: inline-block;
   /* バーの下、および記号と最初の 文字の間のすべての面に空気があるため、記号はルートの下にあるものに触れることは決してない。 */
-  padding: 0.08em 0.3em 0.08em 0.22em;
+  padding: 0.16em 0.3em 0.10em 0.22em;
 }
 
 .mn-sup,
@@ -1164,10 +1237,23 @@ body {
 .mn-annotated {
   display: inline-block;
   position: relative;
-  padding: 0.62em 0;
   margin: 0 0.08em;
   line-height: 1;
   vertical-align: baseline;
+}
+
+.mn-annotated-both {
+  padding: 0.52em 0;
+}
+
+.mn-annotated-upper {
+  padding-top: 0.52em;
+  padding-bottom: 0;
+}
+
+.mn-annotated-lower {
+  padding-top: 0;
+  padding-bottom: 0.52em;
 }
 
 .mn-annotated > .mn-limit {

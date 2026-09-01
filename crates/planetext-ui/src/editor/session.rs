@@ -624,13 +624,21 @@ pub fn update_ghost_text(session: &mut Session) {
         }
     }
 
+    let start_scan = pos.line.saturating_sub(40);
+    let end_scan = (pos.line + 40).min(doc.text().line_count());
     let buffer_words = if prefix.is_some() {
-        Some(super::suggest::collect_buffer_words(doc.text(), 300))
+        Some(super::suggest::collect_buffer_words_range(
+            doc.text(),
+            start_scan..end_scan,
+        ))
     } else {
         None
     };
     let buffer_rubies = if has_kanji {
-        Some(super::suggest::collect_buffer_rubies(doc.text(), 300))
+        Some(super::suggest::collect_buffer_rubies_range(
+            doc.text(),
+            start_scan..end_scan,
+        ))
     } else {
         None
     };
@@ -709,15 +717,15 @@ pub fn redraw(session: &Rc<RefCell<Session>>) {
                 ghost: session.ghost.as_ref(),
             },
         );
-        if !session.composing {
-            if let Some(rect) = session.view.reveal(&caret) {
-                input::follow_caret(&session.textarea, rect);
-            }
+        if let Some(rect) = session.view.reveal(&caret) {
+            input::follow_caret(&session.textarea, rect);
         }
     }
     // Ctrl+End などで窓が移った場合も、移動後の drawn 範囲を検索する。
-    refresh_preview(&mut session.borrow_mut());
-    redraw_preview_overlay(session);
+    if !session.borrow().preview_query.is_empty() {
+        refresh_preview(&mut session.borrow_mut());
+        redraw_preview_overlay(session);
+    }
     request_missing(session);
     let pane = session.borrow().pane;
     notify_redraw(pane);
@@ -875,6 +883,7 @@ pub fn focus() {
 
 /// 読み込んだ内容を表示し、文書の本体（1 行の空文書）へまるごと届くようにします。
 /// 下書きの復元で使われます。
+#[allow(dead_code)]
 pub fn load(text: &str) {
     let Some(session) = session() else { return };
     session
@@ -1090,14 +1099,150 @@ pub struct FlushEdit {
     pub lines: Vec<String>,
 }
 
-pub fn stats() -> (usize, usize) {
-    session()
-        .map(|session| {
-            let borrowed = session.borrow();
-            let (characters, lines) = borrowed.document.borrow().text().stats();
-            (characters, if borrowed.counting { 0 } else { lines })
+/// ステータスバー等で表示するドキュメントおよびキャレット・選択範囲の統計情報。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocStats {
+    /// 10MB以下の通常ファイルにおける全体文字数（10MB超の巨大ファイル時は None）。
+    pub total_chars: Option<usize>,
+    /// 巨大ファイル等のファイルサイズ（バイト数）。
+    pub file_bytes: Option<usize>,
+    /// 全体行数。
+    pub total_lines: usize,
+    /// バックグラウンドで行数走査中かどうか。
+    pub counting: bool,
+    /// キャレットの1-based行番号。
+    pub caret_line: usize,
+    /// キャレットの1-based列番号。
+    pub caret_col: usize,
+    /// 先頭からキャレットまでの文字数 (改行抜文字数, 改行文字数)。10MB超または未着行時は None。
+    pub caret_prefix: Option<(usize, usize)>,
+    /// 選択範囲の統計情報（選択が存在する場合のみ Some）。
+    pub selection: Option<SelectionStats>,
+}
+
+impl Default for DocStats {
+    fn default() -> Self {
+        DocStats {
+            total_chars: Some(0),
+            file_bytes: None,
+            total_lines: 1,
+            counting: false,
+            caret_line: 1,
+            caret_col: 1,
+            caret_prefix: Some((0, 0)),
+            selection: None,
+        }
+    }
+}
+
+/// 選択範囲の統計情報。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectionStats {
+    /// 選択行数（1行選択なら 1）。
+    pub lines: usize,
+    /// 選択中の (改行抜文字数, 改行文字数)。10MB超または未着行時は None。
+    pub chars: Option<(usize, usize)>,
+}
+
+const MAX_CARET_STATS_BYTES: usize = 10_000_000;
+
+pub fn stats() -> DocStats {
+    let Some(session) = session() else {
+        return DocStats::default();
+    };
+
+    let borrowed = session.borrow();
+    let doc = borrowed.document.borrow();
+    let text = doc.text();
+    let line_count = text.line_count();
+    let is_counting = borrowed.counting;
+    let is_large =
+        doc.file_bytes.is_some_and(|s| s > MAX_CARET_STATS_BYTES) || text.absent_lines() > 0;
+
+    let primary = borrowed.primary();
+    let head = primary.head;
+    let caret_line = head.line + 1;
+    let caret_col = head.col + 1;
+
+    let total_chars = if is_large || is_counting {
+        None
+    } else {
+        let (chars, _) = text.stats();
+        if chars <= MAX_CARET_STATS_BYTES {
+            Some(chars)
+        } else {
+            None
+        }
+    };
+
+    let caret_prefix = if !is_large && !is_counting && total_chars.is_some() {
+        text.chars_until(head)
+    } else {
+        None
+    };
+
+    let sels = borrowed.sels();
+    let has_selection = sels.iter().any(|s| !s.is_caret());
+
+    let selection = if has_selection {
+        let mut total_chars_without_nl = 0;
+        let mut total_newlines = 0;
+        let mut total_lines = 0;
+        let mut any_absent = false;
+
+        for sel in &sels {
+            if sel.is_caret() {
+                continue;
+            }
+            let start = sel.start();
+            let end = sel.end();
+            let lines = end.line.saturating_sub(start.line) + 1;
+            total_lines += lines;
+
+            if !any_absent {
+                if lines <= 1000 {
+                    if let Some((c, nl)) = text.chars_between(start, end) {
+                        total_chars_without_nl += c;
+                        total_newlines += nl;
+                    } else {
+                        any_absent = true;
+                    }
+                } else {
+                    any_absent = true;
+                }
+            }
+        }
+
+        let chars = if any_absent {
+            None
+        } else {
+            Some((total_chars_without_nl, total_newlines))
+        };
+
+        Some(SelectionStats {
+            lines: total_lines,
+            chars,
         })
-        .unwrap_or((0, 1))
+    } else {
+        None
+    };
+
+    DocStats {
+        total_chars,
+        file_bytes: doc.file_bytes,
+        total_lines: if is_counting { 0 } else { line_count },
+        counting: is_counting,
+        caret_line,
+        caret_col,
+        caret_prefix,
+        selection,
+    }
+}
+
+/// ドキュメントのファイルサイズを設定します（巨大ファイルの Zero-Scan 判定用）。
+pub fn set_doc_file_size(doc_id: usize, bytes: Option<usize>) {
+    let doc = get_or_create_doc(doc_id);
+    doc.borrow_mut().set_file_bytes(bytes);
 }
 
 /// 入力を受けるペインの文書が手元に全部あるか。検索や置換が文書の本体の

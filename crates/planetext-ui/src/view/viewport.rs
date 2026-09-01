@@ -8,8 +8,11 @@
 
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
+use std::rc::Rc;
 
-use web_sys::{Document, Element, HtmlElement};
+use wasm_bindgen::closure::Closure;
+use wasm_bindgen::JsCast;
+use web_sys::{Document, Element, HtmlElement, MouseEvent};
 
 use crate::structure::text::Text;
 use crate::view::heights::Heights;
@@ -202,10 +205,16 @@ impl Viewport {
                     };
                     append(&wrapper, &element);
                 } else {
+                    if let Some(ref w) = block_wrapper {
+                        attach_block_scrollbar(&doc, w);
+                    }
                     block_wrapper = None;
                     append(&self.document, &element);
                 }
             }
+        }
+        if let Some(ref w) = block_wrapper {
+            attach_block_scrollbar(&doc, w);
         }
         *self.drawn.borrow_mut() = window.clone();
         self.measure(&window);
@@ -319,5 +328,154 @@ impl Viewport {
             scroller.set_scroll_left((left - width + 24.0) as i32);
         }
         Box2 { left, top, ..rect }
+    }
+}
+
+/// テーブル等の整列ブロック（.mn-aligned-block）に高さ0pxのオーバーレイスクロールバーを付与します。
+fn attach_block_scrollbar(doc: &Document, wrapper: &Element) {
+    let Ok(track) = doc.create_element("div") else {
+        return;
+    };
+    track.set_class_name("mn-block-scroll-track");
+    let Ok(thumb) = doc.create_element("div") else {
+        return;
+    };
+    thumb.set_class_name("mn-block-scroll-thumb");
+    track.append_child(&thumb).ok();
+    wrapper.append_child(&track).ok();
+
+    let update = {
+        let w = wrapper.clone();
+        let t = thumb.clone();
+        Rc::new(move || {
+            let scroll_w = w.scroll_width() as f64;
+            let client_w = w.client_width() as f64;
+            if scroll_w <= client_w + 1.0 {
+                t.set_attribute("style", "display:none").ok();
+                return;
+            }
+            let thumb_w = (client_w / scroll_w * client_w).clamp(24.0, (client_w - 10.0).max(24.0));
+            let scroll_l = w.scroll_left() as f64;
+            let max_scroll = scroll_w - client_w;
+            let max_thumb_left = client_w - thumb_w;
+            let left = if max_scroll > 0.0 {
+                (scroll_l / max_scroll * max_thumb_left).clamp(0.0, max_thumb_left)
+            } else {
+                0.0
+            };
+            t.set_attribute(
+                "style",
+                &format!("display:block;width:{thumb_w:.1}px;left:{left:.1}px;"),
+            )
+            .ok();
+        })
+    };
+
+    // scroll イベントで thumb 位置を同期
+    {
+        let u = update.clone();
+        let closure = Closure::<dyn FnMut()>::wrap(Box::new(move || {
+            u();
+        }));
+        wrapper
+            .add_event_listener_with_callback("scroll", closure.as_ref().unchecked_ref())
+            .ok();
+        closure.forget();
+    }
+
+    // mouseenter イベントでも thumb の幅・位置を同期
+    {
+        let u = update.clone();
+        let closure = Closure::<dyn FnMut()>::wrap(Box::new(move || {
+            u();
+        }));
+        wrapper
+            .add_event_listener_with_callback("mouseenter", closure.as_ref().unchecked_ref())
+            .ok();
+        closure.forget();
+    }
+
+    // thumb のドラッグ操作
+    {
+        let w = wrapper.clone();
+        let doc_clone = doc.clone();
+        let mousedown_closure =
+            Closure::<dyn FnMut(MouseEvent)>::wrap(Box::new(move |e: MouseEvent| {
+                e.prevent_default();
+                e.stop_propagation();
+                let start_x = e.client_x() as f64;
+                let start_scroll = w.scroll_left() as f64;
+                let w_inner = w.clone();
+
+                let on_move = Rc::new(RefCell::new(None::<Closure<dyn FnMut(MouseEvent)>>));
+                let on_up = Rc::new(RefCell::new(None::<Closure<dyn FnMut(MouseEvent)>>));
+
+                let on_move_clone = on_move.clone();
+                let on_up_clone = on_up.clone();
+                let doc_for_up = doc_clone.clone();
+
+                let move_handler = {
+                    let w_inner = w_inner.clone();
+                    Closure::<dyn FnMut(MouseEvent)>::wrap(Box::new(move |ev: MouseEvent| {
+                        let dx = ev.client_x() as f64 - start_x;
+                        let scroll_w = w_inner.scroll_width() as f64;
+                        let client_w = w_inner.client_width() as f64;
+                        let thumb_w = (client_w / scroll_w * client_w)
+                            .clamp(24.0, (client_w - 10.0).max(24.0));
+                        let max_thumb_left = client_w - thumb_w;
+                        let max_scroll = scroll_w - client_w;
+                        if max_thumb_left > 0.0 && max_scroll > 0.0 {
+                            let new_scroll = start_scroll + (dx / max_thumb_left) * max_scroll;
+                            w_inner.set_scroll_left(new_scroll.round() as i32);
+                        }
+                    }))
+                };
+
+                let up_handler = {
+                    let on_move_ref = on_move.clone();
+                    let on_up_ref = on_up.clone();
+                    Closure::<dyn FnMut(MouseEvent)>::wrap(Box::new(move |_ev: MouseEvent| {
+                        if let Some(c) = on_move_ref.borrow_mut().take() {
+                            doc_for_up
+                                .remove_event_listener_with_callback(
+                                    "mousemove",
+                                    c.as_ref().unchecked_ref(),
+                                )
+                                .ok();
+                        }
+                        if let Some(c) = on_up_ref.borrow_mut().take() {
+                            doc_for_up
+                                .remove_event_listener_with_callback(
+                                    "mouseup",
+                                    c.as_ref().unchecked_ref(),
+                                )
+                                .ok();
+                        }
+                    }))
+                };
+
+                doc_clone
+                    .add_event_listener_with_callback(
+                        "mousemove",
+                        move_handler.as_ref().unchecked_ref(),
+                    )
+                    .ok();
+                doc_clone
+                    .add_event_listener_with_callback(
+                        "mouseup",
+                        up_handler.as_ref().unchecked_ref(),
+                    )
+                    .ok();
+
+                *on_move_clone.borrow_mut() = Some(move_handler);
+                *on_up_clone.borrow_mut() = Some(up_handler);
+            }));
+        thumb
+            .add_event_listener_with_callback(
+                "mousedown",
+                mousedown_closure.as_ref().unchecked_ref(),
+            )
+            .ok();
+        mousedown_closure.forget();
     }
 }

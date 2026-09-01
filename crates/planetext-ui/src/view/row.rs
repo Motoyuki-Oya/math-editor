@@ -240,7 +240,7 @@ impl<'a> Renderer<'a> {
             match cell {
                 Cell::Char('|') if is_table_row => {
                     self.flush(&container, &mut run);
-                    let element = self.span("mn-table-pipe", "|");
+                    let element = self.span("mn-table-pipe mn-run", "|");
                     element.set_attribute(START_ATTR, &index.to_string()).ok();
                     container.append_child(&element).ok();
                 }
@@ -540,7 +540,13 @@ impl<'a> Renderer<'a> {
             self.apply_token_class(&container, kind);
             return container;
         }
-        let container = self.el("span", "mn-annotated");
+        let class = match (show_upper, show_lower) {
+            (true, true) => "mn-annotated mn-annotated-both",
+            (true, false) => "mn-annotated mn-annotated-upper",
+            (false, true) => "mn-annotated mn-annotated-lower",
+            (false, false) => "mn-annotated",
+        };
+        let container = self.el("span", class);
         if show_upper {
             let upper = self.el("span", "mn-limit mn-limit-upper");
             upper
@@ -638,9 +644,9 @@ impl<'a> Renderer<'a> {
             .expect("create radical");
         svg.set_attribute("class", "mn-radical").ok();
         for (x1, y1, x2, y2) in [
-            ("0", "58%", "0.16em", "60%"),
-            ("0.16em", "60%", "0.38em", "96%"),
-            ("0.38em", "96%", "0.82em", "0"),
+            ("0", "55%", "0.16em", "57%"),
+            ("0.16em", "57%", "0.38em", "88%"),
+            ("0.38em", "88%", "0.82em", "0"),
             ("0.82em", "0", "100%", "0"),
         ] {
             let line = self
