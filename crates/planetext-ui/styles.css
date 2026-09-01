@@ -915,6 +915,11 @@ body {
   background-color: var(--accent);
 }
 
+.switch input:focus-visible + .slider {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .switch input:checked + .slider:before {
   transform: translateX(16px);
 }
