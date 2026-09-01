@@ -375,11 +375,12 @@ impl Document {
                 edit.removed.clone(),
             )?);
         }
-        // 巻き戻しの逆は元のステップと同じ向き。適用した順の逆で持つ。
+        // 巻き戻しで生成された逆操作（inverse）は、次の再巻き戻し（Redo/Undo）時に
+        // .rev() で走査することで元の時系列順に正しく適用される。
         Ok((
             Step {
                 group: step.group,
-                edits: inverse.into_iter().rev().collect(),
+                edits: inverse,
                 before: step.before.clone(),
                 after: step.after.clone(),
             },

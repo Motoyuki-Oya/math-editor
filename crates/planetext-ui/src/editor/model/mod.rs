@@ -350,9 +350,27 @@ pub(crate) mod tests {
         editor.insert_text("X");
         editor.take_flush();
         editor.apply_restored("1.2-1.2", 1, 2);
-        assert_eq!(editor.primary().head, Pos::new(1, 0));
+        assert_eq!(editor.primary().head, Pos::new(1, 2));
         assert_eq!(editor.text().first_absent(0), Some(1));
         assert_eq!(editor.take_flush().map(|flush| flush.changes), None);
+    }
+
+    #[test]
+    fn test_undo_and_redo_caret_restoration() {
+        let mut editor = editor("line0\nline1_hello");
+        editor.set_caret(Pos::new(1, 5));
+        editor.insert_text("_world");
+        let flush = editor.take_flush().expect("typing changed the text");
+        assert_eq!(flush.before, "1.5-1.5");
+        assert_eq!(flush.after, "1.11-1.11");
+
+        // Undo: 編集前の 1 行目 5 列目に復元される
+        editor.apply_restored(&flush.before, 1, 2);
+        assert_eq!(editor.primary().head, Pos::new(1, 5));
+
+        // Redo: 編集後の 1 行目 11 列目に復元される
+        editor.apply_restored(&flush.after, 1, 2);
+        assert_eq!(editor.primary().head, Pos::new(1, 11));
     }
 
     #[test]

@@ -694,6 +694,9 @@ impl Text {
 
     pub fn clamp(&self, at: Pos) -> Pos {
         let line = at.line.min(self.line_count.saturating_sub(1));
+        if self.is_absent(line) {
+            return Pos::new(line, at.col);
+        }
         Pos::new(line, at.col.min(self.line_len(line)))
     }
 
