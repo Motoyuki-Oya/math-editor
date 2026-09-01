@@ -31,7 +31,7 @@ pub(super) fn Palette(pane: Pane) -> impl IntoView {
     view! {
         <div class="palette" on:mousedown=move |ev| ev.stop_propagation()>
             <div class="palette-header">
-                <span class="palette-title">"数式・構造パレット"</span>
+                <span class="palette-title">"構造パレット"</span>
                 <button class="find-icon-btn find-close-btn" title="閉じる (Ctrl+M)" on:click=close>
                     "✕"
                 </button>

@@ -151,7 +151,7 @@ pub(super) fn Preferences(open: RwSignal<bool>) -> impl IntoView {
                             on:click=move |_| selected_category.set(Category::Editor)
                         >
                             <span class="settings-nav-icon">"📐"</span>
-                            <span class="settings-nav-label">"エディタ・数式"</span>
+                            <span class="settings-nav-label">"エディタ・構造"</span>
                         </button>
                     </nav>
 
@@ -291,7 +291,7 @@ pub(super) fn Preferences(open: RwSignal<bool>) -> impl IntoView {
                                 <div class="settings-item">
                                     <div class="settings-item-info">
                                         <div class="settings-item-name">"字体（フォントファミリー）"</div>
-                                        <div class="settings-item-desc">"テキストと数式を描画するフォントを指定します。"</div>
+                                        <div class="settings-item-desc">"テキストと構造を描画するフォントを指定します。"</div>
                                     </div>
                                     <div class="settings-control">
                                         <select
@@ -365,7 +365,7 @@ pub(super) fn Preferences(open: RwSignal<bool>) -> impl IntoView {
 
                         Category::Editor => view! {
                             <div class="settings-panel">
-                                <h2 class="settings-panel-title">"エディタ・数式"</h2>
+                                <h2 class="settings-panel-title">"エディタ・構造"</h2>
 
                                 <div class="settings-item">
                                     <div class="settings-item-info">

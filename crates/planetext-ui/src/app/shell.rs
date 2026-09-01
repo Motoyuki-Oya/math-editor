@@ -1444,7 +1444,7 @@ impl Shell {
         });
     }
 
-    /// 現在のタブの文書を数式・記法ごと組版してネイティブ印刷（PDF保存等）へ送ります。
+    /// 現在のタブの文書を構造・記法ごと組版してネイティブ印刷（PDF保存等）へ送ります。
     pub(super) fn print(&self) {
         let shell = *self;
         let tab = shell.tab_untracked();

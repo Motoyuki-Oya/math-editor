@@ -788,7 +788,7 @@ mod tests {
         assert_eq!(island.edit().extend(false), None);
         assert_eq!(island.cursor.path, Vec::new());
         assert_eq!((island.cursor.start(), island.cursor.end()), (0, 1));
-        // 最も外側の行を超えると、選択は数式から外れます。
+        // 最も外側の行を超えると、選択は構造から外れます。
         assert_eq!(island.edit().extend(false), Some(Escape::Left));
     }
 
