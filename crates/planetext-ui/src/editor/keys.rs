@@ -38,6 +38,15 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
     if key == "Escape" {
         session::clear_linked();
     }
+    if key == "Insert"
+        && !ctrl
+        && !event.alt_key()
+        && crate::settings::current().enable_overwrite_mode
+    {
+        session::toggle_overwrite_mode(session);
+        event.prevent_default();
+        return;
+    }
     if ctrl && key == "End" && session.borrow().counting {
         let pane = session.borrow().pane;
         session::request_tail(pane);
@@ -79,6 +88,8 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
             (true, "ArrowDown") if !event.alt_key() && !shift => editor.annotate(false),
             (true, "ArrowUp") if shift => editor.move_document_edge(false, true),
             (true, "ArrowDown") if shift => editor.move_document_edge(true, true),
+            (false, "ArrowUp") if event.alt_key() => editor.move_lines_vertical(false),
+            (false, "ArrowDown") if event.alt_key() => editor.move_lines_vertical(true),
             (false, "ArrowUp") => editor.move_v(false, shift),
             (false, "ArrowDown") => editor.move_v(true, shift),
             // Alt+Up/Down は行を移動します。 Ctrl+Up/Down は上または下の共通欄を開きます。

@@ -3,11 +3,12 @@
 use leptos::prelude::*;
 
 use super::hold_focus;
+use super::shell::Pane;
 use crate::editor;
 use crate::structure::ast::{self, Between, MatrixKind, Node};
 
 #[component]
-pub(super) fn Palette() -> impl IntoView {
+pub(super) fn Palette(pane: Pane) -> impl IntoView {
     // プレーン テキストで保持できないもののみです。他のすべては通常どおりに入力されます。
     let structures = [
         ("½", "分数", Structure::Stack),
@@ -25,9 +26,17 @@ pub(super) fn Palette() -> impl IntoView {
         ("{⋮", "場合分け（行の追加は Alt+Enter）", Structure::Cases),
     ];
 
+    let close = move |_| pane.palette.set(false);
+
     view! {
-        <div class="palette">
-            <div class="group">
+        <div class="palette" on:mousedown=move |ev| ev.stop_propagation()>
+            <div class="palette-header">
+                <span class="palette-title">"数式・構造パレット"</span>
+                <button class="find-icon-btn find-close-btn" title="閉じる (Ctrl+M)" on:click=close>
+                    "✕"
+                </button>
+            </div>
+            <div class="palette-grid">
                 <button class="pal" title="上に注釈" on:mousedown=hold_focus on:click=move |_| editor::annotate(true)>"x̅"</button>
                 <button class="pal" title="下に注釈" on:mousedown=hold_focus on:click=move |_| editor::annotate(false)>"x̲"</button>
                 {structures

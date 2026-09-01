@@ -52,6 +52,8 @@ pub(super) fn box_of(rect: &web_sys::DomRect) -> Box2 {
 
 /// 行の 2 つの場所の間にある長方形。行と同じ高さではなく、その範囲にまたがる高さと同じです。分数を選択すると分数全体がカバーされ、単語を選択すると単語全体がカバーされます。
 pub(super) fn span_box(row: &Element, left: Box2, right: Box2) -> Box2 {
+    let min_x = left.left.min(right.left);
+    let max_x = left.left.max(right.left);
     let mut top = left.top.min(right.top);
     let mut bottom = (left.top + left.height).max(right.top + right.height);
     let children = row.children();
@@ -61,15 +63,15 @@ pub(super) fn span_box(row: &Element, left: Box2, right: Box2) -> Box2 {
         };
         let rect = box_of(&child.get_bounding_client_rect());
         let middle = rect.left + rect.width / 2.0;
-        if middle > left.left && middle < right.left {
+        if middle >= min_x && middle <= max_x {
             top = top.min(rect.top);
             bottom = bottom.max(rect.top + rect.height);
         }
     }
     Box2 {
-        left: left.left,
+        left: min_x,
         top,
-        width: (right.left - left.left).max(1.0),
+        width: (max_x - min_x).max(1.0),
         height: bottom - top,
     }
     .fix()
@@ -100,12 +102,20 @@ pub(super) fn span_boxes(row: &Element, from: usize, to: usize, past_end: bool) 
         .into_iter()
         .enumerate()
         .filter_map(|(nth, piece)| {
-            let left = *piece.first()?;
-            let mut right = *piece.last()?;
-            if past_end && nth + 1 == last {
-                right.left += 6.0;
+            if piece.is_empty() {
+                return None;
             }
-            Some(span_box(row, left, right))
+            let first = *piece.first()?;
+            let last_box = *piece.last()?;
+            let mut res = span_box(row, first, last_box);
+            let min_left = piece.iter().map(|r| r.left).fold(f64::INFINITY, f64::min);
+            let mut max_right = piece.iter().map(|r| r.left).fold(f64::NEG_INFINITY, f64::max);
+            if past_end && nth + 1 == last {
+                max_right += 6.0;
+            }
+            res.left = min_left;
+            res.width = (max_right - min_left).max(1.0);
+            Some(res)
         })
         .collect()
 }

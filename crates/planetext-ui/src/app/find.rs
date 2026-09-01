@@ -17,6 +17,7 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
     let replacement = RwSignal::new(String::new());
     let regex = RwSignal::new(false);
     let case_sensitive = RwSignal::new(false);
+    let replace_expanded = RwSignal::new(false);
     let current_match = RwSignal::new(0usize);
     let estimated_count = RwSignal::new(None::<usize>);
     let estimate_generation = RwSignal::new(0u64);
@@ -69,7 +70,10 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
     Effect::new(move |_| {
         let field = match shell.find_focus.get() {
             Some(Field::Query) => query_field.get(),
-            Some(Field::Replacement) => replacement_field.get(),
+            Some(Field::Replacement) => {
+                replace_expanded.set(true);
+                replacement_field.get()
+            }
             None => return,
         };
         if let Some(field) = field {
@@ -102,173 +106,228 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
 
     view! {
         <div class="findbar" on:mousedown=move |ev| ev.stop_propagation()>
-            <input
-                class="find-input"
-                node_ref=query_field
-                placeholder="検索"
-                prop:value=move || query.get()
-                on:focus=move |_| sync_on_focus()
-                on:input=move |ev| {
-                    let value = event_target_value(&ev);
-                    query.set(value.clone());
-                    current_match.set(0);
-                    last_matched_pos.set(None);
-                    update_preview(
-                        pane,
-                        value,
-                        options(),
-                        estimated_count,
-                        estimate_generation,
-                    );
-                }
-                on:keydown=move |ev: KeyboardEvent| {
-                    if ev.key() == "Escape" {
-                        ev.prevent_default();
-                        close_bar();
-                        return;
-                    }
-                    if ev.key() == "Enter" && !ev.is_composing() {
-                        ev.prevent_default();
-                        let shell = shell;
-                        let query = query.get_untracked();
-                        let options = options();
-                        let forward = !ev.shift_key();
-                        step_match(forward);
-                        spawn_local(async move {
-                            let size = file_size_for(pane).await;
-                            if forward {
-                                super::sync::find(shell, pane.editor_pane(), query, options, size);
-                            } else {
-                                super::sync::find_previous(shell, pane.editor_pane(), query, options, size);
+            <div class="findbar-row">
+                <button
+                    class="find-toggle-replace"
+                    title=move || if replace_expanded.get() { "置換を閉じる" } else { "置換を開く" }
+                    on:click=move |_| replace_expanded.update(|open| *open = !*open)
+                >
+                    {move || if replace_expanded.get() { "▾" } else { "▸" }}
+                </button>
+                <div class="find-input-wrap">
+                    <input
+                        class="find-input"
+                        node_ref=query_field
+                        placeholder="検索"
+                        prop:value=move || query.get()
+                        on:focus=move |_| sync_on_focus()
+                        on:input=move |ev| {
+                            let value = event_target_value(&ev);
+                            query.set(value.clone());
+                            current_match.set(0);
+                            last_matched_pos.set(None);
+                            update_preview(
+                                pane,
+                                value,
+                                options(),
+                                estimated_count,
+                                estimate_generation,
+                            );
+                        }
+                        on:keydown=move |ev: KeyboardEvent| {
+                            if ev.key() == "Escape" {
+                                ev.prevent_default();
+                                close_bar();
+                                return;
                             }
-                            record_pos();
-                        });
-                    }
-                }
-            />
-            <button class="tool" title="前を検索 (Shift+Enter)" on:click=move |_| {
-                let shell = shell;
-                let query = query.get_untracked();
-                let options = options();
-                step_match(false);
-                spawn_local(async move {
-                    let size = file_size_for(pane).await;
-                    super::sync::find_previous(shell, pane.editor_pane(), query, options, size);
-                    record_pos();
-                });
-            }>"前を検索"</button>
-            <button class="tool" title="次を検索 (Enter)" on:click=move |_| {
-                let shell = shell;
-                let query = query.get_untracked();
-                let options = options();
-                step_match(true);
-                spawn_local(async move {
-                    let size = file_size_for(pane).await;
-                    super::sync::find(shell, pane.editor_pane(), query, options, size);
-                    record_pos();
-                });
-            }>"次を検索"</button>
-            <span class="find-count">{move || {
-                let q = query.get();
-                if q.is_empty() {
-                    return "0 / 0 件".to_string();
-                }
-                let cur = current_match.get();
-                match estimated_count.get() {
-                    Some(0) => "0 / 0 件".to_string(),
-                    Some(estimated) => format!("{cur} / {estimated} 件"),
-                    None => format!("{cur} / 推定中…"),
-                }
-            }}</span>
-            <input
-                class="find-input"
-                node_ref=replacement_field
-                placeholder="置換後"
-                prop:value=move || replacement.get()
-                on:input=move |ev| replacement.set(event_target_value(&ev))
-                on:keydown=move |ev: KeyboardEvent| {
-                    if ev.key() == "Escape" {
-                        ev.prevent_default();
-                        close_bar();
-                        return;
-                    }
-                    if ev.key() == "Enter" && !ev.is_composing() {
-                        ev.prevent_default();
-                        let query = query.get_untracked();
-                        let replacement = replacement.get_untracked();
-                        let options = options();
-                        step_match(true);
-                        spawn_local(async move {
-                            let size = file_size_for(pane).await;
-                            editor::replace_and_find_next(&query, &replacement, options, size);
-                            record_pos();
-                        });
-                    }
-                }
-            />
-            <button class="tool" on:click=move |_| {
-                let query = query.get_untracked();
-                let replacement = replacement.get_untracked();
-                let options = options();
-                step_match(true);
-                spawn_local(async move {
-                    let size = file_size_for(pane).await;
-                    editor::replace_and_find_next(&query, &replacement, options, size);
-                    record_pos();
-                });
-            }>"置換して次へ"</button>
-            <button class="tool" on:click=move |_| {
-                let shell = shell;
-                let query = query.get_untracked();
-                let replacement = replacement.get_untracked();
-                let options = options();
-                spawn_local(async move {
-                    if !editor::fully_resident() {
-                        shell.status.set(
-                            "大きなファイルのすべて置換はまだ対応していません".into(),
-                        );
-                        return;
-                    }
-                    let size = file_size_for(pane).await;
-                    let replaced = editor::replace_all(&query, &replacement, options, size);
-                    shell.status.set(format!("{replaced} 件置換しました"));
-                });
-            }>"すべて置換"</button>
-            <label class="find-toggle" title="大文字小文字を区別">
-                <input
-                    type="checkbox"
-                    prop:checked=move || case_sensitive.get()
-                    on:change=move |ev| {
-                        case_sensitive.set(event_target_checked(&ev));
-                        update_preview(
-                            pane,
-                            query.get_untracked(),
-                            options(),
-                            estimated_count,
-                            estimate_generation,
-                        );
-                    }
-                />
-                "Aa"
-            </label>
-            <label class="find-toggle" title="正規表現（置換では $1 で後方参照、\\t で列の区切り、\\n で改行）">
-                <input
-                    type="checkbox"
-                    prop:checked=move || regex.get()
-                    on:change=move |ev| {
-                        regex.set(event_target_checked(&ev));
-                        update_preview(
-                            pane,
-                            query.get_untracked(),
-                            options(),
-                            estimated_count,
-                            estimate_generation,
-                        );
-                    }
-                />
-                ".*"
-            </label>
-            <button class="tool" on:click=move |_| close_bar()>"✕"</button>
+                            if ev.key() == "Enter" && !ev.is_composing() {
+                                ev.prevent_default();
+                                let shell = shell;
+                                let query = query.get_untracked();
+                                let options = options();
+                                let forward = !ev.shift_key();
+                                step_match(forward);
+                                spawn_local(async move {
+                                    let size = file_size_for(pane).await;
+                                    if forward {
+                                        super::sync::find(shell, pane.editor_pane(), query, options, size);
+                                    } else {
+                                        super::sync::find_previous(shell, pane.editor_pane(), query, options, size);
+                                    }
+                                    record_pos();
+                                });
+                            }
+                        }
+                    />
+                    <span class="find-count-badge">
+                        {move || {
+                            let q = query.get();
+                            if q.is_empty() {
+                                return "".to_string();
+                            }
+                            let cur = current_match.get();
+                            match estimated_count.get() {
+                                Some(0) => "0/0".to_string(),
+                                Some(estimated) => format!("{cur}/{estimated}"),
+                                None => format!("{cur}/…"),
+                            }
+                        }}
+                    </span>
+                    <div class="find-options-inline">
+                        <button
+                            class=move || if case_sensitive.get() { "find-opt-btn active" } else { "find-opt-btn" }
+                            title="大文字・小文字を区別 (Aa)"
+                            on:click=move |_| {
+                                case_sensitive.update(|v| *v = !*v);
+                                update_preview(
+                                    pane,
+                                    query.get_untracked(),
+                                    options(),
+                                    estimated_count,
+                                    estimate_generation,
+                                );
+                            }
+                        >
+                            "Aa"
+                        </button>
+                        <button
+                            class=move || if regex.get() { "find-opt-btn active" } else { "find-opt-btn" }
+                            title="正規表現 (.*)"
+                            on:click=move |_| {
+                                regex.update(|v| *v = !*v);
+                                update_preview(
+                                    pane,
+                                    query.get_untracked(),
+                                    options(),
+                                    estimated_count,
+                                    estimate_generation,
+                                );
+                            }
+                        >
+                            ".*"
+                        </button>
+                    </div>
+                </div>
+                <div class="find-actions">
+                    <button
+                        class="find-icon-btn"
+                        title="前を検索 (Shift+Enter)"
+                        on:click=move |_| {
+                            let shell = shell;
+                            let query = query.get_untracked();
+                            let options = options();
+                            step_match(false);
+                            spawn_local(async move {
+                                let size = file_size_for(pane).await;
+                                super::sync::find_previous(shell, pane.editor_pane(), query, options, size);
+                                record_pos();
+                            });
+                        }
+                    >
+                        "↑"
+                    </button>
+                    <button
+                        class="find-icon-btn"
+                        title="次を検索 (Enter)"
+                        on:click=move |_| {
+                            let shell = shell;
+                            let query = query.get_untracked();
+                            let options = options();
+                            step_match(true);
+                            spawn_local(async move {
+                                let size = file_size_for(pane).await;
+                                super::sync::find(shell, pane.editor_pane(), query, options, size);
+                                record_pos();
+                            });
+                        }
+                    >
+                        "↓"
+                    </button>
+                    <button
+                        class="find-icon-btn find-close-btn"
+                        title="閉じる (Escape)"
+                        on:click=move |_| close_bar()
+                    >
+                        "✕"
+                    </button>
+                </div>
+            </div>
+
+            <Show when=move || replace_expanded.get()>
+                <div class="findbar-row findbar-replace-row">
+                    <div class="find-toggle-spacer"/>
+                    <div class="find-input-wrap">
+                        <input
+                            class="find-input"
+                            node_ref=replacement_field
+                            placeholder="置換後"
+                            prop:value=move || replacement.get()
+                            on:input=move |ev| replacement.set(event_target_value(&ev))
+                            on:keydown=move |ev: KeyboardEvent| {
+                                if ev.key() == "Escape" {
+                                    ev.prevent_default();
+                                    close_bar();
+                                    return;
+                                }
+                                if ev.key() == "Enter" && !ev.is_composing() {
+                                    ev.prevent_default();
+                                    let query = query.get_untracked();
+                                    let replacement = replacement.get_untracked();
+                                    let options = options();
+                                    step_match(true);
+                                    spawn_local(async move {
+                                        let size = file_size_for(pane).await;
+                                        editor::replace_and_find_next(&query, &replacement, options, size);
+                                        record_pos();
+                                    });
+                                }
+                            }
+                        />
+                    </div>
+                    <div class="find-actions">
+                        <button
+                            class="find-icon-btn"
+                            title="置換して次へ"
+                            on:click=move |_| {
+                                let query = query.get_untracked();
+                                let replacement = replacement.get_untracked();
+                                let options = options();
+                                step_match(true);
+                                spawn_local(async move {
+                                    let size = file_size_for(pane).await;
+                                    editor::replace_and_find_next(&query, &replacement, options, size);
+                                    record_pos();
+                                });
+                            }
+                        >
+                            "ab→ac"
+                        </button>
+                        <button
+                            class="find-icon-btn"
+                            title="すべて置換"
+                            on:click=move |_| {
+                                let shell = shell;
+                                let query = query.get_untracked();
+                                let replacement = replacement.get_untracked();
+                                let options = options();
+                                spawn_local(async move {
+                                    if !editor::fully_resident() {
+                                        shell.status.set(
+                                            "大きなファイルのすべて置換はまだ対応していません".into(),
+                                        );
+                                        return;
+                                    }
+                                    let size = file_size_for(pane).await;
+                                    let replaced = editor::replace_all(&query, &replacement, options, size);
+                                    shell.status.set(format!("{replaced} 件置換しました"));
+                                });
+                            }
+                        >
+                            "ab⇒ac"
+                        </button>
+                    </div>
+                </div>
+            </Show>
         </div>
     }
 }

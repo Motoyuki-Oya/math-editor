@@ -101,12 +101,12 @@ pub(super) fn PaneView(
             on:focusin=move |_| shell.note_focus(pane)
         >
             <Tabs shell=shell pane=pane context_menu=context_menu/>
-            <Show when=move || pane.palette.get()>
-                <Palette/>
-            </Show>
             <div class="editor-container">
                 <Show when=move || pane.searching.get()>
                     <FindBar shell=shell pane=pane/>
+                </Show>
+                <Show when=move || pane.palette.get()>
+                    <Palette pane=pane/>
                 </Show>
                 <div
                     class="editor"
@@ -261,158 +261,188 @@ fn Tabs(
             data-tabbar-pane=pane.key
             data-tabbar-count=move || pane.tabs.with(Vec::len)
         >
-            {move || {
-                let current = pane.current.get();
-                let tabs = pane.tabs.get();
-                let tabs_len = tabs.len();
-                tabs.into_iter()
-                    .enumerate()
-                    .map(|(index, tab)| {
-                        let is_dragging = move || {
-                            shell
-                                .tab_drag
-                                .get()
-                                .map(|d| {
-                                    d.is_dragging
-                                        && d.src_pane_key == pane.key
-                                        && d.src_tab_index == index
-                                })
-                                .unwrap_or(false)
-                        };
-                        let drop_class = move || {
-                            let target = shell
-                                .tab_drag
-                                .get()
-                                .and_then(|d| if d.is_dragging { d.drop_target } else { None });
-                            match target {
-                                Some(t) if t.pane_key == pane.key && t.index == index => {
-                                    " tab-drop-before"
-                                }
-                                Some(t)
-                                    if t.pane_key == pane.key
-                                        && t.index == index + 1
-                                        && index == tabs_len.saturating_sub(1) =>
-                                {
-                                    " tab-drop-after"
-                                }
-                                _ => "",
-                            }
-                        };
-                        view! {
-                            <span
-                                class=move || {
-                                    format!(
-                                        "tab{}{}{}",
-                                        if index == current { " tab-current" } else { "" },
-                                        if is_dragging() { " tab-dragging" } else { "" },
-                                        drop_class(),
-                                    )
-                                }
-                                data-tab-pane=pane.key
-                                data-tab-index=index
-                                on:contextmenu=move |ev: web_sys::MouseEvent| {
-                                    ev.prevent_default();
-                                    ev.stop_propagation();
-                                    shell.focus_on(pane);
-                                    context_menu.set(Some(ContextMenuState {
-                                        x: ev.client_x() as f64,
-                                        y: ev.client_y() as f64,
-                                        pane_key: pane.key,
-                                        tab_index: index,
-                                    }));
-                                }
-                                on:pointerdown=move |ev: web_sys::PointerEvent| {
-                                    if ev.button() != 0 {
-                                        return;
+            <div
+                class="tab-list"
+                on:wheel=move |ev: web_sys::WheelEvent| {
+                    if let Some(target) = ev.current_target() {
+                        use wasm_bindgen::JsCast;
+                        if let Ok(el) = target.dyn_into::<web_sys::HtmlElement>() {
+                            let delta = if ev.delta_y().abs() > ev.delta_x().abs() {
+                                ev.delta_y()
+                            } else {
+                                ev.delta_x()
+                            };
+                            el.set_scroll_left(el.scroll_left() + delta as i32);
+                        }
+                    }
+                }
+            >
+                {move || {
+                    let current = pane.current.get();
+                    let tabs = pane.tabs.get();
+                    let tabs_len = tabs.len();
+                    tabs.into_iter()
+                        .enumerate()
+                        .map(|(index, tab)| {
+                            let is_dragging = move || {
+                                shell
+                                    .tab_drag
+                                    .get()
+                                    .map(|d| {
+                                        d.is_dragging
+                                            && d.src_pane_key == pane.key
+                                            && d.src_tab_index == index
+                                    })
+                                    .unwrap_or(false)
+                            };
+                            let drop_class = move || {
+                                let target = shell
+                                    .tab_drag
+                                    .get()
+                                    .and_then(|d| if d.is_dragging { d.drop_target } else { None });
+                                match target {
+                                    Some(t) if t.pane_key == pane.key && t.index == index => {
+                                        " tab-drop-before"
                                     }
-                                    let name = tab.name();
-                                    let dirty = tab.dirty.get_untracked();
-                                    shell
-                                        .tab_drag
-                                        .set(
-                                            Some(shell::TabDragState {
-                                                src_pane_key: pane.key,
-                                                src_tab_index: index,
-                                                tab_name: format!(
-                                                    "{}{}",
-                                                    if dirty { "*" } else { "" },
-                                                    name,
-                                                ),
-                                                start_x: ev.client_x() as f64,
-                                                start_y: ev.client_y() as f64,
-                                                current_x: ev.client_x() as f64,
-                                                current_y: ev.client_y() as f64,
-                                                is_dragging: false,
-                                                drop_target: None,
-                                            }),
-                                        );
+                                    Some(t)
+                                        if t.pane_key == pane.key
+                                            && t.index == index + 1
+                                            && index == tabs_len.saturating_sub(1) =>
+                                    {
+                                        " tab-drop-after"
+                                    }
+                                    _ => "",
                                 }
-                            >
-                                <span class="tab-name">
-                                    {move || {
+                            };
+                            view! {
+                                <span
+                                    class=move || {
                                         format!(
-                                            "{}{}",
-                                            if tab.dirty.get() { "*" } else { "" },
-                                            tab.name(),
+                                            "tab{}{}{}",
+                                            if index == current { " tab-current" } else { "" },
+                                            if is_dragging() { " tab-dragging" } else { "" },
+                                            drop_class(),
                                         )
-                                    }}
-                                </span>
-                                <button
-                                    class="tab-close"
-                                    title="閉じる (Ctrl+W)"
-                                    on:pointerdown=move |ev: web_sys::PointerEvent| ev.stop_propagation()
-                                    on:click=move |ev: web_sys::MouseEvent| {
+                                    }
+                                    data-tab-pane=pane.key
+                                    data-tab-index=index
+                                    on:contextmenu=move |ev: web_sys::MouseEvent| {
+                                        ev.prevent_default();
                                         ev.stop_propagation();
                                         shell.focus_on(pane);
-                                        shell.close(pane, index);
+                                        context_menu.set(Some(ContextMenuState {
+                                            x: ev.client_x() as f64,
+                                            y: ev.client_y() as f64,
+                                            pane_key: pane.key,
+                                            tab_index: index,
+                                        }));
+                                    }
+                                    on:pointerdown=move |ev: web_sys::PointerEvent| {
+                                        if ev.button() != 0 {
+                                            return;
+                                        }
+                                        let name = tab.name();
+                                        let dirty = tab.dirty.get_untracked();
+                                        shell
+                                            .tab_drag
+                                            .set(
+                                                Some(shell::TabDragState {
+                                                    src_pane_key: pane.key,
+                                                    src_tab_index: index,
+                                                    tab_name: format!(
+                                                        "{}{}",
+                                                        if dirty { "*" } else { "" },
+                                                        name,
+                                                    ),
+                                                    start_x: ev.client_x() as f64,
+                                                    start_y: ev.client_y() as f64,
+                                                    current_x: ev.client_x() as f64,
+                                                    current_y: ev.client_y() as f64,
+                                                    is_dragging: false,
+                                                    drop_target: None,
+                                                }),
+                                            );
                                     }
                                 >
-                                    "×"
-                                </button>
-                            </span>
+                                    <span class="tab-name">
+                                        {move || {
+                                            format!(
+                                                "{}{}",
+                                                if tab.dirty.get() { "*" } else { "" },
+                                                tab.name(),
+                                            )
+                                        }}
+                                    </span>
+                                    <button
+                                        class="tab-close"
+                                        title="閉じる (Ctrl+W)"
+                                        on:pointerdown=move |ev: web_sys::PointerEvent| ev.stop_propagation()
+                                        on:click=move |ev: web_sys::MouseEvent| {
+                                            ev.stop_propagation();
+                                            shell.focus_on(pane);
+                                            shell.close(pane, index);
+                                        }
+                                    >
+                                        "×"
+                                    </button>
+                                </span>
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                }}
+                <button
+                    class="tab-add"
+                    title="新しいタブ (Ctrl+T)"
+                    on:mousedown=hold_focus
+                    on:click=move |_| {
+                        shell.focus_on(pane);
+                        shell.new_document();
+                    }
+                >
+                    "+"
+                </button>
+            </div>
+            <div class="tabbar-actions">
+                <button
+                    class=move || if pane.searching.get() { "tab-action-btn active" } else { "tab-action-btn" }
+                    title="検索 (Ctrl+F)"
+                    on:mousedown=hold_focus
+                    on:click=move |_| {
+                        shell.focus_on(pane);
+                        let opening = !pane.searching.get_untracked();
+                        pane.searching.set(opening);
+                        shell.searching.set(opening);
+                        if opening {
+                            shell.find_focus.set(Some(shell::Field::Query));
                         }
-                    })
-                    .collect::<Vec<_>>()
-            }}
-            <button
-                class="tab-add"
-                title="新しいタブ (Ctrl+T)"
-                on:mousedown=hold_focus
-                on:click=move |_| {
-                    shell.focus_on(pane);
-                    shell.new_document();
-                }
-            >
-                "+"
-            </button>
-            <button
-                class="tab-split"
-                title="右に分割して開く (Ctrl+\\)"
-                on:mousedown=hold_focus
-                on:click=move |_| {
-                    shell.focus_on(pane);
-                    let cur = pane.current.get_untracked();
-                    shell.split_tab(pane, cur);
-                }
-            >
-                "◫"
-            </button>
-            <button
-                class="tab-palette"
-                title="設定"
-                on:mousedown=hold_focus
-                on:click=move |_| shell.preferences.update(|open| *open = !*open)
-            >
-                "⚙"
-            </button>
-            <button
-                class="tab-palette"
-                title="構造パレット (Ctrl+M)"
-                on:mousedown=hold_focus
-                on:click=move |_| pane.palette.update(|open| *open = !*open)
-            >
-                "∑"
-            </button>
+                    }
+                >
+                    "🔍"
+                </button>
+                <button
+                    class=move || if pane.palette.get() { "tab-action-btn active" } else { "tab-action-btn" }
+                    title="構造パレット (Ctrl+M)"
+                    on:mousedown=hold_focus
+                    on:click=move |_| {
+                        shell.focus_on(pane);
+                        pane.palette.update(|open| *open = !*open);
+                    }
+                >
+                    "∑"
+                </button>
+                <button
+                    class="tab-action-btn"
+                    title="左右に分割して開く (Ctrl+\\)"
+                    on:mousedown=hold_focus
+                    on:click=move |_| {
+                        shell.focus_on(pane);
+                        let cur = pane.current.get_untracked();
+                        shell.split_tab(pane, cur);
+                    }
+                >
+                    "◫"
+                </button>
+            </div>
         </div>
     }
 }

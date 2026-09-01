@@ -3056,6 +3056,7 @@ dependencies = [
  "serde_json",
  "toml 0.8.2",
  "unicode-normalization",
+ "unicode-segmentation",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

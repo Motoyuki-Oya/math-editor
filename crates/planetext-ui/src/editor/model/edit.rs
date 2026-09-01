@@ -89,8 +89,27 @@ impl Editor {
 
     /// キャレットがどこにあっても、そのキャレットにテキストを挿入します。単一の文字が入力されるため、構造内のショートカットは引き続き実行されます。それ以上のものはペーストなのでそのまま入ります。
     pub fn insert_text(&mut self, text: &str) -> Did {
+        self.insert_text_with_mode(text, false)
+    }
+
+    pub fn insert_text_with_mode(&mut self, text: &str, overwrite: bool) -> Did {
         if self.touches_absent() {
             return Did::Nothing;
+        }
+        if overwrite && !self.has_inside() && !text.contains('\n') {
+            for cursor in self.cursors.iter_mut().filter(|c| c.inside.is_none()) {
+                if cursor.sel.is_caret() {
+                    let head = cursor.sel.head;
+                    let line_len = self.document.text.line_len(head.line);
+                    if head.col < line_len {
+                        let next_col = crate::structure::text::character_after(
+                            self.document.text.line(head.line),
+                            head.col,
+                        );
+                        cursor.sel = Sel::range(head, Pos::new(head.line, next_col));
+                    }
+                }
+            }
         }
         let mut chars = text.chars();
         if let (Some(c), None) = (chars.next(), chars.next()) {
@@ -493,6 +512,101 @@ impl Editor {
         let end = self.text.insert(at, with);
         self.cursors = vec![UnifiedCursor::caret(end)];
     }
+
+    /// Alt+↑ / Alt+↓: 選択行（または現在の行）を上下の行と入れ替えます。
+    pub fn move_lines_vertical(&mut self, down: bool) -> Did {
+        if self.touches_absent() || self.has_inside() {
+            return Did::Nothing;
+        }
+        if self.cursors.is_empty() {
+            return Did::Nothing;
+        }
+        let total_lines = self.document.text.line_count();
+        let mut min_line = total_lines;
+        let mut max_line = 0;
+        for c in &self.cursors {
+            let s = c.start();
+            let e = c.end();
+            min_line = min_line.min(s.line);
+            if e.line > s.line && e.col == 0 {
+                max_line = max_line.max(e.line.saturating_sub(1));
+            } else {
+                max_line = max_line.max(e.line);
+            }
+        }
+        if min_line > max_line || max_line >= total_lines {
+            return Did::Nothing;
+        }
+
+        if !down {
+            // Alt+Up: 上の行と入れ替え
+            if min_line == 0 {
+                return Did::Nothing;
+            }
+            let swap_target = min_line - 1;
+            let mut new_rows: Vec<Row> = Vec::with_capacity(max_line - swap_target + 1);
+            for l in min_line..=max_line {
+                new_rows.push(self.document.text.line(l).to_vec());
+            }
+            new_rows.push(self.document.text.line(swap_target).to_vec());
+
+            self.record(Step::Other);
+            let from = Pos::new(swap_target, 0);
+            let to = Pos::new(max_line, self.document.text.line_len(max_line));
+            let at = self.document.text.remove(from, to);
+            self.document.text.insert(at, new_rows);
+            self.mark_lines_modified(swap_target, max_line, max_line);
+
+            for cursor in &mut self.cursors {
+                if cursor.inside.is_none() {
+                    if cursor.sel.head.line >= min_line && cursor.sel.head.line <= max_line {
+                        cursor.sel.head.line -= 1;
+                    } else if cursor.sel.head.line == swap_target {
+                        cursor.sel.head.line = max_line;
+                    }
+                    if cursor.sel.anchor.line >= min_line && cursor.sel.anchor.line <= max_line {
+                        cursor.sel.anchor.line -= 1;
+                    } else if cursor.sel.anchor.line == swap_target {
+                        cursor.sel.anchor.line = max_line;
+                    }
+                }
+            }
+        } else {
+            // Alt+Down: 下の行と入れ替え
+            if max_line + 1 >= total_lines {
+                return Did::Nothing;
+            }
+            let swap_target = max_line + 1;
+            let mut new_rows: Vec<Row> = Vec::with_capacity(swap_target - min_line + 1);
+            new_rows.push(self.document.text.line(swap_target).to_vec());
+            for l in min_line..=max_line {
+                new_rows.push(self.document.text.line(l).to_vec());
+            }
+
+            self.record(Step::Other);
+            let from = Pos::new(min_line, 0);
+            let to = Pos::new(swap_target, self.document.text.line_len(swap_target));
+            let at = self.document.text.remove(from, to);
+            self.document.text.insert(at, new_rows);
+            self.mark_lines_modified(min_line, swap_target, swap_target);
+
+            for cursor in &mut self.cursors {
+                if cursor.inside.is_none() {
+                    if cursor.sel.head.line >= min_line && cursor.sel.head.line <= max_line {
+                        cursor.sel.head.line += 1;
+                    } else if cursor.sel.head.line == swap_target {
+                        cursor.sel.head.line = min_line;
+                    }
+                    if cursor.sel.anchor.line >= min_line && cursor.sel.anchor.line <= max_line {
+                        cursor.sel.anchor.line += 1;
+                    } else if cursor.sel.anchor.line == swap_target {
+                        cursor.sel.anchor.line = min_line;
+                    }
+                }
+            }
+        }
+        Did::Changed
+    }
 }
 
 #[cfg(test)]
@@ -640,5 +754,44 @@ mod tests {
         // Shift + Up -> expands to line 0
         editor.move_v(false, true);
         assert_eq!(editor.primary(), Sel::range(Pos::new(1, 6), Pos::new(0, 6)));
+    }
+
+    #[test]
+    fn alt_up_down_moves_lines() {
+        let mut doc = Document::default();
+        doc.load(Text::from_lines(nodes_of("Line 1\nLine 2\nLine 3")));
+        let mut editor = Editor {
+            document: doc,
+            cursors: vec![UnifiedCursor::caret(Pos::new(1, 2))], // in Line 2
+        };
+
+        // Alt+Up moves Line 2 up to line 0
+        editor.move_lines_vertical(false);
+        let line0: String = editor.document.text.line(0).iter().filter_map(crate::structure::text::as_char).collect();
+        let line1: String = editor.document.text.line(1).iter().filter_map(crate::structure::text::as_char).collect();
+        let line2: String = editor.document.text.line(2).iter().filter_map(crate::structure::text::as_char).collect();
+        assert_eq!(line0, "Line 2");
+        assert_eq!(line1, "Line 1");
+        assert_eq!(line2, "Line 3");
+        assert_eq!(editor.primary().head, Pos::new(0, 2));
+
+        // Alt+Down moves Line 2 back down to line 1
+        editor.move_lines_vertical(true);
+        let line0: String = editor.document.text.line(0).iter().filter_map(crate::structure::text::as_char).collect();
+        let line1: String = editor.document.text.line(1).iter().filter_map(crate::structure::text::as_char).collect();
+        let line2: String = editor.document.text.line(2).iter().filter_map(crate::structure::text::as_char).collect();
+        assert_eq!(line0, "Line 1");
+        assert_eq!(line1, "Line 2");
+        assert_eq!(line2, "Line 3");
+        assert_eq!(editor.primary().head, Pos::new(1, 2));
+    }
+
+    #[test]
+    fn overwrite_mode_replaces_character() {
+        let mut editor = make_editor("abcdef");
+        editor.set_caret(Pos::new(0, 2)); // at 'c'
+        editor.insert_text_with_mode("X", true); // overwrite 'c' with 'X'
+        assert_eq!(text_of(&editor), "abXdef");
+        assert_eq!(editor.primary().head, Pos::new(0, 3));
     }
 }

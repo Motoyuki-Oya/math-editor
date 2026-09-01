@@ -982,34 +982,52 @@ pub fn as_char(node: &Node) -> Option<char> {
     }
 }
 
-fn extends_character(c: char) -> bool {
-    unicode_normalization::char::canonical_combining_class(c) != 0
-}
-
 pub fn character_before(row: &[Node], index: usize) -> usize {
-    let mut start = index.saturating_sub(1);
-    while start > 0
-        && row
-            .get(start)
-            .and_then(as_char)
-            .is_some_and(extends_character)
-    {
-        start -= 1;
+    if index == 0 || row.is_empty() {
+        return 0;
     }
-    start
+    let target = index.min(row.len());
+    let mut char_start = target;
+    while char_start > 0 && as_char(&row[char_start - 1]).is_some() {
+        char_start -= 1;
+    }
+    if char_start == target {
+        return target - 1;
+    }
+    let s: String = row[char_start..target]
+        .iter()
+        .filter_map(as_char)
+        .collect();
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut cluster_char_len = 1;
+    for g in s.graphemes(true) {
+        cluster_char_len = g.chars().count();
+    }
+    target.saturating_sub(cluster_char_len).max(char_start)
 }
 
 pub fn character_after(row: &[Node], index: usize) -> usize {
-    let mut end = (index + 1).min(row.len());
-    while end < row.len()
-        && row
-            .get(end)
-            .and_then(as_char)
-            .is_some_and(extends_character)
-    {
-        end += 1;
+    if index >= row.len() {
+        return row.len();
     }
-    end
+    let mut char_end = index;
+    while char_end < row.len() && as_char(&row[char_end]).is_some() {
+        char_end += 1;
+    }
+    if char_end == index {
+        return index + 1;
+    }
+    let s: String = row[index..char_end]
+        .iter()
+        .filter_map(as_char)
+        .collect();
+    use unicode_segmentation::UnicodeSegmentation;
+    if let Some(first_grapheme) = s.graphemes(true).next() {
+        let cluster_char_len = first_grapheme.chars().count();
+        (index + cluster_char_len).min(row.len())
+    } else {
+        (index + 1).min(row.len())
+    }
 }
 
 #[cfg(test)]
@@ -1023,6 +1041,14 @@ mod tests {
                 .map(|line| SourceLine::Plain(line.to_string()))
                 .collect(),
         )
+    }
+
+    #[test]
+    fn emoji_zwj_family_is_single_grapheme_cluster() {
+        let row: Row = "👨‍👩‍👦‍👦".chars().map(Node::char).collect();
+        let total_chars = row.len(); // 7 code points with ZWJ
+        assert_eq!(character_after(&row, 0), total_chars);
+        assert_eq!(character_before(&row, total_chars), 0);
     }
 
     #[test]
