@@ -177,6 +177,14 @@ fn create_document(application: State<'_, Application>) -> OpenedDocument {
     application.create_document()
 }
 
+#[tauri::command]
+fn create_document_from_draft(
+    application: State<'_, Application>,
+    lines: Vec<String>,
+) -> Result<OpenedDocument, String> {
+    application.create_document_from_draft(lines)
+}
+
 /// 文書から行の範囲を返します。async なのは、同期コマンドはメインスレッドで
 /// 走り、待たせた分だけ UI が止まるため（以下の文書コマンドも同じ）。
 #[tauri::command]
@@ -709,6 +717,7 @@ pub fn run() {
             open_document,
             finish_document,
             create_document,
+            create_document_from_draft,
             read_lines,
             read_tail,
             replace_lines,

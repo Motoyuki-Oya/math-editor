@@ -305,6 +305,11 @@ impl Application {
         self.adopt(Document::empty())
     }
 
+    pub fn create_document_from_draft(&self, lines: Vec<String>) -> Result<OpenedDocument, String> {
+        let doc = Document::from_draft(lines);
+        Ok(self.adopt(doc))
+    }
+
     pub fn read_lines(
         &self,
         handle: u64,
@@ -658,6 +663,40 @@ mod tests {
             application.handle_gui_event(GuiEvent::GlobalShortcut("toggle".into())),
             GuiAction::ToggleWindow
         ));
+    }
+
+    #[test]
+    fn create_document_from_draft_returns_an_already_populated_handle() {
+        let application = Application::default();
+        let doc = application
+            .create_document_from_draft(vec!["draft one".into(), "draft two".into()])
+            .unwrap();
+
+        assert_eq!(doc.line_count, 2);
+        assert_eq!(
+            application.read_lines(doc.handle, 0, usize::MAX).unwrap(),
+            vec!["draft one", "draft two"]
+        );
+        assert!(!application
+            .with_doc(doc.handle, |doc| Ok(doc.is_clean()))
+            .unwrap());
+        assert!(application.undo_lines(doc.handle, false).unwrap().is_none());
+    }
+
+    #[test]
+    fn create_document_still_returns_a_clean_empty_document() {
+        let application = Application::default();
+        let doc = application.create_document();
+
+        assert_eq!(doc.line_count, 1);
+        assert_eq!(
+            application.read_lines(doc.handle, 0, usize::MAX).unwrap(),
+            vec![""]
+        );
+        assert!(application
+            .with_doc(doc.handle, |doc| Ok(doc.is_clean()))
+            .unwrap());
+        assert!(application.undo_lines(doc.handle, false).unwrap().is_none());
     }
 
     #[test]

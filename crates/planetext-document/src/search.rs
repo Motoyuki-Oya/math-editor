@@ -1,8 +1,7 @@
-use std::io::{Read, Seek, SeekFrom};
-
 use crate::document::Document;
+use crate::edit_buffers::EditRange;
 use crate::piece_tree::Piece;
-use crate::source::{Source, STRIDE};
+use crate::source::{FileEncoding, CHUNK};
 
 /// 通常文字列の一致バイト位置。ASCIIの大小無視は先頭バイト候補だけを調べ、
 /// 候補ごとにASCII case-foldで比較する。結果はregexと同じ非重複一致。
@@ -58,6 +57,262 @@ pub(crate) fn literal_positions(
         .collect()
 }
 
+#[derive(Clone, Copy)]
+struct RawScanHit {
+    line: usize,
+    notation: bool,
+    line_start: usize,
+    start: usize,
+}
+
+fn character_columns(
+    encoding: FileEncoding,
+    positions: &[usize],
+    mut read: impl FnMut(usize, usize) -> Result<Vec<u8>, String>,
+) -> Result<Vec<usize>, String> {
+    let mut decoder = encoding.encoding().new_decoder_without_bom_handling();
+    let mut byte = 0;
+    let mut characters = 0;
+    let output_capacity = positions.last().copied().unwrap_or(0).min(CHUNK) * 3;
+    let mut output = String::with_capacity(output_capacity);
+    let mut columns = Vec::with_capacity(positions.len());
+    for &position in positions {
+        while byte < position {
+            let take = (position - byte).min(CHUNK);
+            let input = read(byte, take)?;
+            if input.len() != take {
+                return Err("検索中に文書ストアの読み取り範囲が変わりました".to_string());
+            }
+            let mut consumed = 0;
+            while consumed < input.len() {
+                output.clear();
+                let (result, read, _) =
+                    decoder.decode_to_string(&input[consumed..], &mut output, false);
+                consumed += read;
+                characters += output.chars().count();
+                if matches!(result, encoding_rs::CoderResult::InputEmpty) {
+                    break;
+                }
+            }
+            byte += take;
+        }
+        columns.push(characters);
+    }
+    Ok(columns)
+}
+
+fn convert_raw_hits(
+    raw: Vec<RawScanHit>,
+    encoding: FileEncoding,
+    line_base: usize,
+    query_characters: usize,
+    mut read: impl FnMut(usize, usize) -> Result<Vec<u8>, String>,
+) -> Result<Vec<ScanHit>, String> {
+    let mut converted = Vec::with_capacity(raw.len());
+    let mut at = 0;
+    while at < raw.len() {
+        let hit = raw[at];
+        if hit.notation {
+            converted.push(ScanHit {
+                line: line_base + hit.line,
+                notation: true,
+                start: 0,
+                end: 0,
+            });
+            at += 1;
+            continue;
+        }
+        let mut end = at + 1;
+        while end < raw.len() && raw[end].line == hit.line && !raw[end].notation {
+            end += 1;
+        }
+        let positions: Vec<usize> = raw[at..end]
+            .iter()
+            .map(|found| found.start - found.line_start)
+            .collect();
+        let columns = character_columns(encoding, &positions, |from, len| {
+            read(hit.line_start + from, len)
+        })?;
+        for (found, start) in raw[at..end].iter().zip(columns) {
+            converted.push(ScanHit {
+                line: line_base + found.line,
+                notation: false,
+                start,
+                end: start + query_characters,
+            });
+        }
+        at = end;
+    }
+    Ok(converted)
+}
+
+fn aligned_positions(
+    haystack: &[u8],
+    needle: &[u8],
+    case_sensitive: bool,
+    unit: usize,
+) -> Vec<usize> {
+    literal_positions(haystack, needle, case_sensitive)
+        .into_iter()
+        .filter(|at| at.is_multiple_of(unit))
+        .collect()
+}
+
+/// `read` が返す小さな窓だけを保持し、窓境界の最長パターン分だけ重ねる。
+/// PieceTree のピース境界は行境界なので、検索語は境界を越えない（従来の
+/// 行単位検索と同じ）。同じ行のバイトが複数ピースへ分割される構造は作られない。
+fn scan_encoded_range(
+    len: usize,
+    lines: usize,
+    encoding: FileEncoding,
+    delimiter: &[u8],
+    query: &[u8],
+    marker: &[u8],
+    case_sensitive: bool,
+    limit: usize,
+    mut read: impl FnMut(usize, usize) -> Result<Vec<u8>, String>,
+) -> Result<(Vec<RawScanHit>, usize), String> {
+    let unit = encoding.unit_bytes();
+    let cr = encoding.encode_str("\r");
+    let query_has_delimiter = aligned_positions(query, delimiter, true, unit)
+        .first()
+        .is_some();
+    let longest = query
+        .len()
+        .max(marker.len())
+        .max(delimiter.len() + cr.len());
+    let overlap = longest.saturating_sub(unit);
+    let mut carry = Vec::new();
+    let mut offset = 0;
+    let mut processed = 0;
+    let mut line = 0;
+    let mut line_start = 0;
+    let mut line_marker = false;
+    let mut line_matches = Vec::new();
+    let mut hits = Vec::new();
+    let mut next_literal_end = 0;
+
+    let finish_line = |content_end: usize,
+                       line: usize,
+                       line_start: usize,
+                       line_marker: bool,
+                       line_matches: &mut Vec<(usize, usize)>,
+                       hits: &mut Vec<RawScanHit>| {
+        if line_marker {
+            hits.push(RawScanHit {
+                line,
+                notation: true,
+                line_start,
+                start: 0,
+            });
+        } else {
+            for (start, end) in line_matches.drain(..) {
+                if end <= content_end && hits.len() < limit {
+                    hits.push(RawScanHit {
+                        line,
+                        notation: false,
+                        line_start,
+                        start,
+                    });
+                }
+            }
+        }
+        line_matches.clear();
+    };
+
+    loop {
+        let take = (len - offset).min(CHUNK);
+        let part = read(offset, take)?;
+        if part.len() != take {
+            return Err("検索中に文書ストアの読み取り範囲が変わりました".to_string());
+        }
+        let data_start = offset.saturating_sub(carry.len());
+        carry.extend_from_slice(&part);
+        offset += take;
+        let eof = offset == len;
+        let safe_len = if eof {
+            carry.len()
+        } else {
+            carry.len().saturating_sub(overlap) / unit * unit
+        };
+        let safe_end = data_start + safe_len;
+        let mut events = Vec::new();
+        for at in aligned_positions(&carry, delimiter, true, unit) {
+            let absolute = data_start + at;
+            if absolute >= processed && absolute < safe_end {
+                events.push((absolute, 2_u8));
+            }
+        }
+        for at in aligned_positions(&carry, marker, true, unit) {
+            let absolute = data_start + at;
+            if absolute >= processed && absolute < safe_end {
+                events.push((absolute, 1_u8));
+            }
+        }
+        if !query_has_delimiter {
+            for at in aligned_positions(&carry, query, case_sensitive, unit) {
+                let absolute = data_start + at;
+                if absolute >= processed && absolute < safe_end && absolute >= next_literal_end {
+                    events.push((absolute, 0_u8));
+                }
+            }
+        }
+        events.sort_unstable();
+        for (at, kind) in events {
+            match kind {
+                0 => {
+                    next_literal_end = at + query.len();
+                    line_matches.push((at, next_literal_end));
+                }
+                1 => {
+                    line_marker = true;
+                    line_matches.clear();
+                }
+                _ => {
+                    let content_end = if at - data_start >= cr.len()
+                        && &carry[at - data_start - cr.len()..at - data_start] == cr.as_slice()
+                    {
+                        at - cr.len()
+                    } else {
+                        at
+                    };
+                    finish_line(
+                        content_end,
+                        line,
+                        line_start,
+                        line_marker,
+                        &mut line_matches,
+                        &mut hits,
+                    );
+                    line += 1;
+                    line_start = at + delimiter.len();
+                    line_marker = false;
+                    if hits.len() >= limit || line >= lines {
+                        return Ok((hits, line));
+                    }
+                }
+            }
+        }
+        processed = safe_end;
+        if eof {
+            break;
+        }
+        carry.drain(..safe_len);
+    }
+    if line < lines {
+        finish_line(
+            len,
+            line,
+            line_start,
+            line_marker,
+            &mut line_matches,
+            &mut hits,
+        );
+        line += 1;
+    }
+    Ok((hits, line.min(lines)))
+}
+
 /// 検索走査の 1 件。`notation` の行は一致ではなく「frontend が見るべき行」。
 #[derive(serde::Serialize)]
 pub(crate) struct ScanHit {
@@ -82,100 +337,6 @@ pub(crate) struct SearchSpec<'a> {
     pub(crate) from: usize,
     pub(crate) end: usize,
     pub(crate) after_col: Option<usize>,
-}
-
-impl Source {
-    /// ディスク上の行範囲をひとかたまりで読み、通常文字列を memmem で探す。
-    /// 行ごとの read_until を避け、一致した場所だけ文字の列位置へ変換する。
-    fn literal_matches(
-        &mut self,
-        from: usize,
-        count: usize,
-        query: &str,
-        case_sensitive: bool,
-        marker: u8,
-    ) -> Result<Vec<ScanHit>, String> {
-        if count == 0 || query.is_empty() {
-            return Ok(Vec::new());
-        }
-        self.check()?;
-        let lines = self.lines();
-        let to = from.saturating_add(count).min(lines);
-        if from >= to {
-            return Ok(Vec::new());
-        }
-        let (base, start, end) = {
-            let state = self.index.state.lock().unwrap();
-            let group = (from / STRIDE).min(state.marks.len().saturating_sub(1));
-            let end_group = to.div_ceil(STRIDE);
-            (
-                group * STRIDE,
-                state.marks[group],
-                state.marks.get(end_group).copied().unwrap_or(self.bytes),
-            )
-        };
-        let mut bytes = vec![0; (end - start) as usize];
-        let broken = |e| format!("{} を読めませんでした: {e}", self.path.display());
-        self.file.seek(SeekFrom::Start(start)).map_err(broken)?;
-        self.file.read_exact(&mut bytes).map_err(broken)?;
-        let query_bytes = self.encoding.encode_str(query);
-        let match_bytes = if query_bytes.is_empty() {
-            Vec::new()
-        } else {
-            literal_positions(&bytes, &query_bytes, case_sensitive)
-        };
-        let marker_bytes: Vec<usize> = memchr::memchr_iter(marker, &bytes).collect();
-        // 候補が無ければ行番号へ直す必要もない。巨大な改行配列を作らず返る。
-        if match_bytes.is_empty() && marker_bytes.is_empty() {
-            return Ok(Vec::new());
-        }
-        let delimiter = self.delimiter();
-        let newlines: Vec<usize> = memchr::memchr_iter(delimiter, &bytes).collect();
-        let line_at = |byte: usize| base + newlines.partition_point(|newline| *newline < byte);
-        let mut marked = std::collections::HashSet::new();
-        for byte in marker_bytes {
-            let line = line_at(byte);
-            if line >= from && line < to {
-                marked.insert(line);
-            }
-        }
-        let mut hits: Vec<ScanHit> = marked
-            .iter()
-            .map(|line| ScanHit {
-                line: *line,
-                notation: true,
-                start: 0,
-                end: 0,
-            })
-            .collect();
-        for byte in match_bytes {
-            let line = line_at(byte);
-            if line < from || line >= to || marked.contains(&line) {
-                continue;
-            }
-            let end_byte = byte + query_bytes.len();
-            if bytes[byte..end_byte].contains(&delimiter) {
-                continue;
-            }
-            let line_start = (line - base)
-                .checked_sub(1)
-                .and_then(|index| newlines.get(index))
-                .map_or(0, |newline| newline + 1);
-            let start_col = self
-                .encoding
-                .decode_line(&bytes[line_start..byte])
-                .chars()
-                .count();
-            hits.push(ScanHit {
-                line,
-                notation: false,
-                start: start_col,
-                end: start_col + query.chars().count(),
-            });
-        }
-        hits.sort_by_key(|hit| (hit.line, hit.start));
-        Ok(hits)
-    }
 }
 
 impl Document {
@@ -250,73 +411,129 @@ impl Document {
         limit: usize,
     ) -> Result<(Vec<ScanHit>, usize), String> {
         let to = from.saturating_add(count).min(self.count);
+        if from >= to || limit == 0 {
+            return Ok((Vec::new(), from));
+        }
+        let query_characters = query.chars().count();
         let mut hits = Vec::new();
-        let mut line = 0;
-        for index in 0..self.pieces.len() {
-            let len = self.pieces[index].len();
-            let (start, end) = (line, line + len);
-            line = end;
-            if end <= from {
-                continue;
-            }
-            if start >= to {
-                break;
-            }
-            let skip = from.saturating_sub(start);
-            let take = to.min(end) - (start + skip);
-            match &self.pieces[index] {
-                Piece::Fresh(lines) => {
-                    for (offset, text) in lines.as_slice()[skip..skip + take].iter().enumerate() {
-                        let at = start + skip + offset;
-                        if text.contains(marker) {
-                            hits.push(ScanHit {
-                                line: at,
-                                notation: true,
-                                start: 0,
-                                end: 0,
-                            });
-                        } else {
-                            for byte in
-                                literal_positions(text.as_bytes(), query.as_bytes(), case_sensitive)
-                            {
-                                let start_col = text[..byte].chars().count();
-                                hits.push(ScanHit {
-                                    line: at,
-                                    notation: false,
-                                    start: start_col,
-                                    end: start_col + query.chars().count(),
-                                });
-                            }
-                        }
+        let mut scanned_to = from;
+        let mut error = None;
+        self.pieces
+            .for_each_line_range(from, to, &mut |piece_line, piece, skip, take| {
+                if hits.len() >= limit || error.is_some() {
+                    return false;
+                }
+                let result: Result<(Vec<ScanHit>, usize), String> = match piece {
+                    Piece::Source { from, len, .. } => {
+                        let Some(source) = self.source.as_mut() else {
+                            error = Some(
+                                "文書ストアのディスク参照が失われました。開き直してください"
+                                    .to_string(),
+                            );
+                            return false;
+                        };
+                        (|| {
+                            let (range_from, range_to) =
+                                source.byte_range_for_lines(from, len, skip, take)?;
+                            let encoding = source.encoding;
+                            let delimiter = source.delimiter();
+                            let encoded_query = encoding.encode_str(query);
+                            let encoded_marker = encoding.encode_str(&marker.to_string());
+                            let (raw, scanned) = scan_encoded_range(
+                                range_to - range_from,
+                                take,
+                                encoding,
+                                &delimiter,
+                                &encoded_query,
+                                &encoded_marker,
+                                case_sensitive,
+                                limit - hits.len(),
+                                |offset, size| source.read_byte_range(range_from + offset, size),
+                            )?;
+                            let converted = convert_raw_hits(
+                                raw,
+                                encoding,
+                                piece_line + skip,
+                                query_characters,
+                                |offset, size| source.read_byte_range(range_from + offset, size),
+                            )?;
+                            Ok((converted, scanned))
+                        })()
+                    }
+                    Piece::Edit {
+                        from,
+                        len,
+                        newlines,
+                        starts_newline,
+                        ends_newline,
+                        encoding,
+                        line_ending,
+                    } => {
+                        let leading = usize::from(starts_newline)
+                            * crate::edit_buffers::EditBuffers::line_separator_len(
+                                encoding,
+                                line_ending,
+                            );
+                        let range = EditRange {
+                            from: from + leading,
+                            len: len - leading,
+                            lines: newlines + usize::from(!ends_newline)
+                                - usize::from(starts_newline),
+                            encoding,
+                            line_ending,
+                        };
+                        let bytes = self.buffers.bytes(range);
+                        let range_start = self.buffers.byte_offset_after_lines(range, skip);
+                        let range_end = self
+                            .buffers
+                            .byte_offset_after_lines(range, skip.saturating_add(take));
+                        let selected = &bytes[range_start..range_end];
+                        let delimiter = encoding.encode_str(match line_ending {
+                            crate::source::LineEnding::Cr => "\r",
+                            _ => "\n",
+                        });
+                        let encoded_query = encoding.encode_str(query);
+                        let encoded_marker = encoding.encode_str(&marker.to_string());
+                        scan_encoded_range(
+                            selected.len(),
+                            take,
+                            encoding,
+                            &delimiter,
+                            &encoded_query,
+                            &encoded_marker,
+                            case_sensitive,
+                            limit - hits.len(),
+                            |offset, size| Ok(selected[offset..offset + size].to_vec()),
+                        )
+                        .and_then(|(raw, scanned)| {
+                            let converted = convert_raw_hits(
+                                raw,
+                                encoding,
+                                piece_line + skip,
+                                query_characters,
+                                |offset, size| Ok(selected[offset..offset + size].to_vec()),
+                            )?;
+                            Ok((converted, scanned))
+                        })
+                    }
+                };
+                match result {
+                    Ok((mut piece_hits, scanned)) => {
+                        hits.append(&mut piece_hits);
+                        scanned_to = piece_line + skip + scanned;
+                        hits.len() < limit
+                    }
+                    Err(message) => {
+                        error = Some(message);
+                        false
                     }
                 }
-                Piece::Disk { from: disk, .. } => {
-                    let disk = *disk + skip;
-                    let base = start + skip;
-                    let source = self.source.as_mut().ok_or_else(|| {
-                        "文書ストアのディスク参照が失われました。開き直してください".to_string()
-                    })?;
-                    hits.extend(
-                        source
-                            .literal_matches(disk, take, query, case_sensitive, marker as u8)?
-                            .into_iter()
-                            .map(|hit| ScanHit {
-                                line: base + (hit.line - disk),
-                                ..hit
-                            }),
-                    );
-                }
-            }
-            if hits.len() >= limit {
-                hits.sort_by_key(|hit| (hit.line, hit.start));
-                hits.truncate(limit);
-                let scanned_to = hits.last().map_or(from, |hit| hit.line + 1);
-                return Ok((hits, scanned_to));
-            }
+            });
+        if let Some(error) = error {
+            Err(error)
+        } else {
+            Ok((hits, scanned_to))
         }
-        hits.sort_by_key(|hit| (hit.line, hit.start));
-        hits.truncate(limit);
-        Ok((hits, to))
     }
 
     /// 検索の走査で見つかったもの: 素の行の一致か、読み替え（記法の解釈）を
@@ -403,5 +620,50 @@ impl Document {
             true
         })?;
         Ok(found)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::character_columns;
+    use crate::source::FileEncoding;
+
+    #[test]
+    fn character_columns_process_each_prefix_byte_once() {
+        let repeated = format!("{}needle", "x".repeat(26)).repeat(1_000);
+        let text = format!("前{repeated}");
+        let bytes = text.as_bytes();
+        let positions = super::literal_positions(bytes, b"needle", true);
+        let mut bytes_read = 0;
+        let columns = character_columns(FileEncoding::Utf8, &positions, |from, len| {
+            bytes_read += len;
+            Ok(bytes[from..from + len].to_vec())
+        })
+        .unwrap();
+
+        assert_eq!(columns[0], 27);
+        assert_eq!(columns[999], 31_995);
+        assert_eq!(bytes_read, *positions.last().unwrap());
+    }
+
+    #[test]
+    fn progressive_columns_keep_supported_encoding_boundaries() {
+        for encoding in [
+            FileEncoding::Utf8,
+            FileEncoding::ShiftJis,
+            FileEncoding::EucJp,
+            FileEncoding::Iso2022Jp,
+            FileEncoding::Utf16Le,
+            FileEncoding::Utf16Be,
+        ] {
+            let bytes = encoding.encode_str("前needle後needle");
+            let query = encoding.encode_str("needle");
+            let positions = super::aligned_positions(&bytes, &query, true, encoding.unit_bytes());
+            let columns = character_columns(encoding, &positions, |from, len| {
+                Ok(bytes[from..from + len].to_vec())
+            })
+            .unwrap();
+            assert_eq!(columns, vec![1, 8], "{encoding:?}");
+        }
     }
 }

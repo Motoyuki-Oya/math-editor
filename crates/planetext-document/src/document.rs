@@ -11,19 +11,28 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::edit_buffers::EditBuffer;
+use crate::edit_buffers::{EditBuffers, EditRange};
 use crate::operation_log::{Edit, OperationLog, Step, HISTORY_LIMIT};
-use crate::piece_tree::Piece;
+use crate::piece_tree::{Piece, PieceTree};
 use crate::source::{BackgroundScan, FileEncoding, LineEnding, ScanIndex, Source};
+
+#[derive(Clone, Copy)]
+struct PendingSource {
+    from: usize,
+    len: usize,
+    prefix_newlines: usize,
+}
 
 pub(crate) struct Document {
     pub(crate) source: Option<Source>,
-    pub(crate) pieces: Vec<Piece>,
+    pub(crate) pieces: PieceTree,
+    pub(crate) buffers: EditBuffers,
     /// すべてのピースの行数の合計。
     pub(crate) count: usize,
     pub(crate) log: OperationLog,
     pub(crate) encoding: FileEncoding,
     pub(crate) line_ending: LineEnding,
+    pending_source: Option<PendingSource>,
 }
 
 /// 元に戻す・やり直すの結果: 復元すべき控えと、行が変わった範囲の始まり。
@@ -35,6 +44,41 @@ pub(crate) struct Restored {
 }
 
 impl Document {
+    fn source_pieces(source: &Source, count: usize) -> (Vec<Piece>, Option<PendingSource>) {
+        let content_offset = source.content_offset as usize;
+        let pending = source.pending_from.map(|from| PendingSource {
+            from: from as usize,
+            len: source.bytes as usize - from as usize,
+            prefix_newlines: count,
+        });
+        let pieces = match pending {
+            Some(pending) => vec![
+                Piece::Source {
+                    from: content_offset,
+                    len: pending.from - content_offset,
+                    newlines: count,
+                    starts_newline: false,
+                    ends_newline: true,
+                },
+                Piece::Source {
+                    from: pending.from,
+                    len: pending.len,
+                    newlines: 0,
+                    starts_newline: false,
+                    ends_newline: true,
+                },
+            ],
+            None => vec![Piece::Source {
+                from: content_offset,
+                len: source.bytes as usize - content_offset,
+                newlines: count.saturating_sub(1),
+                starts_newline: false,
+                ends_newline: false,
+            }],
+        };
+        (pieces, pending)
+    }
+
     pub(crate) fn open(path: &str) -> Result<(Document, Option<BackgroundScan>), String> {
         Self::open_with_encoding(path, None)
     }
@@ -47,17 +91,17 @@ impl Document {
         let count = source.lines();
         let enc = source.encoding;
         let line_ending = source.line_ending;
+        let (pieces, pending_source) = Self::source_pieces(&source, count);
         Ok((
             Document {
-                pieces: vec![Piece::Disk {
-                    from: 0,
-                    lines: count,
-                }],
+                pieces: PieceTree::new(pieces),
+                buffers: EditBuffers::default(),
                 count,
                 encoding: enc,
                 line_ending,
                 source: Some(source),
                 log: OperationLog::default(),
+                pending_source,
             },
             scan,
         ))
@@ -70,12 +114,48 @@ impl Document {
         let line_ending = LineEnding::Lf;
         Document {
             source: None,
-            pieces: vec![Piece::Fresh(EditBuffer::new(vec![String::new()]))],
+            pieces: PieceTree::new(vec![Piece::Edit {
+                from: 0,
+                len: 0,
+                newlines: 0,
+                starts_newline: false,
+                ends_newline: false,
+                encoding: FileEncoding::Utf8,
+                line_ending,
+            }]),
+            buffers: EditBuffers::default(),
             count: 1,
             log: OperationLog::default(),
             encoding: FileEncoding::Utf8,
             line_ending,
+            pending_source: None,
         }
+    }
+
+    pub(crate) fn from_draft(lines: Vec<String>) -> Document {
+        let mut doc = Self::empty();
+        let mut lines: Vec<String> = lines
+            .into_iter()
+            .map(|line| line.trim_end_matches(['\r', '\n']).to_string())
+            .collect();
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+        let (range, newlines) = doc
+            .buffers
+            .append_lines(&lines, doc.encoding, doc.line_ending);
+        doc.pieces = PieceTree::new(vec![Piece::Edit {
+            from: range.from,
+            len: range.len,
+            newlines,
+            starts_newline: false,
+            ends_newline: false,
+            encoding: range.encoding,
+            line_ending: range.line_ending,
+        }]);
+        doc.count = lines.len();
+        doc.log.mark_dirty_without_history();
+        doc
     }
 
     pub(crate) fn encoding(&self) -> FileEncoding {
@@ -106,10 +186,10 @@ impl Document {
         self.count = count;
         self.encoding = encoding;
         self.line_ending = new_source.line_ending;
-        self.pieces = vec![Piece::Disk {
-            from: 0,
-            lines: count,
-        }];
+        let (pieces, pending_source) = Self::source_pieces(&new_source, count);
+        self.pending_source = pending_source;
+        self.pieces = PieceTree::new(pieces);
+        self.buffers = EditBuffers::default();
         self.log.clear();
         self.source = Some(new_source);
         Ok(scan)
@@ -122,9 +202,7 @@ impl Document {
         self.count
     }
     pub(crate) fn bytes(&self) -> usize {
-        self.source
-            .as_ref()
-            .map_or(0, |source| source.bytes as usize)
+        self.pieces.byte_len
     }
     pub(crate) fn scan_index(&self) -> Option<Arc<ScanIndex>> {
         self.source.as_ref().map(|source| source.index.clone())
@@ -135,24 +213,36 @@ impl Document {
     pub(crate) fn search_snapshot(&self) -> Result<Document, String> {
         Ok(Document {
             source: self.source.as_ref().map(Source::search_copy).transpose()?,
-            pieces: self.pieces.clone(),
+            pieces: PieceTree::new(self.pieces.pieces()),
+            buffers: self.buffers.clone(),
             count: self.count,
             log: OperationLog::default(),
             encoding: self.encoding,
             line_ending: self.line_ending,
+            pending_source: self.pending_source,
         })
     }
 
-    /// 走査完了後に呼ぶ。ディスクのピースと行数を確定値へ合わせる。
+    /// 走査完了後に呼ぶ。未走査だった元ファイル範囲がまだ残る場合だけ集約値を確定する。
     pub(crate) fn confirm_scan(&mut self) {
+        let Some(pending) = self.pending_source.take() else {
+            return;
+        };
         let Some(source) = self.source.as_ref() else {
             return;
         };
-        let exact = source.lines();
-        if let Some(Piece::Disk { from, lines }) = self.pieces.last_mut() {
-            *lines = exact.saturating_sub(*from);
-        }
-        self.count = self.pieces.iter().map(Piece::len).sum();
+        let exact_newlines = source
+            .lines()
+            .saturating_sub(1)
+            .saturating_sub(pending.prefix_newlines);
+        self.pieces
+            .confirm_source_range(pending.from, pending.len, exact_newlines);
+        self.count = self.pieces.line_count();
+    }
+
+    fn pending_source_index(&self) -> Option<usize> {
+        let pending = self.pending_source?;
+        self.pieces.source_range_index(pending.from, pending.len)
     }
 
     /// 文書の行 `from..from+count` に `f` を呼ぶ。ディスクの範囲は seek して
@@ -167,47 +257,59 @@ impl Document {
         if from >= to {
             return Ok(());
         }
-        let mut line = 0;
-        // ピースを付け替えないので、位置は前から数える。ピースの数は編集の
-        // かたまりの数程度で、行数には比例しない。
-        for index in 0..self.pieces.len() {
-            let len = self.pieces[index].len();
-            let (start, end) = (line, line + len);
-            line = end;
-            if end <= from {
-                continue;
-            }
-            if start >= to {
-                break;
-            }
-            let skip = from.saturating_sub(start);
-            let take = to.min(end) - (start + skip);
-            match &self.pieces[index] {
-                Piece::Fresh(lines) => {
-                    for (i, text) in lines.as_slice()[skip..skip + take].iter().enumerate() {
-                        if !f(start + skip + i, text) {
-                            return Ok(());
+        let mut error = None;
+        self.pieces
+            .for_each_line_range(from, to, &mut |start, piece, skip, take| match piece {
+                Piece::Edit {
+                    from,
+                    len,
+                    newlines,
+                    starts_newline,
+                    ends_newline,
+                    encoding,
+                    line_ending,
+                } => {
+                    let leading = usize::from(starts_newline)
+                        * EditBuffers::line_separator_len(encoding, line_ending);
+                    self.buffers.for_each_line(
+                        EditRange {
+                            from: from + leading,
+                            len: len - leading,
+                            lines: newlines + usize::from(!ends_newline)
+                                - usize::from(starts_newline),
+                            encoding,
+                            line_ending,
+                        },
+                        skip,
+                        take,
+                        &mut |i, text| f(start + skip + i, text),
+                    )
+                }
+                Piece::Source { from, len, .. } => match self.source.as_mut() {
+                    Some(source) => {
+                        match source.for_each_range_line(from, len, skip, take, &mut |i, text| {
+                            f(start + skip + i, text)
+                        }) {
+                            Ok(done) => done,
+                            Err(e) => {
+                                error = Some(e);
+                                false
+                            }
                         }
                     }
-                }
-                Piece::Disk { from: disk, .. } => {
-                    let disk = *disk + skip;
-                    let base = start + skip;
-                    let mut go = true;
-                    let source = self.source.as_mut().ok_or_else(|| {
-                        "文書ストアのディスク参照が失われました。開き直してください".to_string()
-                    })?;
-                    source.each_line(disk, take, &mut |at, text| {
-                        go = f(base + (at - disk), text);
-                        go
-                    })?;
-                    if !go {
-                        return Ok(());
+                    None => {
+                        error = Some(
+                            "文書ストアのディスク参照が失われました。開き直してください"
+                                .to_string(),
+                        );
+                        false
                     }
-                }
-            }
+                },
+            });
+        match error {
+            Some(e) => Err(e),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     pub(crate) fn read(&mut self, from: usize, count: usize) -> Result<Vec<String>, String> {
@@ -287,18 +389,66 @@ impl Document {
         if removed.len() != removed_count {
             return Err("置き換える範囲が大きすぎます".to_string());
         }
-        let a = self.split(from);
-        let b = self.split(to);
+        let old_count = self.count;
+        let pending_source_exists = self.pending_source_index().is_some();
+        let a = self.split(from)?;
+        let b = self.split(to)?;
         let inserted = lines.len();
-        let fresh = (!lines.is_empty()).then(|| Piece::Fresh(EditBuffer::new(lines)));
-        self.pieces.splice(a..b, fresh);
-        self.count = self.count - removed_count + inserted;
+        let starts_newline = from == to && from == old_count && from > 0 && !pending_source_exists;
+        let ends_newline = to < old_count || (to == old_count && pending_source_exists);
+        let fresh = (!lines.is_empty()).then(|| {
+            let (range, newlines) = self.buffers.append_lines_with_boundaries(
+                &lines,
+                self.encoding,
+                self.line_ending,
+                starts_newline,
+                ends_newline,
+            );
+            Piece::Edit {
+                from: range.from,
+                len: range.len,
+                newlines,
+                starts_newline,
+                ends_newline,
+                encoding: range.encoding,
+                line_ending: range.line_ending,
+            }
+        });
+        self.pieces.replace(a, b, fresh.into_iter().collect());
+        if inserted == 0 && to == old_count && from > 0 && !pending_source_exists {
+            let separator_len = self.source.as_ref().map_or_else(
+                || EditBuffers::line_separator_len(self.encoding, self.line_ending),
+                |source| EditBuffers::line_separator_len(source.encoding, source.line_ending),
+            );
+            self.pieces.trim_trailing_newline(separator_len);
+        }
+        self.count = old_count - removed_count + inserted;
         if self.count == 0 {
             // 文書は少なくとも 1 行。frontend のモデルも空文書を 1 行と数える。
-            self.pieces
-                .push(Piece::Fresh(EditBuffer::new(vec![String::new()])));
+            let (range, _) =
+                self.buffers
+                    .append_lines(&[String::new()], self.encoding, self.line_ending);
+            self.pieces.insert(
+                0,
+                Piece::Edit {
+                    from: range.from,
+                    len: range.len,
+                    newlines: 0,
+                    starts_newline: false,
+                    ends_newline: false,
+                    encoding: range.encoding,
+                    line_ending: range.line_ending,
+                },
+            );
             self.count = 1;
         }
+        debug_assert_eq!(self.count, self.pieces.line_count());
+        if self.pending_source.is_none() {
+            debug_assert_eq!(self.count.saturating_sub(1), self.pieces.newline_count);
+        }
+        let removed = self
+            .log
+            .append_deleted(&removed, self.encoding, self.line_ending);
         Ok(Edit {
             from,
             removed,
@@ -307,32 +457,60 @@ impl Document {
     }
 
     /// ピース列を行 `line` の前で切り、その位置のピース番号を返す。
-    fn split(&mut self, line: usize) -> usize {
-        let mut start = 0;
-        for index in 0..self.pieces.len() {
-            let len = self.pieces[index].len();
-            if line == start {
-                return index;
+    fn split(&mut self, line: usize) -> Result<usize, String> {
+        if line == self.count {
+            if let Some(index) = self.pending_source_index() {
+                return Ok(index);
             }
-            if line < start + len {
-                let offset = line - start;
-                let tail = match &mut self.pieces[index] {
-                    Piece::Disk { from, lines } => {
-                        let tail = Piece::Disk {
-                            from: *from + offset,
-                            lines: *lines - offset,
-                        };
-                        *lines = offset;
-                        tail
-                    }
-                    Piece::Fresh(lines) => Piece::Fresh(lines.split_off(offset)),
-                };
-                self.pieces.insert(index + 1, tail);
-                return index + 1;
-            }
-            start += len;
         }
-        self.pieces.len()
+        let (index, start) = self.pieces.locate_line(line);
+        let Some(piece) = self.pieces.piece(index).cloned() else {
+            return Ok(index);
+        };
+        let len = piece.lines();
+        if line == start {
+            return Ok(index);
+        }
+        if line < start + len {
+            let skip = line - start;
+            let leading = usize::from(piece.starts_newline());
+            let byte = match &piece {
+                Piece::Edit {
+                    from,
+                    len,
+                    newlines,
+                    starts_newline,
+                    ends_newline,
+                    encoding,
+                    line_ending,
+                } => {
+                    let leading_bytes =
+                        leading * EditBuffers::line_separator_len(*encoding, *line_ending);
+                    leading_bytes
+                        + self.buffers.byte_offset_after_lines(
+                            EditRange {
+                                from: *from + leading_bytes,
+                                len: *len - leading_bytes,
+                                lines: *newlines + usize::from(!*ends_newline)
+                                    - usize::from(*starts_newline),
+                                encoding: *encoding,
+                                line_ending: *line_ending,
+                            },
+                            skip,
+                        )
+                }
+                Piece::Source { from, len, .. } => {
+                    let source = self.source.as_mut().ok_or_else(|| {
+                        "文書ストアのディスク参照が失われました。開き直してください".to_string()
+                    })?;
+                    source.byte_offset_after_lines(*from, *len, skip)?
+                }
+            };
+            let newlines = skip + leading;
+            self.pieces.split_piece(index, byte, newlines, byte > 0);
+            return Ok(index + 1);
+        }
+        Ok(index)
     }
 
     pub(crate) fn undo(&mut self) -> Result<Option<Restored>, String> {
@@ -372,7 +550,7 @@ impl Document {
             inverse.push(self.splice(
                 edit.from,
                 edit.from + edit.inserted,
-                edit.removed.clone(),
+                self.log.read_deleted(edit.removed),
             )?);
         }
         // 巻き戻しで生成された逆操作（inverse）は、次の再巻き戻し（Redo/Undo）時に
