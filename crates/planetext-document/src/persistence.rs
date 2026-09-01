@@ -139,6 +139,7 @@ impl Document {
             }),
             bytes: written,
             content_offset: initial_offset,
+            pending_from: None,
             ends_with_newline,
             modified,
             encoding: self.encoding,

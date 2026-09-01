@@ -89,7 +89,7 @@ impl FileEncoding {
         }
     }
 
-    fn unit_bytes(self) -> usize {
+    pub(crate) fn unit_bytes(self) -> usize {
         match self {
             FileEncoding::Utf16Le | FileEncoding::Utf16Be => 2,
             _ => 1,
@@ -220,13 +220,39 @@ pub(crate) fn index_chunk(
     delimiter: &[u8],
     unit_bytes: usize,
 ) {
+    index_chunk_impl(chunk, offset, line, marks, delimiter, unit_bytes);
+}
+
+/// 戻り値は、位置列挙が必要だった1バイトブロック数。通常ビルドでは捨てるが、
+/// テストでは改行密度に依存しない高速経路を構造的に確認する。
+fn index_chunk_impl(
+    chunk: &[u8],
+    offset: u64,
+    line: &mut usize,
+    marks: &mut Vec<u64>,
+    delimiter: &[u8],
+    unit_bytes: usize,
+) -> usize {
     if unit_bytes == 1 {
-        for at in memchr::memchr_iter(delimiter[0], chunk) {
-            *line += 1;
-            if (*line).is_multiple_of(STRIDE) {
-                marks.push(offset + at as u64 + 1);
+        const COUNT_BLOCK: usize = 64 * 1024;
+        let mut enumerated = 0;
+        for (block_index, block) in chunk.chunks(COUNT_BLOCK).enumerate() {
+            let count = memchr::memchr_iter(delimiter[0], block).count();
+            let next_line = *line + count;
+            if *line / STRIDE != next_line / STRIDE {
+                enumerated += 1;
+                let block_offset = offset + (block_index * COUNT_BLOCK) as u64;
+                for at in memchr::memchr_iter(delimiter[0], block) {
+                    *line += 1;
+                    if (*line).is_multiple_of(STRIDE) {
+                        marks.push(block_offset + at as u64 + 1);
+                    }
+                }
+            } else {
+                *line = next_line;
             }
         }
+        enumerated
     } else {
         for at in (0..chunk.len().saturating_sub(1)).step_by(unit_bytes) {
             if &chunk[at..at + unit_bytes] == delimiter {
@@ -236,6 +262,7 @@ pub(crate) fn index_chunk(
                 }
             }
         }
+        0
     }
 }
 
@@ -275,6 +302,9 @@ pub(crate) struct Source {
     pub(crate) index: Arc<ScanIndex>,
     pub(crate) bytes: u64,
     pub(crate) content_offset: u64,
+    /// バックグラウンド走査中に、同期走査で確定した最後の改行直後。
+    /// この位置から EOF までが、Document が独立して所有する未走査範囲になる。
+    pub(crate) pending_from: Option<u64>,
     pub(crate) ends_with_newline: bool,
     /// 開いたときの姿。外から書き換えられると seek 読みが壊れるので、
     /// 変わっていたら読む前に断る。
@@ -437,6 +467,7 @@ impl Source {
         let mut marks = vec![initial_offset as u64];
         let mut line = 0;
         let mut offset = 0;
+        let provisional_end;
         {
             let chunk_buf = reader
                 .fill_buf()
@@ -454,6 +485,16 @@ impl Source {
                 &delimiter,
                 unit_bytes,
             );
+            provisional_end = if unit_bytes == 1 {
+                memchr::memrchr(delimiter[0], chunk)
+                    .map_or(initial_offset, |at| initial_offset + at + 1)
+            } else {
+                (0..chunk.len().saturating_sub(1))
+                    .step_by(unit_bytes)
+                    .rev()
+                    .find(|at| &chunk[*at..*at + unit_bytes] == delimiter.as_slice())
+                    .map_or(initial_offset, |at| initial_offset + at + unit_bytes)
+            };
             let len = chunk_buf.len();
             offset += len as u64;
             reader.consume(len);
@@ -481,6 +522,7 @@ impl Source {
             index: index.clone(),
             bytes,
             content_offset: initial_offset as u64,
+            pending_from: (!done).then_some(provisional_end as u64),
             ends_with_newline,
             modified,
             encoding,
@@ -687,6 +729,77 @@ impl Source {
         Ok(true)
     }
 
+    /// ピース内の指定行だけを検索できるよう、表示用の行長上限を使わずに
+    /// 対象範囲の先頭・末尾を求める。
+    pub(crate) fn byte_range_for_lines(
+        &mut self,
+        from: usize,
+        len: usize,
+        skip: usize,
+        take: usize,
+    ) -> Result<(usize, usize), String> {
+        self.check()?;
+        if take == 0 {
+            return Ok((from, from));
+        }
+        let (start, remaining_skip) = self.indexed_start(from, len, skip)?;
+        let range_end = from.saturating_add(len);
+        self.file
+            .seek(SeekFrom::Start(start as u64))
+            .map_err(|e| e.to_string())?;
+        let delimiter = self.delimiter();
+        let unit = self.encoding.unit_bytes();
+        let mut cursor = start;
+        let mut skipped = 0;
+        let mut selected_start = (remaining_skip == 0).then_some(start);
+        let mut selected_lines = 0;
+        let mut buffer = vec![0; CHUNK];
+        while cursor < range_end {
+            let read = (range_end - cursor).min(buffer.len());
+            self.file
+                .read_exact(&mut buffer[..read])
+                .map_err(|e| e.to_string())?;
+            let bytes = &buffer[..read];
+            let delimiters: Box<dyn Iterator<Item = usize> + '_> = if unit == 1 {
+                Box::new(memchr::memchr_iter(delimiter[0], bytes))
+            } else {
+                Box::new(
+                    (0..bytes.len().saturating_sub(unit - 1))
+                        .step_by(unit)
+                        .filter(|at| &bytes[*at..*at + unit] == delimiter.as_slice()),
+                )
+            };
+            for at in delimiters {
+                let after = cursor + at + unit;
+                if selected_start.is_none() {
+                    skipped += 1;
+                    if skipped == remaining_skip {
+                        selected_start = Some(after);
+                    }
+                } else {
+                    selected_lines += 1;
+                    if selected_lines == take {
+                        return Ok((selected_start.unwrap(), after));
+                    }
+                }
+            }
+            cursor += read;
+        }
+        Ok((selected_start.unwrap_or(range_end), range_end))
+    }
+
+    pub(crate) fn read_byte_range(&mut self, from: usize, len: usize) -> Result<Vec<u8>, String> {
+        self.check()?;
+        self.file
+            .seek(SeekFrom::Start(from as u64))
+            .map_err(|e| e.to_string())?;
+        let mut bytes = vec![0; len];
+        self.file
+            .read_exact(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        Ok(bytes)
+    }
+
     pub(crate) fn byte_offset_after_lines(
         &mut self,
         from: usize,
@@ -725,6 +838,7 @@ impl Source {
             index: self.index.clone(),
             bytes: self.bytes,
             content_offset: self.content_offset,
+            pending_from: self.pending_from,
             ends_with_newline: self.ends_with_newline,
             modified: self.modified,
             encoding: self.encoding,
@@ -736,6 +850,50 @@ impl Source {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_byte_index_fast_path_matches_reference_across_offsets_and_densities() {
+        fn reference(chunk: &[u8], offset: u64, initial_line: usize) -> (usize, Vec<u64>) {
+            let mut line = initial_line;
+            let mut marks = Vec::new();
+            for at in memchr::memchr_iter(b'\n', chunk) {
+                line += 1;
+                if line.is_multiple_of(STRIDE) {
+                    marks.push(offset + at as u64 + 1);
+                }
+            }
+            (line, marks)
+        }
+
+        let cases = [
+            (0, 0, vec![b'x'; 150_000]),
+            (17, STRIDE - 2, b"a\nb\nc\nd\n".repeat(20_000)),
+            (91_337, STRIDE * 3 + 11, b"\n".repeat(140_000)),
+            (
+                1_000_003,
+                STRIDE - 1,
+                (0..180_000)
+                    .map(|at| if at % 997 == 0 { b'\n' } else { b'x' })
+                    .collect(),
+            ),
+        ];
+        for (offset, initial_line, chunk) in cases {
+            let (expected_line, expected_marks) = reference(&chunk, offset, initial_line);
+            let mut line = initial_line;
+            let mut marks = Vec::new();
+            index_chunk(&chunk, offset, &mut line, &mut marks, b"\n", 1);
+            assert_eq!((line, marks), (expected_line, expected_marks));
+        }
+
+        let sparse = (0..256 * 1024)
+            .map(|at| if at % 20_000 == 0 { b'\n' } else { b'x' })
+            .collect::<Vec<_>>();
+        let mut line = 0;
+        let mut marks = Vec::new();
+        let enumerated = index_chunk_impl(&sparse, 0, &mut line, &mut marks, b"\n", 1);
+        assert_eq!(enumerated, 0);
+        assert_eq!(line, memchr::memchr_iter(b'\n', &sparse).count());
+    }
 
     #[test]
     fn far_range_start_uses_a_sparse_mark() {

@@ -233,10 +233,21 @@ impl PieceTree {
         }
     }
 
-    pub(crate) fn add_newlines_to_last_source(&mut self, newlines: usize) {
-        if add_to_last_source(&mut self.root, newlines) {
+    pub(crate) fn source_range_index(&self, from: usize, len: usize) -> Option<usize> {
+        find_source_range(&self.root, from, len, 0)
+    }
+
+    pub(crate) fn confirm_source_range(
+        &mut self,
+        from: usize,
+        len: usize,
+        newlines: usize,
+    ) -> bool {
+        let updated = update_source_range(&mut self.root, from, len, newlines);
+        if updated {
             self.sync();
         }
+        updated
     }
 
     pub(crate) fn trim_trailing_newline(&mut self, separator_len: usize) {
@@ -302,25 +313,58 @@ fn collect(n: &Node, out: &mut Vec<Piece>) {
     }
 }
 
-fn add_to_last_source(node: &mut Node, added: usize) -> bool {
-    let found = match &mut node.kind {
-        NodeKind::Leaf(pieces) => pieces.iter_mut().rev().find_map(|piece| match piece {
-            Piece::Source { newlines, .. } => {
-                *newlines += added;
-                Some(())
+fn find_source_range(node: &Node, from: usize, len: usize, piece_at: usize) -> Option<usize> {
+    match &node.kind {
+        NodeKind::Leaf(pieces) => {
+            pieces
+                .iter()
+                .enumerate()
+                .find_map(|(index, piece)| match piece {
+                    Piece::Source {
+                        from: piece_from,
+                        len: piece_len,
+                        ..
+                    } if *piece_from == from && *piece_len == len => Some(piece_at + index),
+                    _ => None,
+                })
+        }
+        NodeKind::Branch(children) => {
+            let mut child_at = piece_at;
+            for child in children {
+                if let Some(index) = find_source_range(child, from, len, child_at) {
+                    return Some(index);
+                }
+                child_at += child.pieces;
             }
-            Piece::Edit { .. } => None,
+            None
+        }
+    }
+}
+
+fn update_source_range(node: &mut Node, from: usize, len: usize, exact_newlines: usize) -> bool {
+    let updated = match &mut node.kind {
+        NodeKind::Leaf(pieces) => pieces.iter_mut().any(|piece| match piece {
+            Piece::Source {
+                from: piece_from,
+                len: piece_len,
+                newlines,
+                ends_newline,
+                ..
+            } if *piece_from == from && *piece_len == len => {
+                *newlines = exact_newlines;
+                *ends_newline = false;
+                true
+            }
+            _ => false,
         }),
         NodeKind::Branch(children) => children
             .iter_mut()
-            .rev()
-            .find_map(|child| add_to_last_source(child, added).then_some(())),
-    }
-    .is_some();
-    if found {
+            .any(|child| update_source_range(child, from, len, exact_newlines)),
+    };
+    if updated {
         node.update();
     }
-    found
+    updated
 }
 fn insert_node(n: &mut Node, index: usize, piece: Piece) -> Option<Node> {
     let result = match &mut n.kind {

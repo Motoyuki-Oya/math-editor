@@ -140,6 +140,10 @@ impl EditBuffers {
         }
     }
 
+    pub(crate) fn bytes(&self, range: EditRange) -> &[u8] {
+        &self.insert[range.from..range.from + range.len]
+    }
+
     pub(crate) fn byte_offset_after_lines(&self, range: EditRange, lines: usize) -> usize {
         let bytes = &self.insert[range.from..range.from + range.len];
         let separator = encoded_separator(range.encoding, range.line_ending);

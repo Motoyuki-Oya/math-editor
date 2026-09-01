@@ -2,7 +2,7 @@
 mod tests {
     use crate::document::Document;
     use crate::search::{literal_positions, SearchSpec};
-    use crate::source::{FileEncoding, LineEnding, STRIDE};
+    use crate::source::{FileEncoding, LineEnding, CHUNK, MAX_LINE_BYTES, STRIDE};
 
     /// 一意な一時ファイルに行を書き、開いた文書とパスを返す。
     fn disk_doc(name: &str, lines: &[&str]) -> (Document, String) {
@@ -13,7 +13,11 @@ mod tests {
         ));
         let path = path.to_string_lossy().into_owned();
         std::fs::write(&path, lines.join("\n")).unwrap();
-        let (doc, _) = Document::open(&path).unwrap();
+        let (mut doc, scan) = Document::open(&path).unwrap();
+        if let Some(scan) = scan {
+            scan.run().unwrap();
+            doc.confirm_scan();
+        }
         (doc, path)
     }
 
@@ -142,6 +146,59 @@ mod tests {
         doc.confirm_scan();
         assert_eq!(doc.line_count(), complete_lines + 1);
         assert_eq!(doc.read(complete_lines, 1).unwrap(), vec![""]);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn replacing_provisional_final_line_preserves_pending_source_suffix() {
+        let path = std::env::temp_dir().join(format!(
+            "planetext-store-{}-background-provisional-final.txt",
+            std::process::id()
+        ));
+        let source_lines = 100_000usize;
+        let source = (0..source_lines)
+            .map(|line| format!("source line {line:06}\n"))
+            .collect::<String>();
+        std::fs::write(&path, &source).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let (mut doc, scan) = Document::open(&path).unwrap();
+        let scan = scan.expect("the file must exceed the initial scan chunk");
+        let provisional_line = doc.line_count() - 1;
+        let original = doc.read(provisional_line, 1).unwrap();
+
+        doc.replace(
+            provisional_line,
+            provisional_line + 1,
+            vec!["edited provisional line".into()],
+            1,
+            "before",
+            "after",
+        )
+        .unwrap();
+        scan.run().unwrap();
+        doc.confirm_scan();
+
+        assert_eq!(doc.line_count(), source_lines + 1);
+        assert_eq!(
+            doc.read(provisional_line, 2).unwrap(),
+            vec![
+                "edited provisional line".to_string(),
+                format!("source line {:06}", provisional_line + 1),
+            ]
+        );
+        assert_eq!(
+            doc.read(source_lines - 1, 2).unwrap(),
+            vec![format!("source line {:06}", source_lines - 1), "".into()]
+        );
+
+        let undone = doc.undo().unwrap().unwrap();
+        assert_eq!(undone.state, "before");
+        assert_eq!(doc.line_count(), source_lines + 1);
+        assert_eq!(doc.read(provisional_line, 1).unwrap(), original);
+        assert_eq!(
+            doc.read(source_lines - 1, 2).unwrap(),
+            vec![format!("source line {:06}", source_lines - 1), "".into()]
+        );
         std::fs::remove_file(path).ok();
     }
 
@@ -482,6 +539,39 @@ mod tests {
     }
 
     #[test]
+    fn literal_search_candidates_resume_after_a_character_column() {
+        let (doc, path) = disk_doc("literal-search-resume", &["前needle後needle", "needle"]);
+        let mut snapshot = doc.search_snapshot().unwrap();
+        let pattern = regex::Regex::new("needle").unwrap();
+        let found = snapshot
+            .search_candidates(
+                SearchSpec {
+                    pattern: &pattern,
+                    literal: Some("needle"),
+                    case_sensitive: true,
+                    marker: '$',
+                    from: 0,
+                    end: 2,
+                    after_col: Some(8),
+                },
+                &|| false,
+            )
+            .unwrap();
+
+        assert!(!found.cancelled);
+        assert_eq!(found.scanned_to, 2);
+        assert_eq!(
+            found
+                .hits
+                .iter()
+                .map(|hit| (hit.line, hit.start, hit.end))
+                .collect::<Vec<_>>(),
+            vec![(0, 8, 14), (1, 0, 6)]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn literal_scan_reports_utf8_character_columns() {
         let (mut doc, path) = disk_doc("literal-scan", &["前abc後abc"]);
         let (hits, _) = doc.scan_literal("abc", true, '$', 0, 1, 64).unwrap();
@@ -490,6 +580,157 @@ mod tests {
                 .map(|hit| (hit.start, hit.end))
                 .collect::<Vec<_>>(),
             vec![(1, 4), (5, 8)]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn literal_scan_handles_a_source_line_over_the_display_limit() {
+        let prefix = "x".repeat(MAX_LINE_BYTES + 1);
+        let line = format!("{prefix}needle");
+        let (mut doc, path) = disk_doc("literal-over-display-limit", &[&line]);
+
+        let (hits, scanned_to) = doc.scan_literal("needle", true, '$', 0, 1, 64).unwrap();
+
+        assert_eq!(scanned_to, 1);
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.line, hit.notation, hit.start, hit.end))
+                .collect::<Vec<_>>(),
+            vec![(0, false, MAX_LINE_BYTES + 1, MAX_LINE_BYTES + 7)]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn literal_scan_finds_a_match_across_its_source_chunk_boundary() {
+        let line = format!("{}needle", "x".repeat(CHUNK - 3));
+        let (mut doc, path) = disk_doc("literal-chunk-boundary", &[&line]);
+
+        let (hits, _) = doc.scan_literal("needle", true, '$', 0, 1, 64).unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            (hits[0].line, hits[0].start, hits[0].end),
+            (0, CHUNK - 3, CHUNK + 3)
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn literal_scan_keeps_utf16_alignment_and_character_columns() {
+        for (encoding, alignment_line, alignment_query) in [
+            (FileEncoding::Utf16Le, "\0\u{1}Ā", "Ā"),
+            (FileEncoding::Utf16Be, "ĀĀ\u{1}", "\u{1}"),
+        ] {
+            let (mut doc, path) = encoded_disk_doc(
+                &format!("literal-{encoding:?}"),
+                &["前😀needle後", "needle", alignment_line],
+                encoding,
+                LineEnding::Lf,
+                false,
+            );
+
+            let (hits, _) = doc.scan_literal("needle", true, '$', 0, 3, 64).unwrap();
+            assert_eq!(
+                hits.iter()
+                    .map(|hit| (hit.line, hit.start, hit.end))
+                    .collect::<Vec<_>>(),
+                vec![(0, 2, 8), (1, 0, 6)]
+            );
+            let (aligned, _) = doc
+                .scan_literal(alignment_query, true, '$', 2, 1, 64)
+                .unwrap();
+            assert_eq!(
+                aligned
+                    .iter()
+                    .map(|hit| (hit.line, hit.start, hit.end))
+                    .collect::<Vec<_>>(),
+                vec![(2, 2, 3)]
+            );
+            std::fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn literal_scan_searches_edited_pieces_and_keeps_global_lines() {
+        let (mut doc, path) = disk_doc("literal-edited-piece", &["zero", "one", "two", "three"]);
+        doc.replace(
+            1,
+            3,
+            vec![
+                "edited needle".into(),
+                "middle".into(),
+                "needle tail".into(),
+            ],
+            1,
+            "",
+            "",
+        )
+        .unwrap();
+
+        let (hits, _) = doc
+            .scan_literal("needle", true, '$', 0, doc.line_count(), 64)
+            .unwrap();
+
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.line, hit.start, hit.end))
+                .collect::<Vec<_>>(),
+            vec![(1, 7, 13), (3, 0, 6)]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn notation_marker_suppresses_all_literal_hits_on_its_line() {
+        let (mut doc, path) = disk_doc("literal-notation", &["needle $ needle", "needle"]);
+
+        let (hits, _) = doc.scan_literal("needle", true, '$', 0, 2, 64).unwrap();
+
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.line, hit.notation, hit.start, hit.end))
+                .collect::<Vec<_>>(),
+            vec![(0, true, 0, 0), (1, false, 0, 6)]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn literal_scan_small_limit_counts_a_marker_line_once() {
+        let (mut doc, path) = disk_doc(
+            "literal-small-limit-marker",
+            &["needle $ needle", "前needle後needle", "needle"],
+        );
+
+        let (hits, scanned_to) = doc.scan_literal("needle", true, '$', 0, 3, 2).unwrap();
+
+        assert_eq!(scanned_to, 2);
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.line, hit.notation, hit.start, hit.end))
+                .collect::<Vec<_>>(),
+            vec![(0, true, 0, 0), (1, false, 1, 7)]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn literal_scan_line_numbers_are_correct_across_source_and_edit_pieces() {
+        let (mut doc, path) = disk_doc(
+            "literal-multiple-pieces",
+            &["needle 0", "one", "two", "three", "needle 4"],
+        );
+        doc.replace(2, 3, vec!["needle 2".into()], 1, "", "")
+            .unwrap();
+
+        let (hits, scanned_to) = doc.scan_literal("needle", true, '$', 0, 5, 64).unwrap();
+
+        assert_eq!(scanned_to, 5);
+        assert_eq!(
+            hits.iter().map(|hit| hit.line).collect::<Vec<_>>(),
+            vec![0, 2, 4]
         );
         std::fs::remove_file(path).ok();
     }

@@ -16,6 +16,13 @@ use crate::operation_log::{Edit, OperationLog, Step, HISTORY_LIMIT};
 use crate::piece_tree::{Piece, PieceTree};
 use crate::source::{BackgroundScan, FileEncoding, LineEnding, ScanIndex, Source};
 
+#[derive(Clone, Copy)]
+struct PendingSource {
+    from: usize,
+    len: usize,
+    prefix_newlines: usize,
+}
+
 pub(crate) struct Document {
     pub(crate) source: Option<Source>,
     pub(crate) pieces: PieceTree,
@@ -25,7 +32,7 @@ pub(crate) struct Document {
     pub(crate) log: OperationLog,
     pub(crate) encoding: FileEncoding,
     pub(crate) line_ending: LineEnding,
-    pending_source_newlines: Option<usize>,
+    pending_source: Option<PendingSource>,
 }
 
 /// 元に戻す・やり直すの結果: 復元すべき控えと、行が変わった範囲の始まり。
@@ -37,6 +44,41 @@ pub(crate) struct Restored {
 }
 
 impl Document {
+    fn source_pieces(source: &Source, count: usize) -> (Vec<Piece>, Option<PendingSource>) {
+        let content_offset = source.content_offset as usize;
+        let pending = source.pending_from.map(|from| PendingSource {
+            from: from as usize,
+            len: source.bytes as usize - from as usize,
+            prefix_newlines: count,
+        });
+        let pieces = match pending {
+            Some(pending) => vec![
+                Piece::Source {
+                    from: content_offset,
+                    len: pending.from - content_offset,
+                    newlines: count,
+                    starts_newline: false,
+                    ends_newline: true,
+                },
+                Piece::Source {
+                    from: pending.from,
+                    len: pending.len,
+                    newlines: 0,
+                    starts_newline: false,
+                    ends_newline: true,
+                },
+            ],
+            None => vec![Piece::Source {
+                from: content_offset,
+                len: source.bytes as usize - content_offset,
+                newlines: count.saturating_sub(1),
+                starts_newline: false,
+                ends_newline: false,
+            }],
+        };
+        (pieces, pending)
+    }
+
     pub(crate) fn open(path: &str) -> Result<(Document, Option<BackgroundScan>), String> {
         Self::open_with_encoding(path, None)
     }
@@ -47,27 +89,19 @@ impl Document {
     ) -> Result<(Document, Option<BackgroundScan>), String> {
         let (source, scan) = Source::open_with_encoding(Path::new(path), encoding)?;
         let count = source.lines();
-        let provisional_newlines = count.saturating_sub(1);
-        let pending_source_newlines = scan.as_ref().map(|_| provisional_newlines);
         let enc = source.encoding;
         let line_ending = source.line_ending;
-        let content_offset = source.content_offset as usize;
+        let (pieces, pending_source) = Self::source_pieces(&source, count);
         Ok((
             Document {
-                pieces: PieceTree::new(vec![Piece::Source {
-                    from: content_offset,
-                    len: source.bytes as usize - content_offset,
-                    newlines: provisional_newlines,
-                    starts_newline: false,
-                    ends_newline: false,
-                }]),
+                pieces: PieceTree::new(pieces),
                 buffers: EditBuffers::default(),
                 count,
                 encoding: enc,
                 line_ending,
                 source: Some(source),
                 log: OperationLog::default(),
-                pending_source_newlines,
+                pending_source,
             },
             scan,
         ))
@@ -94,7 +128,7 @@ impl Document {
             log: OperationLog::default(),
             encoding: FileEncoding::Utf8,
             line_ending,
-            pending_source_newlines: None,
+            pending_source: None,
         }
     }
 
@@ -150,17 +184,11 @@ impl Document {
         let (new_source, scan) = Source::open_with_encoding(&path, Some(encoding))?;
         let count = new_source.lines();
         self.count = count;
-        self.pending_source_newlines = scan.as_ref().map(|_| count.saturating_sub(1));
         self.encoding = encoding;
         self.line_ending = new_source.line_ending;
-        let content_offset = new_source.content_offset as usize;
-        self.pieces = PieceTree::new(vec![Piece::Source {
-            from: content_offset,
-            len: new_source.bytes as usize - content_offset,
-            newlines: count.saturating_sub(1),
-            starts_newline: false,
-            ends_newline: false,
-        }]);
+        let (pieces, pending_source) = Self::source_pieces(&new_source, count);
+        self.pending_source = pending_source;
+        self.pieces = PieceTree::new(pieces);
         self.buffers = EditBuffers::default();
         self.log.clear();
         self.source = Some(new_source);
@@ -191,22 +219,30 @@ impl Document {
             log: OperationLog::default(),
             encoding: self.encoding,
             line_ending: self.line_ending,
-            pending_source_newlines: self.pending_source_newlines,
+            pending_source: self.pending_source,
         })
     }
 
-    /// 走査完了後に呼ぶ。未走査だった元ファイル末尾の集約値だけを確定する。
+    /// 走査完了後に呼ぶ。未走査だった元ファイル範囲がまだ残る場合だけ集約値を確定する。
     pub(crate) fn confirm_scan(&mut self) {
-        let Some(provisional_newlines) = self.pending_source_newlines.take() else {
+        let Some(pending) = self.pending_source.take() else {
             return;
         };
         let Some(source) = self.source.as_ref() else {
             return;
         };
-        let exact_newlines = source.lines().saturating_sub(1);
+        let exact_newlines = source
+            .lines()
+            .saturating_sub(1)
+            .saturating_sub(pending.prefix_newlines);
         self.pieces
-            .add_newlines_to_last_source(exact_newlines.saturating_sub(provisional_newlines));
+            .confirm_source_range(pending.from, pending.len, exact_newlines);
         self.count = self.pieces.line_count();
+    }
+
+    fn pending_source_index(&self) -> Option<usize> {
+        let pending = self.pending_source?;
+        self.pieces.source_range_index(pending.from, pending.len)
     }
 
     /// 文書の行 `from..from+count` に `f` を呼ぶ。ディスクの範囲は seek して
@@ -354,11 +390,12 @@ impl Document {
             return Err("置き換える範囲が大きすぎます".to_string());
         }
         let old_count = self.count;
+        let pending_source_exists = self.pending_source_index().is_some();
         let a = self.split(from)?;
         let b = self.split(to)?;
         let inserted = lines.len();
-        let starts_newline = from == to && from == old_count && from > 0;
-        let ends_newline = to < old_count;
+        let starts_newline = from == to && from == old_count && from > 0 && !pending_source_exists;
+        let ends_newline = to < old_count || (to == old_count && pending_source_exists);
         let fresh = (!lines.is_empty()).then(|| {
             let (range, newlines) = self.buffers.append_lines_with_boundaries(
                 &lines,
@@ -378,7 +415,7 @@ impl Document {
             }
         });
         self.pieces.replace(a, b, fresh.into_iter().collect());
-        if inserted == 0 && to == old_count && from > 0 {
+        if inserted == 0 && to == old_count && from > 0 && !pending_source_exists {
             let separator_len = self.source.as_ref().map_or_else(
                 || EditBuffers::line_separator_len(self.encoding, self.line_ending),
                 |source| EditBuffers::line_separator_len(source.encoding, source.line_ending),
@@ -406,7 +443,9 @@ impl Document {
             self.count = 1;
         }
         debug_assert_eq!(self.count, self.pieces.line_count());
-        debug_assert_eq!(self.count.saturating_sub(1), self.pieces.newline_count);
+        if self.pending_source.is_none() {
+            debug_assert_eq!(self.count.saturating_sub(1), self.pieces.newline_count);
+        }
         let removed = self
             .log
             .append_deleted(&removed, self.encoding, self.line_ending);
@@ -419,6 +458,11 @@ impl Document {
 
     /// ピース列を行 `line` の前で切り、その位置のピース番号を返す。
     fn split(&mut self, line: usize) -> Result<usize, String> {
+        if line == self.count {
+            if let Some(index) = self.pending_source_index() {
+                return Ok(index);
+            }
+        }
         let (index, start) = self.pieces.locate_line(line);
         let Some(piece) = self.pieces.piece(index).cloned() else {
             return Ok(index);
