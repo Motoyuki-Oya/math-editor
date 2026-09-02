@@ -595,7 +595,9 @@ impl Source {
                 memchr::memchr_iter(delimiter[0], &chunk).count()
             } else {
                 chunk
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .filter(|unit| *unit == delimiter.as_slice())
                     .count()
             };
@@ -656,7 +658,9 @@ impl Source {
                     memchr::memchr_iter(delimiter[0], &buffer[..take]).count()
                 } else {
                     buffer[..take]
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .filter(|unit| *unit == delimiter.as_slice())
                         .count()
                 };
