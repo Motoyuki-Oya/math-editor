@@ -374,13 +374,13 @@ impl Shell {
                 }
                 if index == current {
                     editor::set_line_count(pane.editor_pane(), count);
+                    self.status.set("行数を確定しました".into());
                 } else {
                     let doc_id = tab.id.get_untracked();
                     editor::get_or_create_doc(doc_id)
                         .borrow_mut()
                         .resize_pending(count);
                 }
-                self.status.set("行数を確定しました".into());
                 self.refresh();
                 return true;
             }
@@ -559,6 +559,7 @@ impl Shell {
         if self.restored.get_untracked() && !dirty {
             drafts::forget(tab);
         }
+        self.status.set(String::new());
         self.sync_dirty();
         self.refresh();
         editor::focus_pane(pane.editor_pane());

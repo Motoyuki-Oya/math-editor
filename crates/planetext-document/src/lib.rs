@@ -382,7 +382,8 @@ impl Application {
         if first == "// PLANETEXT_DRAFT_REF_V1" {
             let orig_path = lines.next().unwrap_or_default();
             let status = lines.next().unwrap_or_default();
-            let (mut doc, _) = Document::open(orig_path)?;
+            let (mut doc, scan) = Document::open(orig_path)?;
+            let bg_index = doc.take_background_index();
             if status == "DIFF" {
                 if let Some(count_str) = lines.next() {
                     let count: usize = count_str.parse().unwrap_or(0);
@@ -395,7 +396,18 @@ impl Application {
                     let _ = doc.apply_draft_diffs(diffs);
                 }
             }
-            Ok(self.adopt(doc))
+            let opened = self.adopt(doc);
+            if let Some(scan) = scan {
+                std::thread::spawn(move || {
+                    let _ = scan.run();
+                });
+            }
+            if let Some(bg_index) = bg_index {
+                std::thread::spawn(move || {
+                    bg_index.run();
+                });
+            }
+            Ok(opened)
         } else {
             let contents = file.split_once('\n').map_or("", |(_, rest)| rest);
             let lines: Vec<String> = contents.lines().map(String::from).collect();
