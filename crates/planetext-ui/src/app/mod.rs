@@ -346,12 +346,21 @@ pub fn App() -> impl IntoView {
                 </div>
 
                 <div class="statusbar-right">
-                    <span
+                    <button
+                        type="button"
                         class="status-clickable"
                         title="入力モード（Insertキーで切替）"
+                        aria-label=move || {
+                            let _ = shell.stats.get();
+                            if editor::is_focused_overwrite_mode() {
+                                "入力モード: 上書き (Insertキーで挿入に切替)"
+                            } else {
+                                "入力モード: 挿入 (Insertキーで上書きに切替)"
+                            }
+                        }
                         on:click=move |_| {
                             if let Some(focused) = editor::session() {
-                                if crate::settings::current().enable_overwrite_mode {
+                                if crate::settings::current().enable_overwrite_mode || editor::is_focused_overwrite_mode() {
                                     editor::toggle_overwrite_mode(&focused);
                                     shell.stats.update(|_| {});
                                 }
@@ -366,7 +375,7 @@ pub fn App() -> impl IntoView {
                                 "挿入"
                             }
                         }}
-                    </span>
+                    </button>
                     <span>{move || {
                         let stats = shell.stats.get();
                         format!("[ {} | {} ]", stats.caret_line, stats.caret_col)

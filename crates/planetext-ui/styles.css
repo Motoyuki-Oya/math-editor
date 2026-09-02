@@ -107,6 +107,9 @@
   padding: 2px 6px;
   border-radius: 4px;
   border: 1px solid transparent;
+  background: none;
+  color: inherit;
+  font: inherit;
   transition: background 0.1s, color 0.1s, border-color 0.1s;
 }
 
@@ -114,6 +117,11 @@
   background: var(--bg);
   border-color: var(--line);
   color: var(--fg);
+}
+
+.status-clickable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .status-message {

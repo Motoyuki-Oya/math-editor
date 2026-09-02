@@ -264,6 +264,15 @@ pub fn is_focused_overwrite_mode() -> bool {
     session().map(|s| s.borrow().overwrite_mode).unwrap_or(false)
 }
 
+pub fn reset_all_overwrite_modes() {
+    PANES.with(|panes| {
+        for session in panes.borrow().iter() {
+            session.borrow_mut().overwrite_mode = false;
+            redraw(session);
+        }
+    });
+}
+
 /// 分割が元に戻されると、ペインを削除します。
 pub fn close_pane(pane: usize) {
     PANES.with(|panes| {

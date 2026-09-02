@@ -80,7 +80,20 @@ pub(super) fn Preferences(open: RwSignal<bool>) -> impl IntoView {
         change(defaults);
     };
 
-    let close_dialog = move || open.set(false);
+    let close_dialog = move || {
+        open.set(false);
+        if let Some(s) = editor::session() {
+            let pane = s.borrow().pane;
+            editor::focus_pane(pane);
+        }
+    };
+
+    let dialog_ref = NodeRef::<leptos::html::Div>::new();
+    Effect::new(move |_| {
+        if let Some(el) = dialog_ref.get() {
+            let _ = el.focus();
+        }
+    });
 
     // Escape キーで閉じる
     let on_keydown = move |ev: web_sys::KeyboardEvent| {
@@ -105,7 +118,16 @@ pub(super) fn Preferences(open: RwSignal<bool>) -> impl IntoView {
                 }
             }
         >
-            <div class="settings-dialog" on:mousedown=move |ev| ev.stop_propagation()>
+            <div
+                class="settings-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-label="設定"
+                tabindex="-1"
+                node_ref=dialog_ref
+                on:keydown=on_keydown
+                on:mousedown=move |ev| ev.stop_propagation()
+            >
                 // 左サイドバー
                 <div class="settings-sidebar">
                     <div class="settings-sidebar-header">
@@ -392,30 +414,6 @@ pub(super) fn Preferences(open: RwSignal<bool>) -> impl IntoView {
 
                                 <div class="settings-item">
                                     <div class="settings-item-info">
-                                        <div class="settings-item-name">"履歴保持件数 (History limit)"</div>
-                                        <div class="settings-item-desc">"Undo / Redo 用に保持する最大ステップ数を設定します。"</div>
-                                    </div>
-                                    <div class="settings-control">
-                                        <input
-                                            class="settings-input-num"
-                                            type="number"
-                                            min="50"
-                                            max="5000"
-                                            step="50"
-                                            prop:value=move || history_limit.get().to_string()
-                                            on:change=move |ev| {
-                                                if let Ok(limit) = event_target_value(&ev).parse::<usize>() {
-                                                    history_limit.set(limit.clamp(50, 5000));
-                                                    changed();
-                                                }
-                                            }
-                                        />
-                                        <span class="settings-unit">"件"</span>
-                                    </div>
-                                </div>
-
-                                <div class="settings-item">
-                                    <div class="settings-item-info">
                                         <div class="settings-item-name">"上書き入力モード (Insertキー)"</div>
                                         <div class="settings-item-desc">"Insertキーによる挿入／上書き入力モードの切り替えを有効にします。"</div>
                                     </div>
@@ -424,7 +422,11 @@ pub(super) fn Preferences(open: RwSignal<bool>) -> impl IntoView {
                                             type="checkbox"
                                             prop:checked=move || enable_overwrite_mode.get()
                                             on:change=move |ev| {
-                                                enable_overwrite_mode.set(event_target_checked(&ev));
+                                                let enabled = event_target_checked(&ev);
+                                                enable_overwrite_mode.set(enabled);
+                                                if !enabled {
+                                                    editor::reset_all_overwrite_modes();
+                                                }
                                                 changed();
                                             }
                                         />

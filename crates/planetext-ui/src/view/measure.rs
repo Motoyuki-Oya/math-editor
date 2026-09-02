@@ -200,21 +200,17 @@ fn boundaries(row: &Element) -> Vec<(usize, Box2)> {
         };
         match run_length(&child) {
             Some(len) => {
-                let nodes: Vec<_> = child
-                    .text_content()
-                    .unwrap_or_default()
-                    .chars()
-                    .map(crate::structure::ast::Node::char)
-                    .collect();
-                let mut offset = 0;
-                loop {
-                    if let Some(rect) = text_boundary(&child, offset) {
-                        places.push((start + offset, rect));
+                let text = child.text_content().unwrap_or_default();
+                use unicode_segmentation::UnicodeSegmentation;
+                let mut char_offset = 0;
+                for grapheme in text.graphemes(true) {
+                    if let Some(rect) = text_boundary(&child, char_offset) {
+                        places.push((start + char_offset, rect));
                     }
-                    if offset >= len {
-                        break;
-                    }
-                    offset = crate::structure::text::character_after(&nodes, offset);
+                    char_offset += grapheme.chars().count();
+                }
+                if let Some(rect) = text_boundary(&child, len) {
+                    places.push((start + len, rect));
                 }
             }
             None => {

@@ -97,15 +97,21 @@ impl Editor {
             return Did::Nothing;
         }
         if overwrite && !self.has_inside() && !text.contains('\n') {
+            use unicode_segmentation::UnicodeSegmentation;
+            let grapheme_count = text.graphemes(true).count();
             for cursor in self.cursors.iter_mut().filter(|c| c.inside.is_none()) {
                 if cursor.sel.is_caret() {
                     let head = cursor.sel.head;
+                    let line = self.document.text.line(head.line);
                     let line_len = self.document.text.line_len(head.line);
-                    if head.col < line_len {
-                        let next_col = crate::structure::text::character_after(
-                            self.document.text.line(head.line),
-                            head.col,
-                        );
+                    let mut next_col = head.col;
+                    for _ in 0..grapheme_count {
+                        if next_col >= line_len {
+                            break;
+                        }
+                        next_col = crate::structure::text::character_after(line, next_col);
+                    }
+                    if next_col > head.col {
                         cursor.sel = Sel::range(head, Pos::new(head.line, next_col));
                     }
                 }
@@ -559,16 +565,8 @@ impl Editor {
 
             for cursor in &mut self.cursors {
                 if cursor.inside.is_none() {
-                    if cursor.sel.head.line >= min_line && cursor.sel.head.line <= max_line {
-                        cursor.sel.head.line -= 1;
-                    } else if cursor.sel.head.line == swap_target {
-                        cursor.sel.head.line = max_line;
-                    }
-                    if cursor.sel.anchor.line >= min_line && cursor.sel.anchor.line <= max_line {
-                        cursor.sel.anchor.line -= 1;
-                    } else if cursor.sel.anchor.line == swap_target {
-                        cursor.sel.anchor.line = max_line;
-                    }
+                    cursor.sel.head = map_line_pos(cursor.sel.head, min_line, max_line, false);
+                    cursor.sel.anchor = map_line_pos(cursor.sel.anchor, min_line, max_line, false);
                 }
             }
         } else {
@@ -592,20 +590,36 @@ impl Editor {
 
             for cursor in &mut self.cursors {
                 if cursor.inside.is_none() {
-                    if cursor.sel.head.line >= min_line && cursor.sel.head.line <= max_line {
-                        cursor.sel.head.line += 1;
-                    } else if cursor.sel.head.line == swap_target {
-                        cursor.sel.head.line = min_line;
-                    }
-                    if cursor.sel.anchor.line >= min_line && cursor.sel.anchor.line <= max_line {
-                        cursor.sel.anchor.line += 1;
-                    } else if cursor.sel.anchor.line == swap_target {
-                        cursor.sel.anchor.line = min_line;
-                    }
+                    cursor.sel.head = map_line_pos(cursor.sel.head, min_line, max_line, true);
+                    cursor.sel.anchor = map_line_pos(cursor.sel.anchor, min_line, max_line, true);
                 }
             }
         }
         Did::Changed
+    }
+}
+
+fn map_line_pos(pos: Pos, min_line: usize, max_line: usize, down: bool) -> Pos {
+    if !down {
+        let swap_target = min_line - 1;
+        if pos.line >= min_line && pos.line <= max_line {
+            Pos::new(pos.line - 1, pos.col)
+        } else if (pos.line == max_line + 1 && pos.col == 0) || pos.line == swap_target {
+            Pos::new(max_line, pos.col)
+        } else {
+            pos
+        }
+    } else {
+        let swap_target = max_line + 1;
+        if pos.line >= min_line && pos.line <= max_line {
+            Pos::new(pos.line + 1, pos.col)
+        } else if pos.line == swap_target && pos.col == 0 {
+            Pos::new(max_line + 2, pos.col)
+        } else if pos.line == swap_target {
+            Pos::new(min_line, pos.col)
+        } else {
+            pos
+        }
     }
 }
 
@@ -793,5 +807,33 @@ mod tests {
         editor.insert_text_with_mode("X", true); // overwrite 'c' with 'X'
         assert_eq!(text_of(&editor), "abXdef");
         assert_eq!(editor.primary().head, Pos::new(0, 3));
+
+        // Multi-grapheme overwrite (e.g. IME committed "日本")
+        let mut editor2 = make_editor("abcdef");
+        editor2.set_caret(Pos::new(0, 2)); // at 'c'
+        editor2.insert_text_with_mode("日本", true); // overwrite 'c' and 'd' with "日本"
+        assert_eq!(text_of(&editor2), "ab日本ef");
+        assert_eq!(editor2.primary().head, Pos::new(0, 4));
+    }
+
+    #[test]
+    fn alt_down_moves_full_line_selection() {
+        let mut doc = Document::default();
+        doc.load(Text::from_lines(nodes_of("A\nB\nC")));
+        let mut editor = Editor {
+            document: doc,
+            cursors: vec![UnifiedCursor::range(Pos::new(1, 0), Pos::new(2, 0))], // full line B selected
+        };
+
+        // Alt+Down moves B below C -> A, C, B
+        editor.move_lines_vertical(true);
+        let line0: String = editor.document.text.line(0).iter().filter_map(crate::structure::text::as_char).collect();
+        let line1: String = editor.document.text.line(1).iter().filter_map(crate::structure::text::as_char).collect();
+        let line2: String = editor.document.text.line(2).iter().filter_map(crate::structure::text::as_char).collect();
+        assert_eq!(line0, "A");
+        assert_eq!(line1, "C");
+        assert_eq!(line2, "B");
+        // Selection must track B: from line 2 col 0 to line 3 col 0 (or equivalent line 2 end boundary)
+        assert_eq!(editor.primary(), Sel::range(Pos::new(2, 0), Pos::new(3, 0)));
     }
 }

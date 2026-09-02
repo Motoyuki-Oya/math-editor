@@ -40,8 +40,9 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
     }
     if key == "Insert"
         && !ctrl
+        && !shift
         && !event.alt_key()
-        && crate::settings::current().enable_overwrite_mode
+        && (crate::settings::current().enable_overwrite_mode || session.borrow().overwrite_mode)
     {
         session::toggle_overwrite_mode(session);
         event.prevent_default();
