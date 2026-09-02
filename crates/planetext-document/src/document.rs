@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use crate::edit_buffers::{EditBuffers, EditRange};
 use crate::operation_log::{BulkOperation, Edit, OperationLog};
+use crate::persistence::DraftDiff;
 use crate::piece_tree::{Piece, PieceTree};
 use crate::search::ScanHit;
 use crate::search_index::{BackgroundIndex, SearchIndex};
@@ -37,6 +38,7 @@ pub(crate) struct Document {
     pub(crate) pending_source: Option<PendingSource>,
     pub(crate) search_index: Option<SearchIndex>,
     pub(crate) background_index: Option<BackgroundIndex>,
+    pub(crate) pending_redo_diffs: Vec<DraftDiff>,
 }
 
 /// 元に戻す・やり直すの結果: 復元すべき控えと、行が変わった範囲の始まり。
@@ -126,6 +128,7 @@ impl Document {
                 pending_source,
                 search_index,
                 background_index,
+                pending_redo_diffs: Vec::new(),
             },
             scan,
         ))
@@ -165,6 +168,7 @@ impl Document {
             pending_source: None,
             search_index: None,
             background_index: None,
+            pending_redo_diffs: Vec::new(),
         }
     }
 
@@ -264,6 +268,37 @@ impl Document {
         self.log.revision()
     }
 
+    /// 未保存の操作ログ（unsaved_transactions）から、現在変更されている行番号のリストを厳密に導出する。
+    pub(crate) fn modified_lines(&self) -> Vec<usize> {
+        let mut modified = std::collections::BTreeSet::new();
+        for tx in self.log.unsaved_transactions() {
+            for edit in tx.edits() {
+                let from_line = edit.from_line;
+                let to_line = edit.from_line + edit.removed_lines;
+                let end_line = edit.from_line + edit.inserted_lines;
+
+                let removed = edit.removed_lines;
+                let inserted = edit.inserted_lines;
+
+                let mut next_modified = std::collections::BTreeSet::new();
+                for &line in &modified {
+                    if line < from_line {
+                        next_modified.insert(line);
+                    } else if line >= to_line {
+                        let shifted = (line as isize + (inserted as isize - removed as isize))
+                            .max(0) as usize;
+                        next_modified.insert(shifted);
+                    }
+                }
+                for l in from_line..end_line.max(from_line + 1) {
+                    next_modified.insert(l);
+                }
+                modified = next_modified;
+            }
+        }
+        modified.into_iter().collect()
+    }
+
     /// 検索スレッドへ渡す読み取り専用の姿。ファイルカーソルは独立し、編集の
     /// ピースは開始時点の内容を複製するので、文書ロックを持たずに走査できる。
     pub(crate) fn search_snapshot(&self) -> Result<Document, String> {
@@ -278,6 +313,7 @@ impl Document {
             pending_source: self.pending_source,
             search_index: self.search_index.clone(),
             background_index: None,
+            pending_redo_diffs: Vec::new(),
         };
         snapshot.confirm_scan_if_done();
         Ok(snapshot)
@@ -384,6 +420,7 @@ impl Document {
             pending_source: self.pending_source,
             search_index: None,
             background_index: None,
+            pending_redo_diffs: Vec::new(),
         }
     }
 
@@ -397,6 +434,19 @@ impl Document {
         };
         let exact_newlines = source
             .lines()
+            .saturating_sub(1)
+            .saturating_sub(pending.prefix_newlines);
+        self.pieces
+            .confirm_source_range(pending.from, pending.len, exact_newlines);
+        self.count = self.pieces.line_count();
+    }
+
+    /// 保存された総行数を用いて、走査を待たずにピースツリーの行数を即時確定する。
+    pub(crate) fn confirm_scan_with_total_lines(&mut self, total_lines: usize) {
+        let Some(pending) = self.pending_source.take() else {
+            return;
+        };
+        let exact_newlines = total_lines
             .saturating_sub(1)
             .saturating_sub(pending.prefix_newlines);
         self.pieces
@@ -683,6 +733,64 @@ impl Document {
         })
     }
 
+    /// 下書き復元専用の置換。ディスクから削除行を再読み出しせず、下書きに記録された
+    /// `deleted_lines` を直接使用することで、走査完了を待たずに即時適用する。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn replace_with_deleted(
+        &mut self,
+        from: usize,
+        to: usize,
+        lines: Vec<String>,
+        group: u64,
+        before: &str,
+        after: &str,
+        deleted_lines: Vec<String>,
+    ) -> Result<usize, String> {
+        let base_revision = self.log.revision();
+        if from > to || to > self.count {
+            return Err("置き換えの範囲が文書の外です".to_string());
+        }
+        let clean_lines: Vec<String> = lines
+            .into_iter()
+            .map(|line| line.trim_end_matches(['\r', '\n']).to_string())
+            .collect();
+        let removed_count = to - from;
+        let edit = if deleted_lines.len() == removed_count {
+            self.splice_with_deleted(from, to, clean_lines.clone(), deleted_lines)?
+        } else {
+            // 旧フォーマット等で削除行が未記録の場合は通常 splice（フォールバック）
+            self.splice(from, to, clean_lines.clone())?
+        };
+        self.log
+            .append_or_merge_transaction(base_revision, group, edit, before, after);
+        Ok(self.count)
+    }
+
+    fn splice_with_deleted(
+        &mut self,
+        from: usize,
+        to: usize,
+        lines: Vec<String>,
+        deleted_lines: Vec<String>,
+    ) -> Result<Edit, String> {
+        let removed_count = to - from;
+        let byte_from = self.pieces.byte_offset(from);
+        let byte_to = self.pieces.byte_offset(to);
+        let inserted_range = self.apply_raw_splice(from, to, &lines)?;
+        let removed_range =
+            self.log
+                .append_deleted(&deleted_lines, self.encoding, self.line_ending);
+        Ok(Edit {
+            from: byte_from,
+            to: byte_to,
+            from_line: from,
+            removed: removed_range,
+            inserted: inserted_range,
+            removed_lines: removed_count,
+            inserted_lines: lines.len(),
+        })
+    }
+
     /// ピースツリーの指定行範囲 `from..to` を `lines` で置き換える低水準操作。
     fn apply_raw_splice(
         &mut self,
@@ -751,8 +859,8 @@ impl Document {
                     newlines: 0,
                     starts_newline: false,
                     ends_newline: false,
-                    encoding: empty_range.encoding,
-                    line_ending: empty_range.line_ending,
+                    encoding: self.encoding,
+                    line_ending: self.line_ending,
                 },
             );
             self.count = 1;
@@ -856,37 +964,68 @@ impl Document {
     }
 
     pub(crate) fn redo(&mut self) -> Result<Option<Restored>, String> {
-        let Some(tx) = self.log.redo_pop() else {
-            return Ok(None);
-        };
-        let edits = tx.edits().to_vec();
-        let state = tx.after.clone();
-        let mut touched_from = usize::MAX;
-        for edit in edits.into_iter() {
-            touched_from = touched_from.min(edit.from_line);
-            let reapply_lines = self.buffers.read_lines(edit.inserted);
-            let removed_lines = self.log.read_deleted(edit.removed);
-            self.apply_raw_splice(
-                edit.from_line,
-                edit.from_line + edit.removed_lines,
-                &reapply_lines,
-            )?;
-            if let Some(index) = self.search_index.as_ref() {
-                let byte_pos = edit.from;
-                let removed_text = removed_lines.join("\n");
-                let reapplied_text = reapply_lines.join("\n");
-                index.splice_delta(&removed_text, &reapplied_text, byte_pos);
+        if let Some(tx) = self.log.redo_pop() {
+            let edits = tx.edits().to_vec();
+            let state = tx.after.clone();
+            let mut touched_from = usize::MAX;
+            for edit in edits.into_iter() {
+                touched_from = touched_from.min(edit.from_line);
+                let reapply_lines = self.buffers.read_lines(edit.inserted);
+                let removed_lines = self.log.read_deleted(edit.removed);
+                self.apply_raw_splice(
+                    edit.from_line,
+                    edit.from_line + edit.removed_lines,
+                    &reapply_lines,
+                )?;
+                if let Some(index) = self.search_index.as_ref() {
+                    let byte_pos = edit.from;
+                    let removed_text = removed_lines.join("\n");
+                    let reapplied_text = reapply_lines.join("\n");
+                    index.splice_delta(&removed_text, &reapplied_text, byte_pos);
+                }
             }
+            return Ok(Some(Restored {
+                state,
+                touched_from: if touched_from == usize::MAX {
+                    0
+                } else {
+                    touched_from
+                },
+                line_count: self.count,
+            }));
         }
-        Ok(Some(Restored {
-            state,
-            touched_from: if touched_from == usize::MAX {
-                0
-            } else {
-                touched_from
-            },
-            line_count: self.count,
-        }))
+        if !self.pending_redo_diffs.is_empty() {
+            let target_group = self.pending_redo_diffs[0].group;
+            let mut state = String::new();
+            let mut touched_from = usize::MAX;
+            while !self.pending_redo_diffs.is_empty()
+                && self.pending_redo_diffs[0].group == target_group
+            {
+                let diff = self.pending_redo_diffs.remove(0);
+                let to_line = diff.from_line + diff.removed_lines;
+                state = diff.after.clone();
+                touched_from = touched_from.min(diff.from_line);
+                self.replace_with_deleted(
+                    diff.from_line,
+                    to_line,
+                    diff.lines,
+                    diff.group,
+                    &diff.before,
+                    &diff.after,
+                    diff.deleted_lines,
+                )?;
+            }
+            return Ok(Some(Restored {
+                state,
+                touched_from: if touched_from == usize::MAX {
+                    0
+                } else {
+                    touched_from
+                },
+                line_count: self.count,
+            }));
+        }
+        Ok(None)
     }
 
     /// 一度に実体文字列として組み立てられるコピーの上限（10MB）。

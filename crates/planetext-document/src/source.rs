@@ -669,19 +669,21 @@ impl Source {
         }
         let target = source_line + skip;
         let indexed_line = target / STRIDE;
-        let offset = self
-            .index
-            .state
-            .lock()
-            .unwrap()
-            .marks
-            .get(indexed_line)
-            .copied()
-            .map(|offset| offset as usize);
-        if let Some(offset) = offset {
-            if offset >= from && offset <= from.saturating_add(len) {
-                return Ok((offset, target - indexed_line * STRIDE));
+        let mut waited = 0;
+        loop {
+            let state = self.index.state.lock().unwrap();
+            if let Some(&mark) = state.marks.get(indexed_line) {
+                let offset = mark as usize;
+                if offset >= from && offset <= from.saturating_add(len) {
+                    return Ok((offset, target - indexed_line * STRIDE));
+                }
             }
+            if state.done || waited >= 500 {
+                break;
+            }
+            drop(state);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            waited += 1;
         }
         Ok((from, skip))
     }

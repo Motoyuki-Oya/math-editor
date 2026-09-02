@@ -17,6 +17,7 @@ pub use commands::{
     insert_node, replace_all, replace_and_find_next, select_all, FarCopy,
 };
 pub use search::SearchOptions;
+#[allow(unused_imports)]
 pub use session::{
     add_on_redraw, apply_restored, bind_doc, clear_modified, clear_modified_doc,
     clear_search_preview, clear_search_preview_pane, close_pane, feed_pane, focus_pane,

@@ -474,7 +474,12 @@ impl Shell {
 
     pub(super) fn mark_clean_tab(&self, tab: Tab) {
         tab.dirty.set(false);
-        drafts::forget(tab);
+        if tab.path.get_untracked().is_some() {
+            // 実ファイルタブは行数情報を含む CLEAN 下書きを保持し、次回起動時の高速即時オープンを担保する
+            drafts::touch(tab);
+        } else {
+            drafts::forget(tab);
+        }
         if let Some(pane) = self.pane_showing(tab) {
             editor::clear_modified(pane.editor_pane());
         }
@@ -556,7 +561,7 @@ impl Shell {
         editor::set_doc_path(doc_id, path);
         editor::bind_doc(pane.editor_pane(), doc_id);
         tab.dirty.set(dirty);
-        if self.restored.get_untracked() && !dirty {
+        if self.restored.get_untracked() && !dirty && tab.path.get_untracked().is_none() {
             drafts::forget(tab);
         }
         self.status.set(String::new());
@@ -1249,25 +1254,49 @@ impl Shell {
                         editor::set_doc_path(doc_id, syntax_path);
 
                         if let Some(draft) = draft_map.get(&t_state.id) {
-                            tab.dirty.set(true);
+                            tab.dirty.set(!draft.clean);
                             if t_state.path.is_some() {
-                                // 実ファイルの下書き復元: 全文ダンプではなく元ファイル参照＋差分復旧API（open_draft）を使用
+                                // 実ファイルの下書き復元: 元ファイル参照＋操作ログ再生API（open_draft）を使用
                                 let draft_id = t_state.id.to_string();
                                 let tab_copy = tab;
                                 let shell_copy = *self;
+                                let draft_contents = draft.contents.clone();
+                                let modified_lines = t_state.modified_lines.clone();
                                 spawn_local(async move {
                                     match framework::open_draft(&draft_id).await {
                                         Ok(doc) => {
                                             if tab_copy.doc.get_untracked().is_some() {
                                                 framework::close_document(doc.handle).await;
                                             } else {
+                                                tab_copy.dirty.set(!doc.clean);
+                                                shell_copy.sync_dirty();
                                                 tab_copy.doc.set(Some(doc.handle));
                                                 tab_copy.bytes.set(doc.bytes);
                                                 tab_copy.encoding.set(doc.encoding);
                                                 tab_copy.line_ending.set(doc.line_ending);
                                                 editor::set_doc_file_size(doc_id, Some(doc.bytes));
-                                                editor::load_pending_doc(doc_id, doc.line_count);
+                                                let doc_ref = editor::get_or_create_doc(doc_id);
+                                                if !draft_contents.is_empty()
+                                                    && doc.bytes <= 10 * 1024 * 1024
+                                                {
+                                                    doc_ref.borrow_mut().load(
+                                                        crate::format::document::read(
+                                                            &draft_contents,
+                                                        ),
+                                                    );
+                                                } else {
+                                                    editor::load_pending_doc(
+                                                        doc_id,
+                                                        doc.line_count,
+                                                    );
+                                                }
+                                                if !modified_lines.is_empty() {
+                                                    doc_ref
+                                                        .borrow_mut()
+                                                        .set_modified_lines(modified_lines);
+                                                }
                                                 editor::redraw_doc(doc_id, None);
+                                                shell_copy.save_session();
                                                 let handle = doc.handle;
                                                 spawn_local(async move {
                                                     if let Ok(count) =
@@ -1409,7 +1438,7 @@ impl Shell {
                 tab.untitled_num.set(None);
             }
             tab.path.set(draft.path.clone());
-            tab.dirty.set(true);
+            tab.dirty.set(!draft.clean);
             editor::set_doc_path(draft.id, draft.path.clone());
             let doc = editor::get_or_create_doc(draft.id);
             doc.borrow_mut()

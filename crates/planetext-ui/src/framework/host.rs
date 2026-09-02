@@ -142,6 +142,8 @@ pub struct OpenedDocument {
     #[serde(default)]
     #[allow(dead_code)]
     pub revision: u64,
+    #[serde(default)]
+    pub clean: bool,
 }
 
 fn default_encoding() -> String {
@@ -357,6 +359,8 @@ pub struct RestoredLines {
     pub line_count: usize,
     #[serde(default)]
     pub clean: bool,
+    #[serde(default)]
+    pub modified_lines: Vec<usize>,
 }
 
 pub async fn undo_lines(handle: u64, redo: bool) -> Option<RestoredLines> {
@@ -577,6 +581,7 @@ pub struct Draft {
     pub id: usize,
     pub path: Option<String>,
     pub contents: String,
+    pub clean: bool,
 }
 
 pub async fn remove_draft(id: usize) {
@@ -593,6 +598,8 @@ pub async fn read_drafts() -> Vec<Draft> {
         id: String,
         path: Option<String>,
         contents: String,
+        #[serde(default)]
+        clean: bool,
     }
     let Ok(value) = call("read_drafts", NoArgs {}).await else {
         return Vec::new();
@@ -604,6 +611,7 @@ pub async fn read_drafts() -> Vec<Draft> {
                 id: raw.id.parse().ok()?,
                 path: raw.path,
                 contents: raw.contents,
+                clean: raw.clean,
             })
         })
         .collect()

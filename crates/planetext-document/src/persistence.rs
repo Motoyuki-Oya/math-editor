@@ -164,22 +164,24 @@ impl Document {
     }
 
     /// 下書きを書き出す。元ファイルがある場合は全文ダンプを絶対に行わず、
-    /// 元ファイルへの参照と未保存の差分行（JSON）だけを記録する。
+    /// 元ファイルへの参照、総行数、未保存の差分行、および Redo 履歴を含む head 位置を記録する。
     pub(crate) fn write_draft<W: Write>(
         &mut self,
         out: &mut W,
         path: Option<&str>,
     ) -> Result<(), String> {
         if let Some(p) = path {
-            writeln!(out, "// PLANETEXT_DRAFT_REF_V1")
+            writeln!(out, "// PLANETEXT_DRAFT_REF_V2")
                 .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
             writeln!(out, "{p}").map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
-            if self.is_clean() {
+            writeln!(out, "{}", self.count)
+                .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+            let (diffs, head_offset) = self.collect_draft_diffs();
+            if diffs.is_empty() {
                 writeln!(out, "CLEAN").map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
             } else {
                 writeln!(out, "DIFF").map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
-                let diffs = self.collect_draft_diffs();
-                writeln!(out, "{}", diffs.len())
+                writeln!(out, "{} {}", diffs.len(), head_offset)
                     .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
                 for diff in &diffs {
                     diff.write_to(out)
@@ -194,41 +196,73 @@ impl Document {
         }
     }
 
-    /// 未保存のトランザクションから、変更された行範囲の差分データを抽出する。
-    pub(crate) fn collect_draft_diffs(&mut self) -> Vec<DraftDiff> {
-        let edits: Vec<(usize, usize, usize)> = self
-            .log
-            .unsaved_transactions()
-            .iter()
-            .flat_map(|tx| {
-                tx.edits()
-                    .iter()
-                    .map(|e| (e.from_line, e.removed_lines, e.inserted_lines))
-            })
-            .collect();
+    /// 未保存のトランザクションから、発生した時系列順に操作ログ（差分）を抽出する。
+    /// Undo された（Redo 可能な）トランザクションも含めて保持し、復元後に Redo できるようにする。
+    pub(crate) fn collect_draft_diffs(&mut self) -> (Vec<DraftDiff>, usize) {
+        let (txs, head_tx_offset) = self.log.all_unsaved_transactions();
         let mut diffs = Vec::new();
-        for (from_line, removed_lines, inserted_lines) in edits {
-            let mut lines = Vec::new();
-            let _ = self.each_line(from_line, inserted_lines, &mut |_, line| {
-                lines.push(line.to_string());
-                true
-            });
-            diffs.push(DraftDiff {
-                from_line,
-                removed_lines,
-                lines,
-            });
+        let mut active_diffs_count = 0;
+        for (tx_idx, tx) in txs.iter().enumerate() {
+            let group = (tx_idx as u64) + 1;
+            for edit in tx.edits() {
+                let mut lines = Vec::with_capacity(edit.inserted_lines);
+                self.buffers.for_each_line(
+                    edit.inserted,
+                    0,
+                    edit.inserted_lines,
+                    &mut |_, line| {
+                        lines.push(line.to_string());
+                        true
+                    },
+                );
+                let deleted_lines = self.log.read_deleted(edit.removed);
+                let fallback_pos = format!("{}.0-{}.0", edit.from_line, edit.from_line);
+                let before = if tx.before.is_empty() {
+                    fallback_pos.clone()
+                } else {
+                    tx.before.clone()
+                };
+                let after = if tx.after.is_empty() {
+                    fallback_pos
+                } else {
+                    tx.after.clone()
+                };
+                diffs.push(DraftDiff {
+                    group,
+                    from_line: edit.from_line,
+                    removed_lines: edit.removed_lines,
+                    lines,
+                    deleted_lines,
+                    before,
+                    after,
+                });
+                if tx_idx < head_tx_offset {
+                    active_diffs_count += 1;
+                }
+            }
         }
-        diffs
+        for pending in &self.pending_redo_diffs {
+            diffs.push(pending.clone());
+        }
+        (diffs, active_diffs_count)
     }
 
-    /// 元ファイルから開いた文書に対して、下書き差分を適用して編集状態を復元する。
+    /// 元ファイルから開いた文書に対して、未保存の操作ログを時系列順に再生し、
+    /// メモリ上のピースツリーを編集状態へ再構成する。
+    /// 下書きに記録された deleted_lines を使用するため、元ファイルへのディスクリードは一切発生しない。
     pub(crate) fn apply_draft_diffs(&mut self, diffs: Vec<DraftDiff>) -> Result<(), String> {
         for diff in diffs {
             let to_line = diff.from_line + diff.removed_lines;
-            self.replace(diff.from_line, to_line, diff.lines, 0, "", "")?;
+            self.replace_with_deleted(
+                diff.from_line,
+                to_line,
+                diff.lines,
+                diff.group,
+                &diff.before,
+                &diff.after,
+                diff.deleted_lines,
+            )?;
         }
-        self.log.mark_dirty_without_history();
         Ok(())
     }
 }
@@ -236,21 +270,48 @@ impl Document {
 /// 下書きに記録される行範囲の変更差分。外部クレートに頼らない軽量なプレーンテキスト表現。
 #[derive(Clone, Debug)]
 pub struct DraftDiff {
+    pub group: u64,
     pub from_line: usize,
     pub removed_lines: usize,
     pub lines: Vec<String>,
+    pub deleted_lines: Vec<String>,
+    pub before: String,
+    pub after: String,
 }
 
 impl DraftDiff {
     pub(crate) fn write_to<W: Write>(&self, out: &mut W) -> std::io::Result<()> {
         writeln!(
             out,
-            "{} {} {}",
+            "{} {} {} {} {}",
+            self.group,
             self.from_line,
             self.removed_lines,
-            self.lines.len()
+            self.lines.len(),
+            self.deleted_lines.len()
+        )?;
+        writeln!(
+            out,
+            "{}",
+            if self.before.is_empty() {
+                "-"
+            } else {
+                &self.before
+            }
+        )?;
+        writeln!(
+            out,
+            "{}",
+            if self.after.is_empty() {
+                "-"
+            } else {
+                &self.after
+            }
         )?;
         for line in &self.lines {
+            writeln!(out, "{line}")?;
+        }
+        for line in &self.deleted_lines {
             writeln!(out, "{line}")?;
         }
         Ok(())
@@ -258,18 +319,99 @@ impl DraftDiff {
 
     pub(crate) fn read_from<'a>(lines: &mut impl Iterator<Item = &'a str>) -> Option<Self> {
         let header = lines.next()?;
-        let mut parts = header.split_whitespace();
-        let from_line = parts.next()?.parse().ok()?;
-        let removed_lines = parts.next()?.parse().ok()?;
-        let count: usize = parts.next()?.parse().ok()?;
+        let parts: Vec<&str> = header.split_whitespace().collect();
+        let (group, from_line, removed_lines, count, deleted_count) = if parts.len() >= 5 {
+            (
+                parts[0].parse().ok()?,
+                parts[1].parse().ok()?,
+                parts[2].parse().ok()?,
+                parts[3].parse::<usize>().ok()?,
+                parts[4].parse::<usize>().ok()?,
+            )
+        } else if parts.len() >= 4 {
+            (
+                parts[0].parse().ok()?,
+                parts[1].parse().ok()?,
+                parts[2].parse().ok()?,
+                parts[3].parse::<usize>().ok()?,
+                0,
+            )
+        } else if parts.len() == 3 {
+            (
+                0,
+                parts[0].parse().ok()?,
+                parts[1].parse().ok()?,
+                parts[2].parse::<usize>().ok()?,
+                0,
+            )
+        } else {
+            return None;
+        };
+        let before_line = lines.next()?;
+        let after_line = lines.next()?;
+        let before = if before_line == "-" {
+            String::new()
+        } else {
+            before_line.to_string()
+        };
+        let after = if after_line == "-" {
+            String::new()
+        } else {
+            after_line.to_string()
+        };
         let mut diff_lines = Vec::with_capacity(count);
         for _ in 0..count {
             diff_lines.push(lines.next()?.to_string());
         }
+        let mut deleted_lines = Vec::with_capacity(deleted_count);
+        for _ in 0..deleted_count {
+            deleted_lines.push(lines.next()?.to_string());
+        }
         Some(Self {
+            group,
             from_line,
             removed_lines,
             lines: diff_lines,
+            deleted_lines,
+            before,
+            after,
+        })
+    }
+
+    /// 旧フォーマット（V1: before/after/deleted_lines なし）からの読み出し
+    pub(crate) fn read_from_v1<'a>(lines: &mut impl Iterator<Item = &'a str>) -> Option<Self> {
+        let header = lines.next()?;
+        let parts: Vec<&str> = header.split_whitespace().collect();
+        let (group, from_line, removed_lines, count) = if parts.len() >= 4 {
+            (
+                parts[0].parse().ok()?,
+                parts[1].parse().ok()?,
+                parts[2].parse().ok()?,
+                parts[3].parse::<usize>().ok()?,
+            )
+        } else if parts.len() == 3 {
+            (
+                0,
+                parts[0].parse().ok()?,
+                parts[1].parse().ok()?,
+                parts[2].parse::<usize>().ok()?,
+            )
+        } else {
+            return None;
+        };
+        let mut diff_lines = Vec::with_capacity(count);
+        for _ in 0..count {
+            diff_lines.push(lines.next()?.to_string());
+        }
+        let fallback_pos = format!("{from_line}.0-{from_line}.0");
+        Some(Self {
+            group,
+            from_line,
+            removed_lines,
+            lines: diff_lines,
+            deleted_lines: Vec::new(),
+            before: fallback_pos.clone(),
+            after: fallback_pos,
         })
     }
 }

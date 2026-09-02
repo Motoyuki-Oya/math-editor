@@ -331,12 +331,18 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
                     restored.touched_from,
                     restored.line_count,
                 );
+                let doc_id = tab.id.get_untracked();
+                let doc_ref = editor::get_or_create_doc(doc_id);
+                doc_ref
+                    .borrow_mut()
+                    .set_modified_lines(restored.modified_lines);
                 if restored.clean {
                     shell.mark_clean_tab(tab);
-                    editor::clear_modified_doc(tab.id.get_untracked());
                 } else {
                     shell.mark_dirty_tab(tab);
                 }
+                let focused_pane = shell.pane_showing(tab).map(|p| p.editor_pane());
+                editor::redraw_doc(doc_id, focused_pane);
             }
         }
         Task::Save { path } => match framework::save_document(handle, &path).await {

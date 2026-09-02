@@ -549,6 +549,7 @@ mod tests {
             }),
             search_index: None,
             background_index: None,
+            pending_redo_diffs: Vec::new(),
         };
 
         // 未確定状態（count = 1,000）でも、ファイル全体規模（約100,000件）に外挿されること
