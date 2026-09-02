@@ -900,6 +900,48 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
+    /// 【回帰防止テスト】
+    /// 小さいファイルの保存後、Undo履歴が保持され、保存状態（is_clean）がマークされることを検証する。
+    #[test]
+    fn small_file_save_retains_undo_history() {
+        let (mut doc, path) = disk_doc("small-save-undo", &["first line", "second line"]);
+        doc.replace(1, 2, vec!["edited second line".into()], 1, "", "")
+            .unwrap();
+        assert!(!doc.is_clean());
+
+        doc.save(&path).unwrap();
+        assert!(doc.is_clean(), "保存後は clean になること");
+        assert!(
+            !doc.log.transactions.is_empty(),
+            "小さいファイルは保存後も Undo 履歴が保持されること"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 【回帰防止テスト】
+    /// 巨大ファイル（10MB超）の保存後、新しいベースへ切り替わり、メモリを圧迫しないよう
+    /// 操作ログと編集バッファが解放されることを検証する。
+    #[test]
+    fn large_file_save_clears_log_and_switches_base() {
+        let large_chunk = "B".repeat(1024 * 1024); // 1MB の行
+        let lines: Vec<String> = vec![large_chunk.clone(); 11]; // 11MB 分
+        let lines_ref: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (mut doc, path) = disk_doc("large-save-clear", &lines_ref);
+
+        doc.replace(1, 2, vec!["edited large line".into()], 1, "", "")
+            .unwrap();
+        assert!(!doc.log.transactions.is_empty());
+
+        doc.save(&path).unwrap();
+        assert!(doc.is_clean(), "保存後は clean になること");
+        assert!(
+            doc.log.transactions.is_empty(),
+            "巨大ファイルは保存後に操作ログが破棄されてメモリが解放されること"
+        );
+        assert_eq!(doc.buffers.len(), 0, "編集バッファも解放されること");
+        std::fs::remove_file(path).ok();
+    }
+
     fn assert_document_state(doc: &mut Document, expected: &[String]) {
         assert_eq!(all(doc), expected);
         assert_eq!(doc.line_count(), expected.len());

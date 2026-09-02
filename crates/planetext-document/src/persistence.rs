@@ -152,7 +152,14 @@ impl Document {
             starts_newline: false,
             ends_newline: false,
         }]);
-        self.log.mark_saved();
+        // 小さいファイルは保存後も Undo 履歴を保持し、
+        // 巨大ファイル（10MB超）は新しいベースへ切り替えて操作ログと編集実体を破棄しメモリを解放する。
+        if written > 10 * 1024 * 1024 {
+            self.log.clear();
+            self.buffers = crate::edit_buffers::EditBuffers::default();
+        } else {
+            self.log.mark_saved();
+        }
         Ok(())
     }
 
