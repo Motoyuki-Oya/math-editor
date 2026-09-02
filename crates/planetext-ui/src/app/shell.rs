@@ -1259,32 +1259,67 @@ impl Shell {
 
                         if let Some(draft) = draft_map.get(&t_state.id) {
                             tab.dirty.set(true);
-                            let doc = editor::get_or_create_doc(doc_id);
-                            doc.borrow_mut()
-                                .load(crate::format::document::read(&draft.contents));
-                            if !t_state.modified_lines.is_empty() {
-                                doc.borrow_mut().set_modified_lines(t_state.modified_lines);
-                            } else if t_state.path.is_none() {
-                                let count = doc.borrow().text().line_count();
-                                doc.borrow_mut().set_modified_lines((0..count).collect());
-                            }
-                            let tab_copy = tab;
-                            let draft_contents = draft.contents.clone();
-                            let shell_copy = *self;
-                            spawn_local(async move {
-                                match create_document_from_draft(draft_contents).await {
-                                    Ok(opened) => {
-                                        if tab_copy.doc.get_untracked().is_some() {
-                                            framework::close_document(opened.handle).await;
-                                        } else {
-                                            tab_copy.doc.set(Some(opened.handle));
-                                            tab_copy.encoding.set(opened.encoding);
-                                            tab_copy.line_ending.set(opened.line_ending);
+                            if t_state.path.is_some() {
+                                // 実ファイルの下書き復元: 全文ダンプではなく元ファイル参照＋差分復旧API（open_draft）を使用
+                                let draft_id = t_state.id.to_string();
+                                let tab_copy = tab;
+                                let shell_copy = *self;
+                                spawn_local(async move {
+                                    match framework::open_draft(&draft_id).await {
+                                        Ok(doc) => {
+                                            if tab_copy.doc.get_untracked().is_some() {
+                                                framework::close_document(doc.handle).await;
+                                            } else {
+                                                tab_copy.doc.set(Some(doc.handle));
+                                                tab_copy.large.set(doc.bytes > LARGE_BYTES);
+                                                tab_copy.bytes.set(doc.bytes);
+                                                tab_copy.encoding.set(doc.encoding);
+                                                tab_copy.line_ending.set(doc.line_ending);
+                                                editor::set_doc_file_size(doc_id, Some(doc.bytes));
+                                                editor::load_pending_doc(doc_id, doc.line_count);
+                                                editor::redraw_doc(doc_id, None);
+                                                let handle = doc.handle;
+                                                spawn_local(async move {
+                                                    if let Ok(count) =
+                                                        framework::finish_document(handle).await
+                                                    {
+                                                        shell_copy.document_scanned(handle, count);
+                                                    }
+                                                });
+                                            }
                                         }
+                                        Err(error) => shell_copy.status.set(error),
                                     }
-                                    Err(error) => shell_copy.status.set(error),
+                                });
+                            } else {
+                                // 無題ドキュメントの下書き復元
+                                let doc = editor::get_or_create_doc(doc_id);
+                                doc.borrow_mut()
+                                    .load(crate::format::document::read(&draft.contents));
+                                if !t_state.modified_lines.is_empty() {
+                                    doc.borrow_mut().set_modified_lines(t_state.modified_lines);
+                                } else {
+                                    let count = doc.borrow().text().line_count();
+                                    doc.borrow_mut().set_modified_lines((0..count).collect());
                                 }
-                            });
+                                let tab_copy = tab;
+                                let draft_contents = draft.contents.clone();
+                                let shell_copy = *self;
+                                spawn_local(async move {
+                                    match create_document_from_draft(draft_contents).await {
+                                        Ok(opened) => {
+                                            if tab_copy.doc.get_untracked().is_some() {
+                                                framework::close_document(opened.handle).await;
+                                            } else {
+                                                tab_copy.doc.set(Some(opened.handle));
+                                                tab_copy.encoding.set(opened.encoding);
+                                                tab_copy.line_ending.set(opened.line_ending);
+                                            }
+                                        }
+                                        Err(error) => shell_copy.status.set(error),
+                                    }
+                                });
+                            }
                         } else if let Some(ref path) = t_state.path {
                             tab.dirty.set(false);
                             let p = path.clone();

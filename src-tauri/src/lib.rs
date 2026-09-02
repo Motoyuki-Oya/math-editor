@@ -185,6 +185,16 @@ fn create_document_from_draft(
     application.create_document_from_draft(lines)
 }
 
+#[tauri::command]
+async fn open_draft(
+    app: tauri::AppHandle,
+    application: State<'_, Application>,
+    id: String,
+) -> Result<OpenedDocument, String> {
+    let config_dir = app.path().app_config_dir().ok();
+    application.open_draft(config_dir, id)
+}
+
 /// 文書から行の範囲を返します。async なのは、同期コマンドはメインスレッドで
 /// 走り、待たせた分だけ UI が止まるため（以下の文書コマンドも同じ）。
 #[tauri::command]
@@ -718,6 +728,7 @@ pub fn run() {
             finish_document,
             create_document,
             create_document_from_draft,
+            open_draft,
             read_lines,
             read_tail,
             replace_lines,

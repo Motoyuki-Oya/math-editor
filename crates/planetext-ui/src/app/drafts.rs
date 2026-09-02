@@ -29,10 +29,6 @@ thread_local! {
 
 /// タブのドキュメントが変わったことに注意してください。
 pub(super) fn touch(tab: Tab) {
-    // 下書きは全文を書き出すので、大きすぎる文書には書かない。
-    if tab.large.get_untracked() {
-        return;
-    }
     PENDING.with(|pending| pending.borrow_mut().insert(tab.id.get_untracked(), tab));
     arm();
 }

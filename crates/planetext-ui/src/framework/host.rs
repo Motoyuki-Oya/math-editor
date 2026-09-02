@@ -265,6 +265,17 @@ pub async fn create_document_from_draft(lines: &[String]) -> Result<OpenedDocume
     serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
 }
 
+/// 下書きIDから文書を復元します。元ファイルがある場合は全文ダンプではなく
+/// 元ファイルを開いて未保存差分を適用するため、巨大ファイルでも一瞬で安全に復旧できます。
+pub async fn open_draft(id: &str) -> Result<OpenedDocument, String> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        id: &'a str,
+    }
+    let value = call("open_draft", Args { id }).await?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
+}
+
 pub async fn read_lines(handle: u64, from: usize, count: usize) -> Result<ReadLines, String> {
     #[derive(Serialize)]
     struct Args {
