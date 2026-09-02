@@ -1618,7 +1618,7 @@ mod tests {
     }
 
     #[test]
-    fn search_candidates_skips_distant_empty_blocks_via_index() {
+    fn search_candidates_finds_distant_matches_efficiently() {
         use crate::search::{CompiledQuery, SearchSpec};
 
         // 512KB を超える複数ブロックのファイルを作成し、遠いブロックのみにターゲットを配置

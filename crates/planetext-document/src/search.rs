@@ -433,29 +433,6 @@ impl Document {
                 });
             }
 
-            // 検索索引によるブロック単位の高速スキップ。
-            // 候補が存在しないブロック（bi-gramカウントが0）をまとめてスキップし、
-            // 遠いブロックにある一致へ瞬時にジャンプする。
-            if let (Some(index), Some(query_str)) = (&self.search_index, literal) {
-                let current_byte = if let Some(source) = &self.source {
-                    let stride_idx = at / crate::source::STRIDE;
-                    let marks = source.index.state.lock().unwrap().marks.clone();
-                    marks.get(stride_idx).copied().unwrap_or(0) as usize
-                } else {
-                    self.pieces.byte_offset(at)
-                };
-                let next_byte = index.next_candidate_byte(current_byte, query_str, case_sensitive);
-                if next_byte > current_byte {
-                    let jump_line = self.line_before_byte_offset(next_byte);
-                    if jump_line > at {
-                        at = jump_line.min(end);
-                        if at >= end {
-                            break;
-                        }
-                    }
-                }
-            }
-
             let page_end = (at + page_lines).min(end);
             let (mut hits, _) = if let Some(query) = literal {
                 self.scan_literal(query, case_sensitive, marker, at, page_end - at, 64)?

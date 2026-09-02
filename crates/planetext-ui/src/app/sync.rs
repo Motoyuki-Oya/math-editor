@@ -197,11 +197,24 @@ fn cancel_running_search(tab: Tab) {
 fn enqueue(tab: Tab, task: Task) {
     let id = tab.id.get_untracked();
     QUEUES.with(|queues| {
-        queues
-            .borrow_mut()
-            .entry(id)
-            .or_default()
-            .push_back((tab, task))
+        let mut queues = queues.borrow_mut();
+        let queue = queues.entry(id).or_default();
+        match &task {
+            Task::Fetch(_) => {
+                // スクロール描画は最優先。進行中の検索があってもその手前に割り込ませて白飛びを防ぐ
+                if let Some(pos) = queue
+                    .iter()
+                    .position(|(_, t)| matches!(t, Task::Find { .. }))
+                {
+                    queue.insert(pos, (tab, task));
+                } else {
+                    queue.push_back((tab, task));
+                }
+            }
+            _ => {
+                queue.push_back((tab, task));
+            }
+        }
     });
     let busy = BUSY.with(|busy| busy.borrow().contains(&id));
     if busy {
