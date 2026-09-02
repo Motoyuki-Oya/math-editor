@@ -165,6 +165,15 @@ pub(super) fn draft(tab: Tab) {
     enqueue(tab, Task::Draft);
 }
 
+/// 指定ペインで検索が実行中かどうかを返す。
+pub(super) fn is_searching(shell: Shell, pane: usize) -> bool {
+    let Some(tab) = shell.tab_of(pane) else {
+        return false;
+    };
+    let id = tab.id.get_untracked();
+    SEARCH_BUSY.with(|busy| busy.borrow().contains(&id))
+}
+
 /// 次を検索。手元に届いている行にあればその場で即座にジャンプ、そうでなければ本体の走査で。
 /// すでに検索が走っている間は重複実行をブロックし、負荷を抑制する。
 pub(super) fn find(
