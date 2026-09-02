@@ -109,7 +109,10 @@ pub(super) fn span_boxes(row: &Element, from: usize, to: usize, past_end: bool) 
             let last_box = *piece.last()?;
             let mut res = span_box(row, first, last_box);
             let min_left = piece.iter().map(|r| r.left).fold(f64::INFINITY, f64::min);
-            let mut max_right = piece.iter().map(|r| r.left).fold(f64::NEG_INFINITY, f64::max);
+            let mut max_right = piece
+                .iter()
+                .map(|r| r.left)
+                .fold(f64::NEG_INFINITY, f64::max);
             if past_end && nth + 1 == last {
                 max_right += 6.0;
             }

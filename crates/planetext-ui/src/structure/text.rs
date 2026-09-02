@@ -998,10 +998,7 @@ pub fn character_before(row: &[Node], index: usize) -> usize {
     if char_start == target {
         return target - 1;
     }
-    let s: String = row[char_start..target]
-        .iter()
-        .filter_map(as_char)
-        .collect();
+    let s: String = row[char_start..target].iter().filter_map(as_char).collect();
     use unicode_segmentation::UnicodeSegmentation;
     let mut cluster_char_len = 1;
     for g in s.graphemes(true) {
@@ -1022,10 +1019,7 @@ pub fn character_after(row: &[Node], index: usize) -> usize {
     if char_end == index {
         return index + 1;
     }
-    let s: String = row[index..char_end]
-        .iter()
-        .filter_map(as_char)
-        .collect();
+    let s: String = row[index..char_end].iter().filter_map(as_char).collect();
     use unicode_segmentation::UnicodeSegmentation;
     if let Some(first_grapheme) = s.graphemes(true).next() {
         let cluster_char_len = first_grapheme.chars().count();

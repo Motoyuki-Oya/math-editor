@@ -781,9 +781,27 @@ mod tests {
 
         // Alt+Up moves Line 2 up to line 0
         editor.move_lines_vertical(false);
-        let line0: String = editor.document.text.line(0).iter().filter_map(crate::structure::text::as_char).collect();
-        let line1: String = editor.document.text.line(1).iter().filter_map(crate::structure::text::as_char).collect();
-        let line2: String = editor.document.text.line(2).iter().filter_map(crate::structure::text::as_char).collect();
+        let line0: String = editor
+            .document
+            .text
+            .line(0)
+            .iter()
+            .filter_map(crate::structure::text::as_char)
+            .collect();
+        let line1: String = editor
+            .document
+            .text
+            .line(1)
+            .iter()
+            .filter_map(crate::structure::text::as_char)
+            .collect();
+        let line2: String = editor
+            .document
+            .text
+            .line(2)
+            .iter()
+            .filter_map(crate::structure::text::as_char)
+            .collect();
         assert_eq!(line0, "Line 2");
         assert_eq!(line1, "Line 1");
         assert_eq!(line2, "Line 3");
@@ -791,9 +809,27 @@ mod tests {
 
         // Alt+Down moves Line 2 back down to line 1
         editor.move_lines_vertical(true);
-        let line0: String = editor.document.text.line(0).iter().filter_map(crate::structure::text::as_char).collect();
-        let line1: String = editor.document.text.line(1).iter().filter_map(crate::structure::text::as_char).collect();
-        let line2: String = editor.document.text.line(2).iter().filter_map(crate::structure::text::as_char).collect();
+        let line0: String = editor
+            .document
+            .text
+            .line(0)
+            .iter()
+            .filter_map(crate::structure::text::as_char)
+            .collect();
+        let line1: String = editor
+            .document
+            .text
+            .line(1)
+            .iter()
+            .filter_map(crate::structure::text::as_char)
+            .collect();
+        let line2: String = editor
+            .document
+            .text
+            .line(2)
+            .iter()
+            .filter_map(crate::structure::text::as_char)
+            .collect();
         assert_eq!(line0, "Line 1");
         assert_eq!(line1, "Line 2");
         assert_eq!(line2, "Line 3");
@@ -827,9 +863,27 @@ mod tests {
 
         // Alt+Down moves B below C -> A, C, B
         editor.move_lines_vertical(true);
-        let line0: String = editor.document.text.line(0).iter().filter_map(crate::structure::text::as_char).collect();
-        let line1: String = editor.document.text.line(1).iter().filter_map(crate::structure::text::as_char).collect();
-        let line2: String = editor.document.text.line(2).iter().filter_map(crate::structure::text::as_char).collect();
+        let line0: String = editor
+            .document
+            .text
+            .line(0)
+            .iter()
+            .filter_map(crate::structure::text::as_char)
+            .collect();
+        let line1: String = editor
+            .document
+            .text
+            .line(1)
+            .iter()
+            .filter_map(crate::structure::text::as_char)
+            .collect();
+        let line2: String = editor
+            .document
+            .text
+            .line(2)
+            .iter()
+            .filter_map(crate::structure::text::as_char)
+            .collect();
         assert_eq!(line0, "A");
         assert_eq!(line1, "C");
         assert_eq!(line2, "B");

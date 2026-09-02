@@ -261,7 +261,9 @@ pub fn toggle_overwrite_mode(session: &Rc<RefCell<Session>>) -> bool {
 }
 
 pub fn is_focused_overwrite_mode() -> bool {
-    session().map(|s| s.borrow().overwrite_mode).unwrap_or(false)
+    session()
+        .map(|s| s.borrow().overwrite_mode)
+        .unwrap_or(false)
 }
 
 pub fn reset_all_overwrite_modes() {
