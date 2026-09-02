@@ -155,4 +155,29 @@ impl Document {
         self.log.mark_saved();
         Ok(())
     }
+
+    /// 下書きを書き出す。元ファイルがあり変更がない場合は全文ダンプを行わず、
+    /// 元ファイルへの参照だけを記録してディスク消費とI/O負荷をゼロにする。
+    pub(crate) fn write_draft<W: Write>(
+        &mut self,
+        out: &mut W,
+        path: Option<&str>,
+    ) -> Result<(), String> {
+        if let Some(p) = path {
+            if self.is_clean() {
+                writeln!(out, "// PLANETEXT_DRAFT_REF_V1")
+                    .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+                writeln!(out, "{p}").map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+                writeln!(out, "CLEAN").map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+                return Ok(());
+            }
+            // 変更がある場合はパスを出力した上で本文を書き出す
+            writeln!(out, "{p}").map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+            self.write_to(out)
+        } else {
+            // 無題ドキュメントは1行目を空にして本文を書き出す
+            writeln!(out).map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+            self.write_to(out)
+        }
+    }
 }

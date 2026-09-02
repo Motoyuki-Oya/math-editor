@@ -863,6 +863,43 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
+    /// 【回帰防止テスト】
+    /// assemble の実体化が MAX_ASSEMBLE_BYTES（10MB）を超える場合、
+    /// 安全のためにエラーを返し、巨大なヒープ確保によるプロセス圧迫を防ぐ。
+    #[test]
+    fn assemble_enforces_max_bytes_limit() {
+        let large_line = "A".repeat(1024 * 1024); // 1MB の行
+        let lines: Vec<String> = vec![large_line.clone(); 12]; // 12MB 分
+        let lines_ref: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (mut doc, path) = disk_doc("assemble-limit", &lines_ref);
+
+        let overrides = std::collections::HashMap::default();
+        let res = doc.assemble(0, None, 11, None, &overrides);
+        assert!(res.is_err(), "10MB を超える assemble はエラーを返すこと");
+        assert!(
+            res.unwrap_err().contains("上限10MB"),
+            "エラーメッセージに上限情報が含まれること"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 【回帰防止テスト】
+    /// 編集バッファと操作ログのメモリ使用量が memory_usage() で正しく追跡されることを保証する。
+    #[test]
+    fn document_memory_usage_tracks_edits() {
+        let (mut doc, path) = disk_doc("memory-tracking", &["hello", "world"]);
+        let initial_memory = doc.memory_usage();
+
+        doc.replace(1, 2, vec!["new content line".into()], 1, "", "")
+            .unwrap();
+        let edited_memory = doc.memory_usage();
+        assert!(
+            edited_memory > initial_memory,
+            "編集によりメモリ追跡値が増加すること"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
     fn assert_document_state(doc: &mut Document, expected: &[String]) {
         assert_eq!(all(doc), expected);
         assert_eq!(doc.line_count(), expected.len());

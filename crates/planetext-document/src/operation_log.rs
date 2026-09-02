@@ -100,6 +100,10 @@ impl OperationLog {
             .map_or(self.base_revision, |tx| tx.revision)
     }
 
+    pub(crate) fn memory_usage(&self) -> usize {
+        self.buffers.len() + self.transactions.len() * std::mem::size_of::<Transaction>()
+    }
+
     pub(crate) fn clear(&mut self) {
         self.transactions.clear();
         self.head = 0;

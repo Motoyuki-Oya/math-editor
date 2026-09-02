@@ -614,11 +614,7 @@ impl Application {
             let file = std::fs::File::create(dir.join(draft_name(&id)))
                 .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
             let mut out = std::io::BufWriter::new(file);
-            use std::io::Write;
-            writeln!(out, "{}", path.unwrap_or_default())
-                .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
-            doc.write_to(&mut out)
-                .map_err(|e| format!("下書きを保存できませんでした: {e}"))
+            doc.write_draft(&mut out, path.as_deref())
         })
     }
 
@@ -654,20 +650,39 @@ impl Application {
             .flatten()
             .filter_map(|entry| {
                 let path = entry.path();
-                if let Ok(meta) = entry.metadata() {
-                    if meta.len() > 10 * 1024 * 1024 {
-                        return None;
-                    }
-                }
                 let id = path.file_stem()?.to_string_lossy().into_owned();
                 let file = std::fs::read_to_string(&path).ok()?;
-                let (first, contents) = file.split_once('\n').unwrap_or(("", file.as_str()));
-                let first = first.trim_end_matches(['\r', '\n']);
-                Some(Draft {
-                    id,
-                    path: (!first.is_empty()).then(|| first.to_string()),
-                    contents: contents.to_string(),
-                })
+                let mut lines = file.lines();
+                let first = lines.next().unwrap_or_default();
+                if first == "// PLANETEXT_DRAFT_REF_V1" {
+                    let orig_path = lines.next().unwrap_or_default().to_string();
+                    let status = lines.next().unwrap_or_default();
+                    if status == "CLEAN" {
+                        // 未変更の下書き: 元ファイルが存在すればその内容を読み出す
+                        let contents = std::fs::read_to_string(&orig_path).unwrap_or_default();
+                        Some(Draft {
+                            id,
+                            path: Some(orig_path),
+                            contents,
+                        })
+                    } else {
+                        // 変更がある場合は後続のテキスト
+                        let remaining: Vec<&str> = lines.collect();
+                        Some(Draft {
+                            id,
+                            path: Some(orig_path),
+                            contents: remaining.join("\n"),
+                        })
+                    }
+                } else {
+                    let first = first.trim_end_matches(['\r', '\n']);
+                    let contents = file.split_once('\n').map_or("", |(_, rest)| rest);
+                    Some(Draft {
+                        id,
+                        path: (!first.is_empty()).then(|| first.to_string()),
+                        contents: contents.to_string(),
+                    })
+                }
             })
             .collect();
         // タブは開かれた順序で戻ります。
@@ -829,5 +844,48 @@ mod tests {
 
         application.clear_drafts(Some(temp_dir.clone()));
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    /// 【回帰防止テスト】
+    /// 実ファイルを持つ文書の下書き保存時、全文ダンプではなく元ファイル参照が記録され、
+    /// read_drafts で元ファイルと関連付けられた下書きとして復元されることを保証する。
+    #[test]
+    fn save_and_read_referenced_file_draft() {
+        let application = Application::default();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let file_path =
+            std::env::temp_dir().join(format!("planetext_draft_target_{timestamp}.txt"));
+        std::fs::write(&file_path, "original file line 1\noriginal file line 2").unwrap();
+
+        let doc = application
+            .open_document(file_path.to_str().unwrap().to_string())
+            .unwrap();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "planetext_test_ref_draft_{timestamp}_{}",
+            doc.handle
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        application
+            .save_draft(
+                Some(temp_dir.clone()),
+                doc.handle,
+                "1".into(),
+                Some(file_path.to_str().unwrap().into()),
+            )
+            .unwrap();
+
+        let drafts = application.read_drafts(Some(temp_dir.clone()));
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].id, "1");
+        assert_eq!(drafts[0].path.as_deref(), Some(file_path.to_str().unwrap()));
+        assert!(drafts[0].contents.contains("original file line 1"));
+
+        application.clear_drafts(Some(temp_dir.clone()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let _ = std::fs::remove_file(&file_path);
     }
 }

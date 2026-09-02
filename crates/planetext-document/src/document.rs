@@ -889,8 +889,12 @@ impl Document {
         }))
     }
 
+    /// 一度に実体文字列として組み立てられるコピーの上限（10MB）。
+    pub(crate) const MAX_ASSEMBLE_BYTES: usize = 10 * 1024 * 1024;
+
     /// 選択された範囲をひとつなぎのテキストにする。`first` / `last` は端の行の
     /// 切り出し（`None` なら行を丸ごと）。`overrides` の行は差し替えて使う。
+    /// 実体化が 10MB を超える場合は安全のためにエラーを返す。
     pub(crate) fn assemble(
         &mut self,
         from: usize,
@@ -903,6 +907,7 @@ impl Document {
             return Err("コピーの範囲が文書の外です".to_string());
         }
         let mut out = String::new();
+        let mut exceeded = false;
         self.each_line(from, to - from + 1, &mut |i, line| {
             if i > from {
                 out.push('\n');
@@ -914,8 +919,21 @@ impl Document {
             } else {
                 out.push_str(overrides.get(&i).map(String::as_str).unwrap_or(line));
             }
+            if out.len() > Self::MAX_ASSEMBLE_BYTES {
+                exceeded = true;
+                return false;
+            }
             true
         })?;
+        if exceeded {
+            return Err("コピー範囲が大きすぎます（上限10MB）".to_string());
+        }
         Ok(out)
+    }
+
+    /// 文書が消費している編集実体・操作ログ・差分キャッシュのメモリ量（バイト）を返す。
+    #[allow(dead_code)]
+    pub(crate) fn memory_usage(&self) -> usize {
+        self.buffers.len() + self.log.memory_usage()
     }
 }
