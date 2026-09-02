@@ -247,61 +247,69 @@ pub fn App() -> impl IntoView {
             </Show>
 
             <div class="panes">
-                {move || {
-                    let panes = shell.panes.get();
-                    let count = panes.len();
-                    panes
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, pane)| {
-                            let style = Signal::derive(move || {
-                                if count == 2 {
-                                    let r = shell.split_ratio.get();
-                                    if i == 0 {
-                                        format!("flex: {r} 1 0px;")
-                                    } else {
-                                        format!("flex: {} 1 0px;", 1.0 - r)
-                                    }
+                <For
+                    each=move || shell.panes.get()
+                    key=|pane| pane.key
+                    let:pane
+                >
+                    {
+                        let pane_key = pane.key;
+                        let is_resizing = shell.resizing_split;
+                        let is_first = Signal::derive(move || {
+                            shell
+                                .panes
+                                .with(|p| p.first().map(|x| x.key == pane_key).unwrap_or(true))
+                        });
+                        let style = Signal::derive(move || {
+                            let count = shell.panes.with(Vec::len);
+                            if count == 2 {
+                                let r = shell.split_ratio.get();
+                                if is_first.get() {
+                                    format!("flex: {r} 1 0px;")
                                 } else {
-                                    "flex: 1 1 0px;".to_string()
+                                    format!("flex: {} 1 0px;", 1.0 - r)
                                 }
-                            });
-                            let is_resizing = shell.resizing_split;
-                            view! {
-                                {if i > 0 {
-                                    Some(view! {
-                                        <div
-                                            class=move || {
-                                                if is_resizing.get() {
-                                                    "pane-divider pane-divider-active"
-                                                } else {
-                                                    "pane-divider"
-                                                }
-                                            }
-                                            on:pointerdown=move |ev: web_sys::PointerEvent| {
-                                                if ev.button() == 0 {
-                                                    ev.prevent_default();
-                                                    shell.resizing_split.set(true);
-                                                }
-                                            }
-                                            on:dblclick=move |_| {
-                                                shell.split_ratio.set(0.5);
-                                                editor::redraw_all();
-                                            }
-                                        />
-                                    })
-                                } else {
-                                    None
-                                }}
-                                <PaneView shell=shell pane=pane style=style/>
+                            } else {
+                                "flex: 1 1 0px;".to_string()
                             }
-                        })
-                        .collect::<Vec<_>>()
-                }}
+                        });
+                        view! {
+                            <Show when=move || !is_first.get()>
+                                <div
+                                    class=move || {
+                                        if is_resizing.get() {
+                                            "pane-divider pane-divider-active"
+                                        } else {
+                                            "pane-divider"
+                                        }
+                                    }
+                                    on:pointerdown=move |ev: web_sys::PointerEvent| {
+                                        if ev.button() == 0 {
+                                            ev.prevent_default();
+                                            shell.resizing_split.set(true);
+                                        }
+                                    }
+                                    on:dblclick=move |_| {
+                                        shell.split_ratio.set(0.5);
+                                        editor::redraw_all();
+                                    }
+                                />
+                            </Show>
+                            <PaneView shell=shell pane=pane style=style/>
+                        }
+                    }
+                </For>
             </div>
 
             <div class="statusbar">
                 <div class="statusbar-left">
+                    <button
+                        class=move || if shell.preferences.get() { "status-icon-btn active" } else { "status-icon-btn" }
+                        title="設定 (Ctrl+,)"
+                        on:click=move |_| shell.preferences.update(|open| *open = !*open)
+                    >
+                        "⚙"
+                    </button>
                     <span>{move || {
                         let stats = shell.stats.get();
                         let tab = shell.tab();
@@ -338,6 +346,55 @@ pub fn App() -> impl IntoView {
                 </div>
 
                 <div class="statusbar-right">
+                    <button
+                        type="button"
+                        class="status-clickable"
+                        prop:disabled=move || {
+                            let _ = shell.stats.get();
+                            !crate::settings::current().enable_overwrite_mode && !editor::is_focused_overwrite_mode()
+                        }
+                        title=move || {
+                            let _ = shell.stats.get();
+                            let is_overwrite = editor::is_focused_overwrite_mode();
+                            let enabled = crate::settings::current().enable_overwrite_mode;
+                            if !enabled && !is_overwrite {
+                                "入力モード: 挿入 (上書きモードは設定で無効化されています)".to_string()
+                            } else if is_overwrite {
+                                "入力モード: 上書き (クリックまたはInsertキーで挿入に切替)".to_string()
+                            } else {
+                                "入力モード: 挿入 (クリックまたはInsertキーで上書きに切替)".to_string()
+                            }
+                        }
+                        aria-label=move || {
+                            let _ = shell.stats.get();
+                            let is_overwrite = editor::is_focused_overwrite_mode();
+                            let enabled = crate::settings::current().enable_overwrite_mode;
+                            if !enabled && !is_overwrite {
+                                "入力モード: 挿入 (上書きモードは設定で無効化されています)"
+                            } else if is_overwrite {
+                                "入力モード: 上書き (クリックまたはInsertキーで挿入に切替)"
+                            } else {
+                                "入力モード: 挿入 (クリックまたはInsertキーで上書きに切替)"
+                            }
+                        }
+                        on:click=move |_| {
+                            if let Some(focused) = editor::session() {
+                                if crate::settings::current().enable_overwrite_mode || editor::is_focused_overwrite_mode() {
+                                    editor::toggle_overwrite_mode(&focused);
+                                    shell.stats.update(|_| {});
+                                }
+                            }
+                        }
+                    >
+                        {move || {
+                            let _ = shell.stats.get();
+                            if editor::is_focused_overwrite_mode() {
+                                "上書き"
+                            } else {
+                                "挿入"
+                            }
+                        }}
+                    </button>
                     <span>{move || {
                         let stats = shell.stats.get();
                         format!("[ {} | {} ]", stats.caret_line, stats.caret_col)

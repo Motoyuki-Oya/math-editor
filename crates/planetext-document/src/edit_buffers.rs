@@ -32,14 +32,18 @@ fn decode(bytes: &[u8], encoding: FileEncoding) -> String {
     match encoding {
         FileEncoding::Utf16Le => String::from_utf16_lossy(
             &bytes
-                .chunks_exact(2)
-                .map(|x| u16::from_le_bytes([x[0], x[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&x| u16::from_le_bytes(x))
                 .collect::<Vec<_>>(),
         ),
         FileEncoding::Utf16Be => String::from_utf16_lossy(
             &bytes
-                .chunks_exact(2)
-                .map(|x| u16::from_be_bytes([x[0], x[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&x| u16::from_be_bytes(x))
                 .collect::<Vec<_>>(),
         ),
         _ => encoding.decode_line(bytes),

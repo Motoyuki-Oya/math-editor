@@ -49,6 +49,8 @@ pub struct Session {
     pending_tail: Option<(usize, Vec<String>)>,
     /// インライン補完（ゴーストテキスト）の現在候補。
     pub ghost: Option<super::suggest::GhostText>,
+    /// 上書き入力モード（Insertキーでトグル）。
+    pub overwrite_mode: bool,
 }
 
 impl Session {
@@ -237,6 +239,7 @@ pub fn init(root: &HtmlElement) -> Option<usize> {
         jump_end: None,
         pending_tail: None,
         ghost: None,
+        overwrite_mode: false,
     }));
     input::install(&session);
     PANES.with(|panes| panes.borrow_mut().push(session.clone()));
@@ -245,6 +248,31 @@ pub fn init(root: &HtmlElement) -> Option<usize> {
     }
     redraw(&session);
     Some(pane)
+}
+
+pub fn toggle_overwrite_mode(session: &Rc<RefCell<Session>>) -> bool {
+    let new_mode = {
+        let mut borrowed = session.borrow_mut();
+        borrowed.overwrite_mode = !borrowed.overwrite_mode;
+        borrowed.overwrite_mode
+    };
+    redraw(session);
+    new_mode
+}
+
+pub fn is_focused_overwrite_mode() -> bool {
+    session()
+        .map(|s| s.borrow().overwrite_mode)
+        .unwrap_or(false)
+}
+
+pub fn reset_all_overwrite_modes() {
+    PANES.with(|panes| {
+        for session in panes.borrow().iter() {
+            session.borrow_mut().overwrite_mode = false;
+            redraw(session);
+        }
+    });
 }
 
 /// 分割が元に戻されると、ペインを削除します。
@@ -509,6 +537,7 @@ fn redraw_preview_overlay(session: &Rc<RefCell<Session>>) {
             carets: &carets,
             focused: session.focused,
             linked: session.linked,
+            overwrite: session.overwrite_mode,
             show_numbers: !session.counting,
             language: lang.as_ref(),
             ghost: session.ghost.as_ref(),
@@ -712,6 +741,7 @@ pub fn redraw(session: &Rc<RefCell<Session>>) {
                 carets: &carets,
                 focused: session.focused,
                 linked: session.linked,
+                overwrite: session.overwrite_mode,
                 show_numbers: !session.counting,
                 language: lang.as_ref(),
                 ghost: session.ghost.as_ref(),
@@ -766,6 +796,7 @@ pub fn scrolled(session: &Rc<RefCell<Session>>) {
                 carets: &carets,
                 focused: session.focused,
                 linked: session.linked,
+                overwrite: session.overwrite_mode,
                 show_numbers: !session.counting,
                 language: lang.as_ref(),
                 ghost: session.ghost.as_ref(),

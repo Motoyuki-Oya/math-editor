@@ -92,6 +92,7 @@ pub struct Renderer<'a> {
     font_size: f64,
     language: Option<&'a crate::syntax::lang::LanguageDef>,
     ghost_text: Option<&'a crate::syntax::GhostText>,
+    overwrite: bool,
 }
 
 /// 待機中の文字1 つのスパンとして描画されます。これにより、テキストの間隔と形状が維持されます。
@@ -167,7 +168,13 @@ impl<'a> Renderer<'a> {
             font_size: settings::current().font_size,
             language: None,
             ghost_text: None,
+            overwrite: false,
         }
+    }
+
+    pub fn with_overwrite(mut self, overwrite: bool) -> Renderer<'a> {
+        self.overwrite = overwrite;
+        self
     }
 
     pub fn with_preedit(mut self, preedit: Option<&'a Preedit<'a>>) -> Renderer<'a> {
@@ -220,11 +227,42 @@ impl<'a> Renderer<'a> {
             && self.language.is_some_and(|l| l.name == "Markdown")
             && is_markdown_table_row(cells);
 
+        let overwrite_skip_until = if self.overwrite {
+            if let Some(preedit) = self.preedit.filter(|p| p.path == path) {
+                use unicode_segmentation::UnicodeSegmentation;
+                let grapheme_count = preedit.text.graphemes(true).count();
+                let mut skipped = 0;
+                let mut target_idx = preedit.index;
+                while target_idx < cells.len() && skipped < grapheme_count {
+                    if matches!(
+                        cells[target_idx],
+                        Cell::Char(_) | Cell::Space | Cell::ZenkakuSpace | Cell::Tab
+                    ) {
+                        skipped += 1;
+                        target_idx += 1;
+                    } else {
+                        break;
+                    }
+                }
+                Some((preedit.index, target_idx))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let mut run: Option<Run> = None;
         for (index, cell) in cells.iter().enumerate() {
             if let Some(preedit) = self.preedit_at(path, index) {
                 self.flush(&container, &mut run);
                 container.append_child(&preedit).ok();
+            }
+
+            if let Some((start, end)) = overwrite_skip_until {
+                if index >= start && index < end {
+                    continue;
+                }
             }
 
             if let Some(ghost) = self.ghost_text {

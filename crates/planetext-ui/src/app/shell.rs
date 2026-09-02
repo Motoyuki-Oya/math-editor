@@ -691,6 +691,7 @@ impl Shell {
         self.sync_dirty();
         self.refresh();
         self.save_session();
+        super::menu::update_menu_state();
     }
 
     /// 指定したタブ以外のタブをすべて閉じます。
@@ -839,6 +840,7 @@ impl Shell {
         self.sync_dirty();
         self.refresh();
         self.save_session();
+        super::menu::update_menu_state();
     }
 
     /// タブを並べ替えるか、別のペインへ移動します。
@@ -907,24 +909,21 @@ impl Shell {
                 }
             });
 
-            if src_pane.tabs.with_untracked(Vec::is_empty) {
-                // 元ペインが空になる場合、空の無題タブを新規作成してペインを維持
-                let new_tab = self.new_tab();
-                src_pane.tabs.set(vec![new_tab]);
-                src_pane.current.set(0);
-                self.show(src_pane, new_tab);
-            } else if src_current == src_tab_idx {
-                let last = src_pane.tabs.with_untracked(|tabs| tabs.len() - 1);
-                let next_idx = src_tab_idx.min(last);
-                src_pane.current.set(next_idx);
-                let next_tab = src_pane.tabs.with_untracked(|tabs| tabs[next_idx]);
-                self.show(src_pane, next_tab);
-            } else {
-                let last = src_pane.tabs.with_untracked(|tabs| tabs.len() - 1);
-                if src_tab_idx < src_current {
-                    src_pane.current.set(src_current - 1);
+            let src_empty = src_pane.tabs.with_untracked(Vec::is_empty);
+            if !src_empty {
+                if src_current == src_tab_idx {
+                    let last = src_pane.tabs.with_untracked(|tabs| tabs.len() - 1);
+                    let next_idx = src_tab_idx.min(last);
+                    src_pane.current.set(next_idx);
+                    let next_tab = src_pane.tabs.with_untracked(|tabs| tabs[next_idx]);
+                    self.show(src_pane, next_tab);
                 } else {
-                    src_pane.current.set(src_current.min(last));
+                    let last = src_pane.tabs.with_untracked(|tabs| tabs.len() - 1);
+                    if src_tab_idx < src_current {
+                        src_pane.current.set(src_current - 1);
+                    } else {
+                        src_pane.current.set(src_current.min(last));
+                    }
                 }
             }
 
@@ -940,6 +939,11 @@ impl Shell {
             dst_pane.current.set(insert_idx);
             self.show(dst_pane, tab);
             self.focus_on(dst_pane);
+
+            if src_empty {
+                self.close_pane_view(src_pane);
+            }
+
             self.sync_dirty();
             self.refresh();
             self.save_session();
@@ -992,6 +996,7 @@ impl Shell {
         self.sync_dirty();
         self.refresh();
         self.save_session();
+        super::menu::update_menu_state();
     }
 
     pub(super) fn open(&self) {
@@ -1439,7 +1444,7 @@ impl Shell {
         });
     }
 
-    /// 現在のタブの文書を数式・記法ごと組版してネイティブ印刷（PDF保存等）へ送ります。
+    /// 現在のタブの文書を構造・記法ごと組版してネイティブ印刷（PDF保存等）へ送ります。
     pub(super) fn print(&self) {
         let shell = *self;
         let tab = shell.tab_untracked();

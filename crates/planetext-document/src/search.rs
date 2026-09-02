@@ -161,6 +161,7 @@ fn aligned_positions(
 /// `read` が返す小さな窓だけを保持し、窓境界の最長パターン分だけ重ねる。
 /// PieceTree のピース境界は行境界なので、検索語は境界を越えない（従来の
 /// 行単位検索と同じ）。同じ行のバイトが複数ピースへ分割される構造は作られない。
+#[allow(clippy::too_many_arguments)]
 fn scan_encoded_range(
     len: usize,
     lines: usize,
@@ -174,9 +175,7 @@ fn scan_encoded_range(
 ) -> Result<(Vec<RawScanHit>, usize), String> {
     let unit = encoding.unit_bytes();
     let cr = encoding.encode_str("\r");
-    let query_has_delimiter = aligned_positions(query, delimiter, true, unit)
-        .first()
-        .is_some();
+    let query_has_delimiter = !aligned_positions(query, delimiter, true, unit).is_empty();
     let longest = query
         .len()
         .max(marker.len())
