@@ -3,66 +3,275 @@ use crate::source::{FileEncoding, LineEnding};
 
 pub(crate) const HISTORY_LIMIT: usize = 1000;
 
-#[derive(Debug)]
+/// 物理バイト座標と行座標を併せ持つ編集単位。
+#[derive(Clone, Debug)]
 pub(crate) struct Edit {
+    /// 適用前（base_revision）の物理バイト開始位置
     pub(crate) from: usize,
+    /// 適用前（base_revision）の物理バイト終了位置
+    pub(crate) to: usize,
+    /// 編集開始行番号
+    pub(crate) from_line: usize,
     pub(crate) removed: EditRange,
-    pub(crate) inserted: usize,
+    pub(crate) inserted: EditRange,
+    pub(crate) removed_lines: usize,
+    pub(crate) inserted_lines: usize,
 }
 
-#[derive(Debug)]
-pub(crate) struct Step {
+#[derive(Clone, Debug)]
+pub(crate) struct Transaction {
     pub(crate) group: u64,
+    pub(crate) base_revision: u64,
+    pub(crate) revision: u64,
     pub(crate) edits: Vec<Edit>,
     pub(crate) before: String,
     pub(crate) after: String,
 }
 
+/// 単一の追記専用操作ログ。
+/// Undo / Redo は `head` カーソルの移動のみで表現され、ログの外に別の状態を作らない。
+#[derive(Clone)]
 pub(crate) struct OperationLog {
-    pub(crate) undo: Vec<Step>,
-    pub(crate) redo: Vec<Step>,
-    pub(crate) saved_undo_len: Option<usize>,
-    pub(crate) delete_buffers: EditBuffers,
+    pub(crate) transactions: Vec<Transaction>,
+    pub(crate) head: usize,
+    pub(crate) next_revision: u64,
+    pub(crate) saved_revision: Option<u64>,
+    pub(crate) retained_base: u64,
+    pub(crate) base_revision: u64,
+    pub(crate) buffers: EditBuffers,
 }
 
 impl Default for OperationLog {
     fn default() -> Self {
         Self {
-            undo: Vec::new(),
-            redo: Vec::new(),
-            saved_undo_len: Some(0),
-            delete_buffers: EditBuffers::default(),
+            transactions: Vec::new(),
+            head: 0,
+            next_revision: 1,
+            saved_revision: Some(0),
+            retained_base: 0,
+            base_revision: 0,
+            buffers: EditBuffers::default(),
         }
     }
 }
 
 impl OperationLog {
+    pub(crate) fn revision(&self) -> u64 {
+        self.head
+            .checked_sub(1)
+            .and_then(|index| self.transactions.get(index))
+            .map_or(self.base_revision, |tx| tx.revision)
+    }
+
     pub(crate) fn clear(&mut self) {
-        self.undo.clear();
-        self.redo.clear();
-        self.saved_undo_len = Some(0);
-        self.delete_buffers = EditBuffers::default();
+        self.transactions.clear();
+        self.head = 0;
+        self.base_revision = self.next_revision;
+        self.next_revision = self.next_revision.saturating_add(1);
+        self.retained_base = self.base_revision;
+        self.saved_revision = Some(self.base_revision);
+        self.buffers = EditBuffers::default();
     }
+
     pub(crate) fn mark_dirty_without_history(&mut self) {
-        self.saved_undo_len = None;
+        self.saved_revision = None;
     }
+
     pub(crate) fn mark_saved(&mut self) {
-        self.saved_undo_len = Some(self.undo.len());
+        self.saved_revision = Some(self.revision());
     }
+
     pub(crate) fn is_clean(&self) -> bool {
-        self.saved_undo_len == Some(self.undo.len())
+        self.saved_revision == Some(self.revision())
     }
+
+    pub(crate) fn append_transaction(
+        &mut self,
+        base_revision: u64,
+        group: u64,
+        edits: Vec<Edit>,
+        before: &str,
+        after: &str,
+    ) {
+        // Undo 状態で新しい編集が入った場合、Redo 枝を切り捨てる
+        self.transactions.truncate(self.head);
+        let revision = self.next_revision;
+        self.next_revision = self.next_revision.saturating_add(1);
+        self.transactions.push(Transaction {
+            group,
+            base_revision,
+            revision,
+            edits,
+            before: before.to_string(),
+            after: after.to_string(),
+        });
+        self.head = self.transactions.len();
+
+        if self.transactions.len() > HISTORY_LIMIT {
+            self.transactions.remove(0);
+            self.head = self.head.saturating_sub(1);
+            self.retained_base = self
+                .transactions
+                .first()
+                .map_or(self.next_revision, |tx| tx.base_revision);
+            self.base_revision = self.retained_base;
+        }
+    }
+
+    /// 直前のトランザクションと同じ group であれば edits をマージする
+    pub(crate) fn append_or_merge_transaction(
+        &mut self,
+        base_revision: u64,
+        group: u64,
+        edit: Edit,
+        before: &str,
+        after: &str,
+    ) {
+        self.transactions.truncate(self.head);
+        let current_rev = self.revision();
+        if let Some(last) = self.transactions.last_mut() {
+            if last.group == group && last.revision == current_rev {
+                last.edits.push(edit);
+                last.after = after.to_string();
+                return;
+            }
+        }
+        self.append_transaction(base_revision, group, vec![edit], before, after);
+    }
+
+    /// Undo: head を 1 つ戻し、巻き戻すべきトランザクションを返す
+    pub(crate) fn undo_pop(&mut self) -> Option<&Transaction> {
+        if self.head == 0 {
+            return None;
+        }
+        self.head -= 1;
+        self.transactions.get(self.head)
+    }
+
+    /// Redo: head を 1 つ進め、再適用すべきトランザクションを返す
+    pub(crate) fn redo_pop(&mut self) -> Option<&Transaction> {
+        if self.head >= self.transactions.len() {
+            return None;
+        }
+        let tx = self.transactions.get(self.head);
+        self.head += 1;
+        tx
+    }
+
     pub(crate) fn append_deleted(
         &mut self,
         lines: &[String],
         encoding: FileEncoding,
         line_ending: LineEnding,
     ) -> EditRange {
-        self.delete_buffers
-            .append_lines(lines, encoding, line_ending)
-            .0
+        self.buffers.append_lines(lines, encoding, line_ending).0
     }
+
     pub(crate) fn read_deleted(&self, range: EditRange) -> Vec<String> {
-        self.delete_buffers.read_lines(range)
+        self.buffers.read_lines(range)
+    }
+
+    /// 指定された base_revision が有効（追跡範囲内）か検証する
+    pub(crate) fn validate_base(&self, revision: u64) -> Result<(), String> {
+        if revision == self.revision() {
+            return Ok(());
+        }
+        if revision < self.retained_base
+            || revision >= self.next_revision
+            || !self
+                .transactions
+                .iter()
+                .any(|tx| tx.revision == revision || tx.base_revision == revision)
+        {
+            return Err("revision is discarded, future, or unknown".into());
+        }
+        Ok(())
+    }
+
+    fn active_transactions_after(&self, revision: u64) -> impl Iterator<Item = &Transaction> {
+        self.transactions
+            .iter()
+            .take(self.head)
+            .filter(move |tx| tx.base_revision >= revision || tx.revision > revision)
+    }
+
+    /// base_revision 上のバイト座標を、現在の head のバイト座標へ写像する。
+    /// 削除された範囲に該当した場合はエラーを返す。
+    pub(crate) fn map_point(&self, base_revision: u64, point: usize) -> Result<usize, String> {
+        self.validate_base(base_revision)?;
+        let mut value = point;
+        for tx in self.active_transactions_after(base_revision) {
+            let mut delta: isize = 0;
+            let input = value;
+            for edit in &tx.edits {
+                let from = edit.from;
+                let end = edit.to;
+                if input < from {
+                    break;
+                }
+                if input < end {
+                    return Err("coordinate overlaps a removed range".into());
+                }
+                delta += edit.inserted.len as isize - edit.to.saturating_sub(edit.from) as isize;
+            }
+            value = if delta >= 0 {
+                input.saturating_add(delta as usize)
+            } else {
+                input.saturating_sub((-delta) as usize)
+            };
+        }
+        Ok(value)
+    }
+
+    /// base_revision 上の半開区間 [from, to) を、現在の head の物理区間へ写像する。
+    /// 区間が編集範囲と重なっている場合はエラーを返す。
+    pub(crate) fn map_range(
+        &self,
+        base_revision: u64,
+        from: usize,
+        to: usize,
+    ) -> Result<(usize, usize), String> {
+        if from > to {
+            return Err("range is reversed".into());
+        }
+        if from == to {
+            let point = self.map_point(base_revision, from)?;
+            return Ok((point, point));
+        }
+        self.validate_base(base_revision)?;
+        let mut start = from;
+        let mut end = to;
+        for tx in self.active_transactions_after(base_revision) {
+            for edit in &tx.edits {
+                if start < edit.to && edit.from < end {
+                    return Err("range overlaps an edit".into());
+                }
+            }
+            let shift = |boundary: usize, include_boundary: bool| {
+                tx.edits
+                    .iter()
+                    .take_while(|edit| {
+                        edit.from < boundary || (include_boundary && edit.from == boundary)
+                    })
+                    .filter(|edit| edit.to <= boundary)
+                    .map(|edit| {
+                        edit.inserted.len as isize - edit.to.saturating_sub(edit.from) as isize
+                    })
+                    .sum::<isize>()
+            };
+            let start_delta = shift(start, true);
+            let end_delta = shift(end, false);
+            start = if start_delta >= 0 {
+                start.saturating_add(start_delta as usize)
+            } else {
+                start.saturating_sub((-start_delta) as usize)
+            };
+            end = if end_delta >= 0 {
+                end.saturating_add(end_delta as usize)
+            } else {
+                end.saturating_sub((-end_delta) as usize)
+            };
+        }
+        Ok((start, end))
     }
 }

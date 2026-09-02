@@ -297,6 +297,9 @@ impl PieceTree {
     pub(crate) fn line_count(&self) -> usize {
         self.root.lines
     }
+    pub(crate) fn byte_offset(&self, line: usize) -> usize {
+        byte_at_line(&self.root, line.min(self.line_count()), 0)
+    }
     fn sync(&mut self) {
         self.byte_len = self.root.bytes;
         self.newline_count = self.root.newlines;
@@ -569,6 +572,31 @@ fn locate(n: &Node, line: usize, mut pi: usize, mut start: usize) -> (usize, usi
                 pi += x.pieces;
             }
             (pi, start)
+        }
+    }
+}
+
+fn byte_at_line(node: &Node, mut line: usize, mut bytes: usize) -> usize {
+    match &node.kind {
+        NodeKind::Leaf(pieces) => {
+            for piece in pieces {
+                if line < piece.lines() {
+                    return bytes;
+                }
+                line -= piece.lines();
+                bytes += piece.bytes();
+            }
+            bytes
+        }
+        NodeKind::Branch(children) => {
+            for child in children {
+                if line < child.lines {
+                    return byte_at_line(child, line, bytes);
+                }
+                line -= child.lines;
+                bytes += child.bytes;
+            }
+            bytes
         }
     }
 }

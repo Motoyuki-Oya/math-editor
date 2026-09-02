@@ -315,7 +315,7 @@ mod tests {
         let (mut doc, path) = disk_doc("no-op", &["a", "b"]);
         doc.replace(1, 1, Vec::new(), 1, "before", "after").unwrap();
 
-        assert!(doc.log.undo[0].edits[0].removed.lines == 0);
+        assert!(doc.log.transactions[0].edits[0].removed.lines == 0);
         assert_eq!(all(&mut doc), vec!["a", "b"]);
         let undone = doc.undo().unwrap().unwrap();
         assert_eq!(undone.state, "before");
@@ -1143,14 +1143,14 @@ mod tests {
             "after",
         )
         .unwrap();
-        let undo_len = doc.log.undo.len();
+        let undo_len = doc.log.head;
 
         assert!(doc
             .replace(0, 5, Vec::new(), 2, "before delete", "after delete")
             .is_err());
         assert_eq!(doc.line_count(), 5);
         assert_eq!(doc.read(4, 1).unwrap().len(), 1);
-        assert_eq!(doc.log.undo.len(), undo_len);
+        assert_eq!(doc.log.head, undo_len);
     }
 
     /// 巨大な行を含むファイルで MAX_READ_BYTES ガードが正しく働き、

@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::edit_buffers::{EditBuffers, EditRange};
-use crate::operation_log::{Edit, OperationLog, Step, HISTORY_LIMIT};
+use crate::operation_log::{Edit, OperationLog};
 use crate::piece_tree::{Piece, PieceTree};
 use crate::source::{BackgroundScan, FileEncoding, LineEnding, ScanIndex, Source};
 
@@ -340,7 +340,7 @@ impl Document {
             .read_tail(count)
     }
 
-    /// `from..to` の行を `lines` に置き換え、逆操作を履歴に書く。
+    /// `from..to` の行を `lines` に置き換え、操作ログに追記する。
     /// 直前のステップと同じ `group` なら 1 ステップにつながる。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn replace(
@@ -355,40 +355,50 @@ impl Document {
         if from > to || to > self.count {
             return Err("置き換えの範囲が文書の外です".to_string());
         }
-        let clean_lines = lines
+        let clean_lines: Vec<String> = lines
             .into_iter()
             .map(|line| line.trim_end_matches(['\r', '\n']).to_string())
             .collect();
+        let base_rev = self.log.revision();
         let edit = self.splice(from, to, clean_lines)?;
-        self.log.redo.clear();
-        match self.log.undo.last_mut() {
-            Some(step) if step.group == group => {
-                step.edits.push(edit);
-                step.after = after.to_string();
-            }
-            _ => {
-                self.log.undo.push(Step {
-                    group,
-                    edits: vec![edit],
-                    before: before.to_string(),
-                    after: after.to_string(),
-                });
-                if self.log.undo.len() > HISTORY_LIMIT {
-                    self.log.undo.remove(0);
-                }
-            }
-        }
+        self.log
+            .append_or_merge_transaction(base_rev, group, edit, before, after);
         Ok(self.count)
     }
 
-    /// 置き換えの本体。履歴には触らず、逆操作を返す。取り除く行の中身は
-    /// ここでディスクから控える（元に戻すために要る）。
+    /// 置き換えの本体。行 `from..to` を `lines` に置き換え、
+    /// 取り除いた行を退避した `Edit` を返す。
     fn splice(&mut self, from: usize, to: usize, lines: Vec<String>) -> Result<Edit, String> {
         let removed_count = to - from;
-        let removed = self.read(from, removed_count)?;
-        if removed.len() != removed_count {
+        let removed_lines = self.read(from, removed_count)?;
+        if removed_lines.len() != removed_count {
             return Err("置き換える範囲が大きすぎます".to_string());
         }
+        let byte_from = self.pieces.byte_offset(from);
+        let byte_to = self.pieces.byte_offset(to);
+        let inserted_range = self.apply_raw_splice(from, to, &lines)?;
+        let removed_range =
+            self.log
+                .append_deleted(&removed_lines, self.encoding, self.line_ending);
+        Ok(Edit {
+            from: byte_from,
+            to: byte_to,
+            from_line: from,
+            removed: removed_range,
+            inserted: inserted_range,
+            removed_lines: removed_count,
+            inserted_lines: lines.len(),
+        })
+    }
+
+    /// ピースツリーの指定行範囲 `from..to` を `lines` で置き換える低水準操作。
+    fn apply_raw_splice(
+        &mut self,
+        from: usize,
+        to: usize,
+        lines: &[String],
+    ) -> Result<EditRange, String> {
+        let removed_count = to - from;
         let old_count = self.count;
         let pending_source_exists = self.pending_source_index().is_some();
         let a = self.split(from)?;
@@ -396,25 +406,39 @@ impl Document {
         let inserted = lines.len();
         let starts_newline = from == to && from == old_count && from > 0 && !pending_source_exists;
         let ends_newline = to < old_count || (to == old_count && pending_source_exists);
-        let fresh = (!lines.is_empty()).then(|| {
+        let (range, piece) = if !lines.is_empty() {
             let (range, newlines) = self.buffers.append_lines_with_boundaries(
-                &lines,
+                lines,
                 self.encoding,
                 self.line_ending,
                 starts_newline,
                 ends_newline,
             );
-            Piece::Edit {
-                from: range.from,
-                len: range.len,
-                newlines,
-                starts_newline,
-                ends_newline,
-                encoding: range.encoding,
-                line_ending: range.line_ending,
-            }
-        });
-        self.pieces.replace(a, b, fresh.into_iter().collect());
+            (
+                range,
+                Some(Piece::Edit {
+                    from: range.from,
+                    len: range.len,
+                    newlines,
+                    starts_newline,
+                    ends_newline,
+                    encoding: range.encoding,
+                    line_ending: range.line_ending,
+                }),
+            )
+        } else {
+            (
+                EditRange {
+                    from: 0,
+                    len: 0,
+                    lines: 0,
+                    encoding: self.encoding,
+                    line_ending: self.line_ending,
+                },
+                None,
+            )
+        };
+        self.pieces.replace(a, b, piece.into_iter().collect());
         if inserted == 0 && to == old_count && from > 0 && !pending_source_exists {
             let separator_len = self.source.as_ref().map_or_else(
                 || EditBuffers::line_separator_len(self.encoding, self.line_ending),
@@ -424,20 +448,19 @@ impl Document {
         }
         self.count = old_count - removed_count + inserted;
         if self.count == 0 {
-            // 文書は少なくとも 1 行。frontend のモデルも空文書を 1 行と数える。
-            let (range, _) =
+            let (empty_range, _) =
                 self.buffers
                     .append_lines(&[String::new()], self.encoding, self.line_ending);
             self.pieces.insert(
                 0,
                 Piece::Edit {
-                    from: range.from,
-                    len: range.len,
+                    from: empty_range.from,
+                    len: empty_range.len,
                     newlines: 0,
                     starts_newline: false,
                     ends_newline: false,
-                    encoding: range.encoding,
-                    line_ending: range.line_ending,
+                    encoding: empty_range.encoding,
+                    line_ending: empty_range.line_ending,
                 },
             );
             self.count = 1;
@@ -446,14 +469,7 @@ impl Document {
         if self.pending_source.is_none() {
             debug_assert_eq!(self.count.saturating_sub(1), self.pieces.newline_count);
         }
-        let removed = self
-            .log
-            .append_deleted(&removed, self.encoding, self.line_ending);
-        Ok(Edit {
-            from,
-            removed,
-            inserted,
-        })
+        Ok(range)
     }
 
     /// ピース列を行 `line` の前で切り、その位置のピース番号を返す。
@@ -514,60 +530,57 @@ impl Document {
     }
 
     pub(crate) fn undo(&mut self) -> Result<Option<Restored>, String> {
-        let Some(step) = self.log.undo.pop() else {
+        let Some(tx) = self.log.undo_pop() else {
             return Ok(None);
         };
-        let (reverted, touched_from) = self.revert(&step)?;
-        let state = step.before.clone();
-        self.log.redo.push(reverted);
+        let edits = tx.edits.clone();
+        let state = tx.before.clone();
+        let mut touched_from = usize::MAX;
+        for edit in edits.into_iter().rev() {
+            touched_from = touched_from.min(edit.from_line);
+            let restored_lines = self.log.read_deleted(edit.removed);
+            self.apply_raw_splice(
+                edit.from_line,
+                edit.from_line + edit.inserted_lines,
+                &restored_lines,
+            )?;
+        }
         Ok(Some(Restored {
             state,
-            touched_from,
+            touched_from: if touched_from == usize::MAX {
+                0
+            } else {
+                touched_from
+            },
             line_count: self.count,
         }))
     }
 
     pub(crate) fn redo(&mut self) -> Result<Option<Restored>, String> {
-        let Some(step) = self.log.redo.pop() else {
+        let Some(tx) = self.log.redo_pop() else {
             return Ok(None);
         };
-        let (reverted, touched_from) = self.revert(&step)?;
-        let state = step.after.clone();
-        self.log.undo.push(reverted);
+        let edits = tx.edits.clone();
+        let state = tx.after.clone();
+        let mut touched_from = usize::MAX;
+        for edit in edits.into_iter() {
+            touched_from = touched_from.min(edit.from_line);
+            let reapply_lines = self.buffers.read_lines(edit.inserted);
+            self.apply_raw_splice(
+                edit.from_line,
+                edit.from_line + edit.removed_lines,
+                &reapply_lines,
+            )?;
+        }
         Ok(Some(Restored {
             state,
-            touched_from,
-            line_count: self.count,
-        }))
-    }
-
-    /// ステップの置き換えを新しい順に巻き戻し、巻き戻し自体を巻き戻すステップを返す。
-    fn revert(&mut self, step: &Step) -> Result<(Step, usize), String> {
-        let mut inverse = Vec::with_capacity(step.edits.len());
-        let mut touched_from = usize::MAX;
-        for edit in step.edits.iter().rev() {
-            touched_from = touched_from.min(edit.from);
-            inverse.push(self.splice(
-                edit.from,
-                edit.from + edit.inserted,
-                self.log.read_deleted(edit.removed),
-            )?);
-        }
-        // 巻き戻しで生成された逆操作（inverse）は、次の再巻き戻し（Redo/Undo）時に
-        // .rev() で走査することで元の時系列順に正しく適用される。
-        Ok((
-            Step {
-                group: step.group,
-                edits: inverse,
-                before: step.before.clone(),
-                after: step.after.clone(),
-            },
-            if touched_from == usize::MAX {
+            touched_from: if touched_from == usize::MAX {
                 0
             } else {
                 touched_from
             },
-        ))
+            line_count: self.count,
+        }))
     }
 
     /// 選択された範囲をひとつなぎのテキストにする。`first` / `last` は端の行の
