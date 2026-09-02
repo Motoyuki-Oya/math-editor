@@ -274,4 +274,45 @@ impl OperationLog {
         }
         Ok((start, end))
     }
+
+    /// base_revision 上の行範囲 [from_line, to_line) を、現在の head の行範囲へ写像する。
+    /// 区間が編集・削除された行と重なっている場合はエラーを返す。
+    pub(crate) fn map_line_range(
+        &self,
+        base_revision: u64,
+        from_line: usize,
+        to_line: usize,
+    ) -> Result<(usize, usize), String> {
+        if from_line > to_line {
+            return Err("range is reversed".into());
+        }
+        self.validate_base(base_revision)?;
+        let mut cur_from = from_line;
+        let mut cur_to = to_line;
+        for tx in self.active_transactions_after(base_revision) {
+            for edit in &tx.edits {
+                let edit_start = edit.from_line;
+                let edit_end = edit.from_line + edit.removed_lines;
+                if cur_from < edit_end && edit_start < cur_to {
+                    return Err("line range overlaps an edit".into());
+                }
+                let delta = edit.inserted_lines as isize - edit.removed_lines as isize;
+                if edit_end <= cur_from {
+                    cur_from = if delta >= 0 {
+                        cur_from + delta as usize
+                    } else {
+                        cur_from.saturating_sub((-delta) as usize)
+                    };
+                }
+                if edit_end <= cur_to {
+                    cur_to = if delta >= 0 {
+                        cur_to + delta as usize
+                    } else {
+                        cur_to.saturating_sub((-delta) as usize)
+                    };
+                }
+            }
+        }
+        Ok((cur_from, cur_to))
+    }
 }

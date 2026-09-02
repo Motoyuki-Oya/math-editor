@@ -193,7 +193,7 @@ async fn read_lines(
     handle: u64,
     from: usize,
     count: usize,
-) -> Result<Vec<String>, String> {
+) -> Result<planetext_document::ReadLines, String> {
     application.read_lines(handle, from, count)
 }
 
@@ -203,12 +203,12 @@ async fn read_tail(
     application: State<'_, Application>,
     handle: u64,
     count: usize,
-) -> Result<Vec<String>, String> {
+) -> Result<planetext_document::ReadLines, String> {
     application.read_tail(handle, count)
 }
 
 /// 編集の到着: `from..to` の行を `lines` へ置き換えます。同じ `group` が続く間は
-/// 元に戻す履歴の 1 ステップにつながります。新しい行数を返します。
+/// 元に戻す履歴の 1 ステップにつながります。新しい行数とリビジョンを返します。
 #[tauri::command]
 // 引数は frontend との受け渡しの形そのものなので、まとめると IPC の名前が変わる。
 #[allow(clippy::too_many_arguments)]
@@ -221,7 +221,7 @@ async fn replace_lines(
     group: u64,
     before: String,
     after: String,
-) -> Result<usize, String> {
+) -> Result<planetext_document::EditApplied, String> {
     application.replace_lines(handle, from, to, lines, group, before, after)
 }
 

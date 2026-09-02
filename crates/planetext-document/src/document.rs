@@ -14,6 +14,7 @@ use std::sync::Arc;
 use crate::edit_buffers::{EditBuffers, EditRange};
 use crate::operation_log::{Edit, OperationLog};
 use crate::piece_tree::{Piece, PieceTree};
+use crate::search::ScanHit;
 use crate::source::{BackgroundScan, FileEncoding, LineEnding, ScanIndex, Source};
 
 #[derive(Clone, Copy)]
@@ -208,6 +209,10 @@ impl Document {
         self.source.as_ref().map(|source| source.index.clone())
     }
 
+    pub(crate) fn revision(&self) -> u64 {
+        self.log.revision()
+    }
+
     /// 検索スレッドへ渡す読み取り専用の姿。ファイルカーソルは独立し、編集の
     /// ピースは開始時点の内容を複製するので、文書ロックを持たずに走査できる。
     pub(crate) fn search_snapshot(&self) -> Result<Document, String> {
@@ -216,11 +221,113 @@ impl Document {
             pieces: PieceTree::new(self.pieces.pieces()),
             buffers: self.buffers.clone(),
             count: self.count,
-            log: OperationLog::default(),
+            log: self.log.clone(),
             encoding: self.encoding,
             line_ending: self.line_ending,
             pending_source: self.pending_source,
         })
+    }
+
+    pub(crate) fn line_column_to_bytes(&mut self, line: usize, col: usize) -> usize {
+        if let Ok(lines) = self.read(line, 1) {
+            if let Some(text) = lines.first() {
+                return text.chars().take(col).map(|c| c.len_utf8()).sum();
+            }
+        }
+        col
+    }
+
+    pub(crate) fn byte_offset_to_line_column(
+        &mut self,
+        target_byte: usize,
+    ) -> Option<(usize, usize)> {
+        if target_byte >= self.bytes() && self.count > 0 {
+            return Some((self.count.saturating_sub(1), 0));
+        }
+        let mut low = 0;
+        let mut high = self.count;
+        while low + 1 < high {
+            let mid = low + (high - low) / 2;
+            if self.pieces.byte_offset(mid) <= target_byte {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+        let line = low;
+        let line_start_byte = self.pieces.byte_offset(line);
+        let col_bytes = target_byte.saturating_sub(line_start_byte);
+        let col = if let Ok(lines) = self.read(line, 1) {
+            if let Some(text) = lines.first() {
+                let mut current_bytes = 0;
+                let mut chars = 0;
+                for c in text.chars() {
+                    if current_bytes >= col_bytes {
+                        break;
+                    }
+                    current_bytes += c.len_utf8();
+                    chars += 1;
+                }
+                chars
+            } else {
+                col_bytes
+            }
+        } else {
+            col_bytes
+        };
+        Some((line, col))
+    }
+
+    /// スナップショット時点で得られた検索結果を、現在のリビジョンにおける座標へ写像する。
+    /// 編集と重なったヒットは無効化（除外）する。
+    pub(crate) fn map_search_hits(
+        &mut self,
+        snapshot: &Document,
+        hits: Vec<ScanHit>,
+    ) -> Vec<ScanHit> {
+        let snapshot_rev = snapshot.revision();
+        if snapshot_rev == self.revision() {
+            return hits;
+        }
+        let mut mapped = Vec::with_capacity(hits.len());
+        for hit in hits {
+            let line_start_byte = snapshot.pieces.byte_offset(hit.line);
+            let mut snap_clone = snapshot.clone_for_query();
+            let start_col_bytes = snap_clone.line_column_to_bytes(hit.line, hit.start);
+            let end_col_bytes = snap_clone.line_column_to_bytes(hit.line, hit.end);
+            let start_byte = line_start_byte + start_col_bytes;
+            let end_byte = line_start_byte + end_col_bytes;
+            if let Ok((new_start, new_end)) = self.log.map_range(snapshot_rev, start_byte, end_byte)
+            {
+                if let (Some((line1, col1)), Some((line2, col2))) = (
+                    self.byte_offset_to_line_column(new_start),
+                    self.byte_offset_to_line_column(new_end),
+                ) {
+                    if line1 == line2 {
+                        mapped.push(ScanHit {
+                            line: line1,
+                            notation: hit.notation,
+                            start: col1,
+                            end: col2,
+                        });
+                    }
+                }
+            }
+        }
+        mapped
+    }
+
+    fn clone_for_query(&self) -> Document {
+        Document {
+            source: None,
+            pieces: PieceTree::new(self.pieces.pieces()),
+            buffers: self.buffers.clone(),
+            count: self.count,
+            log: self.log.clone(),
+            encoding: self.encoding,
+            line_ending: self.line_ending,
+            pending_source: self.pending_source,
+        }
     }
 
     /// 走査完了後に呼ぶ。未走査だった元ファイル範囲がまだ残る場合だけ集約値を確定する。
@@ -352,17 +459,40 @@ impl Document {
         before: &str,
         after: &str,
     ) -> Result<usize, String> {
-        if from > to || to > self.count {
+        let base_rev = self.log.revision();
+        self.replace_with_base(base_rev, from, to, lines, group, before, after)
+    }
+
+    /// 基準 revision を指定して置き換えを行う。
+    /// 基準 revision が古い場合、ログから現在座標へ写像して適用する。
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn replace_with_base(
+        &mut self,
+        base_revision: u64,
+        from: usize,
+        to: usize,
+        lines: Vec<String>,
+        group: u64,
+        before: &str,
+        after: &str,
+    ) -> Result<usize, String> {
+        self.log.validate_base(base_revision)?;
+        let (actual_from, actual_to) = if base_revision == self.log.revision() {
+            (from, to)
+        } else {
+            self.log.map_line_range(base_revision, from, to)?
+        };
+
+        if actual_from > actual_to || actual_to > self.count {
             return Err("置き換えの範囲が文書の外です".to_string());
         }
         let clean_lines: Vec<String> = lines
             .into_iter()
             .map(|line| line.trim_end_matches(['\r', '\n']).to_string())
             .collect();
-        let base_rev = self.log.revision();
-        let edit = self.splice(from, to, clean_lines)?;
+        let edit = self.splice(actual_from, actual_to, clean_lines)?;
         self.log
-            .append_or_merge_transaction(base_rev, group, edit, before, after);
+            .append_or_merge_transaction(base_revision, group, edit, before, after);
         Ok(self.count)
     }
 

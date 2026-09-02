@@ -35,30 +35,55 @@ struct ApplicationState {
     next_document: Mutex<u64>,
 }
 
-/// 開き方の答え: 文書の取っ手と、行数と大きさ、文字コード、改行コード。
-#[derive(serde::Serialize)]
+/// 開き方の答え: 文書の取っ手と、行数と大きさ、文字コード、改行コード、リビジョン。
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct OpenedDocument {
-    handle: u64,
-    line_count: usize,
-    bytes: usize,
-    encoding: String,
-    line_ending: String,
+    pub handle: u64,
+    pub line_count: usize,
+    pub bytes: usize,
+    pub encoding: String,
+    pub line_ending: String,
+    pub revision: u64,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct ReopenedDocument {
-    line_count: usize,
-    encoding: String,
-    line_ending: String,
+    pub line_count: usize,
+    pub encoding: String,
+    pub line_ending: String,
+    pub revision: u64,
 }
 
 /// 元に戻す・やり直すの結果。`state` は frontend が預けた控えそのもの。
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct RestoredLines {
-    state: String,
-    touched_from: usize,
-    line_count: usize,
-    clean: bool,
+    pub state: String,
+    pub touched_from: usize,
+    pub line_count: usize,
+    pub clean: bool,
+    pub revision: u64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ReadLines {
+    pub lines: Vec<String>,
+    pub from: usize,
+    pub revision: u64,
+}
+
+impl PartialEq<Vec<&str>> for ReadLines {
+    fn eq(&self, other: &Vec<&str>) -> bool {
+        self.lines
+            .iter()
+            .map(String::as_str)
+            .eq(other.iter().copied())
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct EditApplied {
+    pub line_count: usize,
+    pub revision: u64,
 }
 
 #[derive(serde::Serialize)]
@@ -100,6 +125,8 @@ impl FinishDocumentJob {
 }
 
 pub struct SearchJob {
+    application: Application,
+    handle: u64,
     snapshot: Document,
     pattern: regex::Regex,
     literal: Option<String>,
@@ -126,8 +153,15 @@ impl SearchJob {
             },
             &|| self.generation.load(Ordering::Relaxed) != self.ticket,
         )?;
+        let mapped_hits = self
+            .application
+            .with_doc(self.handle, |doc| {
+                Ok(doc.map_search_hits(&self.snapshot, found.hits))
+            })
+            .unwrap_or_default();
+
         Ok(SearchPage {
-            hits: found.hits,
+            hits: mapped_hits,
             scanned_to: found.scanned_to,
             cancelled: found.cancelled,
         })
@@ -215,6 +249,7 @@ impl Application {
     fn adopt(&self, doc: Document) -> OpenedDocument {
         let encoding = doc.encoding().label().to_string();
         let line_ending = doc.line_ending().label().to_string();
+        let revision = doc.revision();
         let opened = OpenedDocument {
             handle: {
                 let mut next = self.state.next_document.lock().unwrap();
@@ -225,6 +260,7 @@ impl Application {
             bytes: doc.bytes(),
             encoding,
             line_ending,
+            revision,
         };
         self.state.docs.lock().unwrap().insert(opened.handle, doc);
         self.state
@@ -253,15 +289,17 @@ impl Application {
     ) -> Result<ReopenedDocument, String> {
         let enc = FileEncoding::from_label(&encoding)
             .ok_or_else(|| format!("未知の文字コードです: {encoding}"))?;
-        let (line_count, enc_label, line_ending, scan) = self.with_doc(handle, |doc| {
-            let scan = doc.reopen_with_encoding(enc)?;
-            Ok((
-                doc.line_count(),
-                doc.encoding().label().to_string(),
-                doc.line_ending().label().to_string(),
-                scan,
-            ))
-        })?;
+        let (line_count, enc_label, line_ending, revision, scan) =
+            self.with_doc(handle, |doc| {
+                let scan = doc.reopen_with_encoding(enc)?;
+                Ok((
+                    doc.line_count(),
+                    doc.encoding().label().to_string(),
+                    doc.line_ending().label().to_string(),
+                    doc.revision(),
+                    scan,
+                ))
+            })?;
         if let Some(scan) = scan {
             std::thread::spawn(move || {
                 let _ = scan.run();
@@ -271,6 +309,7 @@ impl Application {
             line_count,
             encoding: enc_label,
             line_ending,
+            revision,
         })
     }
 
@@ -310,17 +349,27 @@ impl Application {
         Ok(self.adopt(doc))
     }
 
-    pub fn read_lines(
-        &self,
-        handle: u64,
-        from: usize,
-        count: usize,
-    ) -> Result<Vec<String>, String> {
-        self.with_doc(handle, |doc| doc.read(from, count))
+    pub fn read_lines(&self, handle: u64, from: usize, count: usize) -> Result<ReadLines, String> {
+        self.with_doc(handle, |doc| {
+            let lines = doc.read(from, count)?;
+            Ok(ReadLines {
+                lines,
+                from,
+                revision: doc.revision(),
+            })
+        })
     }
 
-    pub fn read_tail(&self, handle: u64, count: usize) -> Result<Vec<String>, String> {
-        self.with_doc(handle, |doc| doc.read_tail(count))
+    pub fn read_tail(&self, handle: u64, count: usize) -> Result<ReadLines, String> {
+        self.with_doc(handle, |doc| {
+            let lines = doc.read_tail(count)?;
+            let from = doc.line_count().saturating_sub(lines.len());
+            Ok(ReadLines {
+                lines,
+                from,
+                revision: doc.revision(),
+            })
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -333,9 +382,35 @@ impl Application {
         group: u64,
         before: String,
         after: String,
-    ) -> Result<usize, String> {
+    ) -> Result<EditApplied, String> {
         self.with_doc(handle, |doc| {
-            doc.replace(from, to, lines, group, &before, &after)
+            let line_count = doc.replace(from, to, lines, group, &before, &after)?;
+            Ok(EditApplied {
+                line_count,
+                revision: doc.revision(),
+            })
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn replace_lines_with_base(
+        &self,
+        handle: u64,
+        base_revision: u64,
+        from: usize,
+        to: usize,
+        lines: Vec<String>,
+        group: u64,
+        before: String,
+        after: String,
+    ) -> Result<EditApplied, String> {
+        self.with_doc(handle, |doc| {
+            let line_count =
+                doc.replace_with_base(base_revision, from, to, lines, group, &before, &after)?;
+            Ok(EditApplied {
+                line_count,
+                revision: doc.revision(),
+            })
         })
     }
 
@@ -351,6 +426,7 @@ impl Application {
                     touched_from: restored.touched_from,
                     line_count: restored.line_count,
                     clean: doc.is_clean(),
+                    revision: doc.revision(),
                 }),
             )
         })
@@ -400,6 +476,8 @@ impl Application {
             .map_err(|e| format!("正規表現を読めませんでした: {e}"))?;
         let literal = (!regex && (case_sensitive || query.is_ascii())).then_some(query);
         Ok(SearchJob {
+            application: self.clone(),
+            handle,
             snapshot,
             pattern,
             literal,

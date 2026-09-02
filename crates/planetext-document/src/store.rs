@@ -1437,4 +1437,81 @@ mod tests {
 
         std::fs::remove_file(path).ok();
     }
+
+    #[test]
+    fn search_snapshot_maps_hits_across_intervening_edits() {
+        let (mut doc, path) = disk_doc("search-map", &["apple", "banana", "cherry"]);
+        let snap = doc.search_snapshot().unwrap();
+        // 検索スナップショット取得後に先頭に 1 行挿入
+        doc.replace(0, 0, vec!["prefix".to_string()], 1, "", "")
+            .unwrap();
+        assert_eq!(doc.line_count(), 4);
+
+        // スナップショット時点では "cherry" は 2 行目
+        let hits = vec![crate::search::ScanHit {
+            line: 2,
+            notation: false,
+            start: 0,
+            end: 6,
+        }];
+        let mapped = doc.map_search_hits(&snap, hits);
+        assert_eq!(mapped.len(), 1);
+        // 現在の文書では 3 行目へ写像されていること
+        assert_eq!(mapped[0].line, 3);
+        assert_eq!(mapped[0].start, 0);
+        assert_eq!(mapped[0].end, 6);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn search_snapshot_invalidates_hits_overlapping_edits() {
+        let (mut doc, path) = disk_doc("search-invalid", &["apple", "banana", "cherry"]);
+        let snap = doc.search_snapshot().unwrap();
+        // 検索スナップショット取得後に "banana"（1行目）を削除
+        doc.replace(1, 2, Vec::new(), 1, "", "").unwrap();
+        assert_eq!(doc.line_count(), 2);
+
+        // スナップショット時点での "banana" ヒット
+        let hits = vec![crate::search::ScanHit {
+            line: 1,
+            notation: false,
+            start: 0,
+            end: 6,
+        }];
+        let mapped = doc.map_search_hits(&snap, hits);
+        // 削除範囲と重なっているため無効化されること
+        assert!(mapped.is_empty());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn replace_lines_with_base_revision_maps_old_coordinates() {
+        let (mut doc, path) = disk_doc("base-rev-map", &["line0", "line1", "line2", "line3"]);
+        let base_rev = doc.revision();
+
+        // 別の編集が先頭に入って revision が進む
+        doc.replace(0, 0, vec!["new0".to_string()], 1, "", "")
+            .unwrap();
+        assert_eq!(doc.line_count(), 5);
+
+        // 古い base_rev を基準にした「line2（旧2行目）の置換」を適用
+        doc.replace_with_base(
+            base_rev,
+            2,
+            3,
+            vec!["replaced_line2".to_string()],
+            2,
+            "",
+            "",
+        )
+        .unwrap();
+
+        // 現在座標（3行目）が置換されていること
+        let lines = doc.read(0, doc.line_count()).unwrap();
+        assert_eq!(
+            lines,
+            vec!["new0", "line0", "line1", "replaced_line2", "line3"]
+        );
+        std::fs::remove_file(path).ok();
+    }
 }

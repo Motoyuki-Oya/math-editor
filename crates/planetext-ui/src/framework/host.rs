@@ -130,7 +130,7 @@ impl GuiFramework for HostFramework {
 }
 
 /// 範囲読みで開いた文書。行は [`read_lines`] で取り寄せる。
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct OpenedDocument {
     pub handle: u64,
     pub line_count: usize,
@@ -139,6 +139,8 @@ pub struct OpenedDocument {
     pub encoding: String,
     #[serde(default = "default_line_ending")]
     pub line_ending: String,
+    #[serde(default)]
+    pub revision: u64,
 }
 
 fn default_encoding() -> String {
@@ -149,11 +151,41 @@ fn default_line_ending() -> String {
     "CRLF".to_string()
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct ReopenedDocument {
     pub line_count: usize,
     pub encoding: String,
     pub line_ending: String,
+    #[serde(default)]
+    pub revision: u64,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ReadLines {
+    pub lines: Vec<String>,
+    pub from: usize,
+    pub revision: u64,
+}
+
+impl std::ops::Deref for ReadLines {
+    type Target = [String];
+    fn deref(&self) -> &Self::Target {
+        &self.lines
+    }
+}
+
+impl IntoIterator for ReadLines {
+    type Item = String;
+    type IntoIter = std::vec::IntoIter<String>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.lines.into_iter()
+    }
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct EditApplied {
+    pub line_count: usize,
+    pub revision: u64,
 }
 
 /// 文書を全文の文字列で受け取らずに開きます。ネイティブ側が本体を保持します。
@@ -231,7 +263,7 @@ pub async fn create_document_from_draft(lines: &[String]) -> Result<OpenedDocume
     serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
 }
 
-pub async fn read_lines(handle: u64, from: usize, count: usize) -> Result<Vec<String>, String> {
+pub async fn read_lines(handle: u64, from: usize, count: usize) -> Result<ReadLines, String> {
     #[derive(Serialize)]
     struct Args {
         handle: u64,
@@ -250,7 +282,7 @@ pub async fn read_lines(handle: u64, from: usize, count: usize) -> Result<Vec<St
     serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
 }
 
-pub async fn read_tail(handle: u64, count: usize) -> Result<Vec<String>, String> {
+pub async fn read_tail(handle: u64, count: usize) -> Result<ReadLines, String> {
     #[derive(Serialize)]
     struct Args {
         handle: u64,
@@ -277,7 +309,7 @@ pub async fn replace_lines(
     group: u64,
     before: &str,
     after: &str,
-) -> Result<(), String> {
+) -> Result<EditApplied, String> {
     #[derive(Serialize)]
     struct Args<'a> {
         handle: u64,
@@ -288,7 +320,7 @@ pub async fn replace_lines(
         before: &'a str,
         after: &'a str,
     }
-    call(
+    let value = call(
         "replace_lines",
         Args {
             handle,
@@ -300,8 +332,8 @@ pub async fn replace_lines(
             after,
         },
     )
-    .await
-    .map(|_| ())
+    .await?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
 }
 
 /// 元に戻す・やり直すの結果。`state` は預けたキャレットの控えそのもの。
