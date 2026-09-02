@@ -174,9 +174,15 @@ impl Document {
             writeln!(out, "// PLANETEXT_DRAFT_REF_V2")
                 .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
             writeln!(out, "{p}").map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
-            writeln!(out, "{}", self.count)
-                .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
             let (diffs, head_offset) = self.collect_draft_diffs();
+            let active_count = head_offset.min(diffs.len());
+            let mut line_delta: isize = 0;
+            for diff in &diffs[..active_count] {
+                line_delta += diff.lines.len() as isize - diff.removed_lines as isize;
+            }
+            let base_count = (self.count as isize - line_delta).max(0) as usize;
+            writeln!(out, "{}", base_count)
+                .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
             if diffs.is_empty() {
                 writeln!(out, "CLEAN").map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
             } else {

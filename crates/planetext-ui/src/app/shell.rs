@@ -1439,30 +1439,71 @@ impl Shell {
             }
             tab.path.set(draft.path.clone());
             tab.dirty.set(!draft.clean);
-            editor::set_doc_path(draft.id, draft.path.clone());
-            let doc = editor::get_or_create_doc(draft.id);
-            doc.borrow_mut()
-                .load(crate::format::document::read(&draft.contents));
-            let count = doc.borrow().text().line_count();
-            doc.borrow_mut().set_modified_lines((0..count).collect());
-
-            let tab_copy = tab;
-            let draft_contents = draft.contents.clone();
-            let shell_copy = *self;
-            spawn_local(async move {
-                match create_document_from_draft(draft_contents).await {
-                    Ok(opened) => {
-                        if tab_copy.doc.get_untracked().is_some() {
-                            framework::close_document(opened.handle).await;
-                        } else {
-                            tab_copy.doc.set(Some(opened.handle));
-                            tab_copy.encoding.set(opened.encoding);
-                            tab_copy.line_ending.set(opened.line_ending);
+            if draft.path.is_some() {
+                let draft_id = draft.id.to_string();
+                let doc_id = draft.id;
+                let tab_copy = tab;
+                let shell_copy = *self;
+                let draft_contents = draft.contents.clone();
+                spawn_local(async move {
+                    match framework::open_draft(&draft_id).await {
+                        Ok(doc) => {
+                            if tab_copy.doc.get_untracked().is_some() {
+                                framework::close_document(doc.handle).await;
+                            } else {
+                                tab_copy.dirty.set(!doc.clean);
+                                shell_copy.sync_dirty();
+                                tab_copy.doc.set(Some(doc.handle));
+                                tab_copy.bytes.set(doc.bytes);
+                                tab_copy.encoding.set(doc.encoding);
+                                tab_copy.line_ending.set(doc.line_ending);
+                                editor::set_doc_file_size(doc_id, Some(doc.bytes));
+                                let doc_ref = editor::get_or_create_doc(doc_id);
+                                if !draft_contents.is_empty() && doc.bytes <= 10 * 1024 * 1024 {
+                                    doc_ref
+                                        .borrow_mut()
+                                        .load(crate::format::document::read(&draft_contents));
+                                } else {
+                                    editor::load_pending_doc(doc_id, doc.line_count);
+                                }
+                                editor::redraw_doc(doc_id, None);
+                                shell_copy.save_session();
+                                let handle = doc.handle;
+                                spawn_local(async move {
+                                    if let Ok(count) = framework::finish_document(handle).await {
+                                        shell_copy.document_scanned(handle, count);
+                                    }
+                                });
+                            }
                         }
+                        Err(error) => shell_copy.status.set(error),
                     }
-                    Err(error) => shell_copy.status.set(error),
-                }
-            });
+                });
+            } else {
+                let doc = editor::get_or_create_doc(draft.id);
+                doc.borrow_mut()
+                    .load(crate::format::document::read(&draft.contents));
+                let count = doc.borrow().text().line_count();
+                doc.borrow_mut().set_modified_lines((0..count).collect());
+
+                let tab_copy = tab;
+                let draft_contents = draft.contents.clone();
+                let shell_copy = *self;
+                spawn_local(async move {
+                    match create_document_from_draft(draft_contents).await {
+                        Ok(opened) => {
+                            if tab_copy.doc.get_untracked().is_some() {
+                                framework::close_document(opened.handle).await;
+                            } else {
+                                tab_copy.doc.set(Some(opened.handle));
+                                tab_copy.encoding.set(opened.encoding);
+                                tab_copy.line_ending.set(opened.line_ending);
+                            }
+                        }
+                        Err(error) => shell_copy.status.set(error),
+                    }
+                });
+            }
             tabs.push(tab);
         }
         if !tabs.is_empty() {

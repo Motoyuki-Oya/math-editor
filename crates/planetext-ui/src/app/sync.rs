@@ -117,14 +117,14 @@ async fn run_fetch(shell: Shell, tab: Tab) {
             break;
         };
         let count = range.len().min(CHUNK_LINES);
-        let Ok(lines) = framework::read_lines(handle, range.start, count).await else {
+        let Ok(read_res) = framework::read_lines(handle, range.start, count).await else {
             break;
         };
-        if !lines.is_empty() {
-            shell.feed(tab, range.start, &lines);
+        if !read_res.lines.is_empty() {
+            shell.feed(tab, read_res.from, &read_res.lines);
         }
-        let rest = range.start + lines.len()..range.end;
-        if !rest.is_empty() && !lines.is_empty() {
+        let rest = read_res.from + read_res.lines.len()..range.end;
+        if !rest.is_empty() && !read_res.lines.is_empty() {
             FETCH_RANGES.with(|ranges| {
                 let mut ranges = ranges.borrow_mut();
                 let current = ranges.entry(id).or_insert_with(|| rest.clone());
@@ -194,10 +194,8 @@ pub(super) fn find(
         return;
     };
     let id = tab.id.get_untracked();
-    let already_running = SEARCH_BUSY.with(|busy| busy.borrow().contains(&id));
-    if already_running {
-        // 前の検索が完了するまで次の検索はブロックする（負荷抑制）
-        return;
+    if SEARCH_BUSY.with(|busy| busy.borrow().contains(&id)) {
+        cancel_running_search(tab);
     }
     SEARCH_BUSY.with(|busy| busy.borrow_mut().push(id));
     shell.status.set("検索しています…".into());

@@ -102,20 +102,22 @@ impl Document {
         let enc = source.encoding;
         let line_ending = source.line_ending;
         let (pieces, pending_source) = Self::source_pieces(&source, count);
-        let (search_index, background_index) =
-            if source.bytes as usize >= crate::search_index::BIGRAM_INDEX_THRESHOLD {
-                let index = SearchIndex::new(source.bytes as usize, enc);
+        let (search_index, background_index) = {
+            let content_bytes = (source.bytes.saturating_sub(source.content_offset)) as usize;
+            if content_bytes >= crate::search_index::BIGRAM_INDEX_THRESHOLD {
+                let index = SearchIndex::new(content_bytes, enc);
                 let bg = BackgroundIndex {
                     path: Path::new(path).to_path_buf(),
                     content_offset: source.content_offset,
                     encoding: enc,
-                    total_bytes: source.bytes as usize,
+                    total_bytes: content_bytes,
                     state: index.state.clone(),
                 };
                 (Some(index), Some(bg))
             } else {
                 (None, None)
-            };
+            }
+        };
         Ok((
             Document {
                 pieces: PieceTree::new(pieces),
@@ -231,20 +233,23 @@ impl Document {
         self.pieces = PieceTree::new(pieces);
         self.buffers = EditBuffers::default();
         self.log.clear();
-        let (search_index, bg_index) =
-            if new_source.bytes as usize >= crate::search_index::BIGRAM_INDEX_THRESHOLD {
-                let index = SearchIndex::new(new_source.bytes as usize, encoding);
+        let (search_index, bg_index) = {
+            let content_bytes =
+                (new_source.bytes.saturating_sub(new_source.content_offset)) as usize;
+            if content_bytes >= crate::search_index::BIGRAM_INDEX_THRESHOLD {
+                let index = SearchIndex::new(content_bytes, encoding);
                 let bg = BackgroundIndex {
                     path: path.clone(),
                     content_offset: new_source.content_offset,
                     encoding,
-                    total_bytes: new_source.bytes as usize,
+                    total_bytes: content_bytes,
                     state: index.state.clone(),
                 };
                 (Some(index), Some(bg))
             } else {
                 (None, None)
-            };
+            }
+        };
         self.search_index = search_index;
         self.background_index = bg_index;
         self.source = Some(new_source);
@@ -332,21 +337,20 @@ impl Document {
         &mut self,
         target_byte: usize,
     ) -> Option<(usize, usize)> {
-        if target_byte >= self.bytes() && self.count > 0 {
-            return Some((self.count.saturating_sub(1), 0));
-        }
+        let target_byte = target_byte.min(self.bytes());
         let mut low = 0;
         let mut high = self.count;
         while low + 1 < high {
             let mid = low + (high - low) / 2;
-            if self.pieces.byte_offset(mid) <= target_byte {
+            let mid_byte = self.byte_offset_of_line(mid).unwrap_or(0);
+            if mid_byte <= target_byte {
                 low = mid;
             } else {
                 high = mid;
             }
         }
         let line = low;
-        let line_start_byte = self.pieces.byte_offset(line);
+        let line_start_byte = self.byte_offset_of_line(line).unwrap_or(0);
         let col_bytes = target_byte.saturating_sub(line_start_byte);
         let col = if let Ok(lines) = self.read(line, 1) {
             if let Some(text) = lines.first() {
@@ -382,8 +386,8 @@ impl Document {
         }
         let mut mapped = Vec::with_capacity(hits.len());
         for hit in hits {
-            let line_start_byte = snapshot.pieces.byte_offset(hit.line);
             let mut snap_clone = snapshot.clone_for_query();
+            let line_start_byte = snap_clone.byte_offset_of_line(hit.line).unwrap_or(0);
             let start_col_bytes = snap_clone.line_column_to_bytes(hit.line, hit.start);
             let end_col_bytes = snap_clone.line_column_to_bytes(hit.line, hit.end);
             let start_byte = line_start_byte + start_col_bytes;
@@ -410,7 +414,7 @@ impl Document {
 
     fn clone_for_query(&self) -> Document {
         Document {
-            source: None,
+            source: self.source.as_ref().and_then(|s| s.search_copy().ok()),
             pieces: PieceTree::new(self.pieces.pieces()),
             buffers: self.buffers.clone(),
             count: self.count,
@@ -716,8 +720,8 @@ impl Document {
         if removed_lines.len() != removed_count {
             return Err("置き換える範囲が大きすぎます".to_string());
         }
-        let byte_from = self.pieces.byte_offset(from);
-        let byte_to = self.pieces.byte_offset(to);
+        let byte_from = self.byte_offset_of_line(from)?;
+        let byte_to = self.byte_offset_of_line(to)?;
         let inserted_range = self.apply_raw_splice(from, to, &lines)?;
         let removed_range =
             self.log
@@ -774,8 +778,8 @@ impl Document {
         deleted_lines: Vec<String>,
     ) -> Result<Edit, String> {
         let removed_count = to - from;
-        let byte_from = self.pieces.byte_offset(from);
-        let byte_to = self.pieces.byte_offset(to);
+        let byte_from = self.byte_offset_of_line(from)?;
+        let byte_to = self.byte_offset_of_line(to)?;
         let inserted_range = self.apply_raw_splice(from, to, &lines)?;
         let removed_range =
             self.log
@@ -870,6 +874,52 @@ impl Document {
             debug_assert_eq!(self.count.saturating_sub(1), self.pieces.newline_count);
         }
         Ok(range)
+    }
+
+    pub(crate) fn byte_offset_of_line(&mut self, line: usize) -> Result<usize, String> {
+        let (index, start) = self.pieces.locate_line(line);
+        let piece_start_byte = self.pieces.byte_offset_of_piece(index);
+        let Some(piece) = self.pieces.piece(index).cloned() else {
+            return Ok(piece_start_byte);
+        };
+        if line == start {
+            return Ok(piece_start_byte);
+        }
+        let skip = line - start;
+        let leading = usize::from(piece.starts_newline());
+        let intra_byte = match &piece {
+            Piece::Edit {
+                from,
+                len,
+                newlines,
+                starts_newline,
+                ends_newline,
+                encoding,
+                line_ending,
+            } => {
+                let leading_bytes =
+                    leading * EditBuffers::line_separator_len(*encoding, *line_ending);
+                leading_bytes
+                    + self.buffers.byte_offset_after_lines(
+                        EditRange {
+                            from: *from + leading_bytes,
+                            len: *len - leading_bytes,
+                            lines: *newlines + usize::from(!*ends_newline)
+                                - usize::from(*starts_newline),
+                            encoding: *encoding,
+                            line_ending: *line_ending,
+                        },
+                        skip,
+                    )
+            }
+            Piece::Source { from, len, .. } => {
+                let source = self.source.as_mut().ok_or_else(|| {
+                    "文書ストアのディスク参照が失われました。開き直してください".to_string()
+                })?;
+                source.byte_offset_after_lines(*from, *len, skip)?
+            }
+        };
+        Ok(piece_start_byte + intra_byte)
     }
 
     /// ピース列を行 `line` の前で切り、その位置のピース番号を返す。

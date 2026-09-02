@@ -139,14 +139,25 @@ impl OperationLog {
     /// Undo された（Redo 可能な）トランザクションも含め、全未保存トランザクションと現在の head 相対位置を返す。
     pub(crate) fn all_unsaved_transactions(&self) -> (&[Transaction], usize) {
         let saved = self.saved_revision.unwrap_or(0);
-        let start = self
+        let saved_idx = self
             .transactions
             .iter()
-            .position(|tx| tx.revision > saved)
-            .unwrap_or(self.transactions.len());
-        let slice = &self.transactions[start..];
-        let current_head_offset = self.head.saturating_sub(start);
-        (slice, current_head_offset)
+            .position(|tx| tx.revision == saved)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        if self.head < saved_idx {
+            // 保存後 Undo された状態: 全トランザクションを対象にし、現在の head を offset にする
+            (&self.transactions[..], self.head)
+        } else {
+            let start = self
+                .transactions
+                .iter()
+                .position(|tx| tx.revision > saved)
+                .unwrap_or(self.transactions.len());
+            let slice = &self.transactions[start..];
+            let current_head_offset = self.head.saturating_sub(start);
+            (slice, current_head_offset)
+        }
     }
 
     pub(crate) fn append_transaction(
