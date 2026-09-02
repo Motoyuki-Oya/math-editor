@@ -316,6 +316,7 @@ pub async fn close_document(handle: u64) {
 }
 
 /// 編集の到着: 文書の本体の `from..to` の行を `lines` へ置き換えます。
+#[allow(clippy::too_many_arguments)]
 pub async fn replace_lines(
     handle: u64,
     from: usize,
@@ -324,6 +325,7 @@ pub async fn replace_lines(
     group: u64,
     before: &str,
     after: &str,
+    base_revision: Option<u64>,
 ) -> Result<EditApplied, String> {
     #[derive(Serialize)]
     struct Args<'a> {
@@ -334,6 +336,7 @@ pub async fn replace_lines(
         group: u64,
         before: &'a str,
         after: &'a str,
+        base_revision: Option<u64>,
     }
     let value = call(
         "replace_lines",
@@ -345,6 +348,7 @@ pub async fn replace_lines(
             group,
             before,
             after,
+            base_revision,
         },
     )
     .await?;

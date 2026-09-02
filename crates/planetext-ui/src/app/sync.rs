@@ -313,6 +313,7 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
                     batch.group,
                     &batch.before,
                     &batch.after,
+                    None,
                 )
                 .await
                 .is_err()

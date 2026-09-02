@@ -434,6 +434,28 @@ impl Document {
             }
 
             let page_end = (at + page_lines).min(end);
+            let skip_scan = if let (Some(index), Some(query)) = (self.search_index.clone(), literal)
+            {
+                if let (Ok(start_byte), Ok(end_byte)) = (
+                    self.byte_offset_of_line(at),
+                    self.byte_offset_of_line(page_end),
+                ) {
+                    let start_block = start_byte / crate::search_index::INDEX_BLOCK_BYTES;
+                    let end_block = end_byte / crate::search_index::INDEX_BLOCK_BYTES;
+                    (start_block..=end_block).all(|b| !index.may_contain_query(b, query))
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if skip_scan {
+                at = page_end;
+                page_lines = (page_lines * 4).min(MAX_PAGE_LINES);
+                continue;
+            }
+
             let (mut hits, _) = if let Some(query) = literal {
                 self.scan_literal(query, case_sensitive, marker, at, page_end - at, 64)?
             } else {

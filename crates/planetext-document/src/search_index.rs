@@ -239,6 +239,41 @@ impl SearchIndex {
         Ok(())
     }
 
+    /// 指定ブロックがクエリを含む可能性があるかを判定する（候補ブロックの絞り込み / Pruning）。
+    /// インデックスが完成しているブロックで、クエリのいずれかの bi-gram の頻度が 0 であれば false（スキップ可能）を返す。
+    pub(crate) fn may_contain_query(&self, block: BlockId, query: &str) -> bool {
+        let state = self.state.read().unwrap();
+        let bigrams = Bigram::from_query(query, state.encoding);
+        if bigrams.is_empty() {
+            return true;
+        }
+        let Some(block_index) = state.block_indices.get(&block) else {
+            // まだインデックス未完成のブロックは安全のためスキップしない
+            return true;
+        };
+        for bg in &bigrams {
+            let base_count = block_index.get(bg).copied().unwrap_or(0) as i64;
+            let delta = state.deltas.delta(bg, block);
+            let effective = base_count + delta;
+            if effective <= 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// インデックスおよび差分キャッシュが消費しているメモリ量（バイト概算）を返す。
+    #[allow(dead_code)]
+    pub(crate) fn memory_usage(&self) -> usize {
+        let state = self.state.read().unwrap();
+        let index_entries: usize = state.block_indices.values().map(|m| m.len()).sum();
+        let index_bytes =
+            index_entries * (std::mem::size_of::<Bigram>() + std::mem::size_of::<u32>() + 16);
+        let delta_bytes = state.deltas.counts.len()
+            * (std::mem::size_of::<(Bigram, BlockId)>() + std::mem::size_of::<i64>() + 16);
+        index_bytes + delta_bytes
+    }
+
     /// 構築済みブロックのみを使って推定件数を計算する。
     /// 未構築ブロックについては同期読み込みを行わず、現在のカバレッジから全体件数を按分推定する。
     /// 「出来たところから使ってほしい」の仕様を満たす。

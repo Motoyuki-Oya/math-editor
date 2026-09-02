@@ -1120,9 +1120,14 @@ impl Document {
         Ok(out)
     }
 
-    /// 文書が消費している編集実体・操作ログ・差分キャッシュのメモリ量（バイト）を返す。
+    /// 文書が消費している編集実体・操作ログ・差分キャッシュ・検索索引の総メモリ量（バイト）を返す。
     #[allow(dead_code)]
     pub(crate) fn memory_usage(&self) -> usize {
-        self.buffers.len() + self.log.memory_usage()
+        let index_mem = self
+            .search_index
+            .as_ref()
+            .map(|idx| idx.memory_usage())
+            .unwrap_or(0);
+        self.buffers.len() + self.log.memory_usage() + index_mem
     }
 }

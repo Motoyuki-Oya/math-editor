@@ -231,8 +231,13 @@ async fn replace_lines(
     group: u64,
     before: String,
     after: String,
+    base_revision: Option<u64>,
 ) -> Result<planetext_document::EditApplied, String> {
-    application.replace_lines(handle, from, to, lines, group, before, after)
+    if let Some(base_rev) = base_revision {
+        application.replace_lines_with_base(handle, base_rev, from, to, lines, group, before, after)
+    } else {
+        application.replace_lines(handle, from, to, lines, group, before, after)
+    }
 }
 
 #[tauri::command]
