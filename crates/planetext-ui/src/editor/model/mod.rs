@@ -109,7 +109,10 @@ impl Document {
     }
 
     pub fn load_pending(&mut self, line_count: usize) {
-        self.load(Text::pending(line_count));
+        // 走査中（line_count == 0）のときは、画面を満たす初期描画枠（100行）を確保し、
+        // 届いた行が破棄されずに画面いっぱいに表示されるようにする。
+        let initial = if line_count == 0 { 100 } else { line_count };
+        self.load(Text::pending(initial));
         self.counting = line_count == 0;
     }
 
@@ -131,6 +134,10 @@ impl Document {
     }
 
     pub fn feed(&mut self, from: usize, lines: Vec<crate::structure::text::SourceLine>) {
+        let end = from + lines.len();
+        if self.counting && end > self.text.line_count() {
+            self.text.resize_pending(end);
+        }
         for (offset, line) in lines.into_iter().enumerate() {
             self.text.fill_line(from + offset, line);
         }
@@ -329,6 +336,28 @@ pub(crate) mod tests {
 
         doc.resize_pending(16_000_000);
         assert!(!doc.is_counting(), "確定後は counting が false であること");
+    }
+
+    /// 【回帰防止テスト】
+    /// 走査中（load_pending(0)）の初期状態で複数行の feed が届いたとき、
+    /// 1行目だけでなく届いたすべての行が破棄されずに保持されることを保証する。
+    #[test]
+    fn pending_counting_document_feeds_and_retains_multiple_lines() {
+        use crate::structure::text::SourceLine;
+        let mut doc = Document::default();
+        doc.load_pending(0);
+        assert!(doc.is_counting());
+
+        let lines: Vec<SourceLine> = (0..50)
+            .map(|i| SourceLine::Plain(format!("Line {i}")))
+            .collect();
+        doc.feed(0, lines);
+
+        // 0行目だけでなく、50行目まで正しく取得できること
+        assert_eq!(doc.text().line_count(), 100);
+        assert_eq!(doc.text().first_absent(0), Some(50));
+        assert_eq!(crate::structure::plain::row(doc.text().line(0)), "Line 0");
+        assert_eq!(crate::structure::plain::row(doc.text().line(49)), "Line 49");
     }
 
     /// 履歴の 1 ステップは文書の本体が持つ。ここではグループ番号の付き方

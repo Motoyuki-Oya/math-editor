@@ -1381,8 +1381,7 @@ mod tests {
         let last = count.saturating_sub(1);
         editor.set_caret(Pos::new(last, 6));
 
-        assert_eq!(editor.text().line_count(), 2);
-        assert_eq!(editor.text().raw_line(1), Some("tail 1"));
+        assert_eq!(editor.text().raw_line(last), Some("tail 1"));
 
         // 3. バックグラウンド走査完了で 16,000,000 行へ付け替え
         let pending_tail = Some((from, tail_lines));

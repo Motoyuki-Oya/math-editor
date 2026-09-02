@@ -323,8 +323,6 @@ pub fn App() -> impl IntoView {
                             }
                         } else if let Some(chars) = stats.total_chars {
                             format!("全 {chars}文字")
-                        } else if stats.counting {
-                            "全 0文字".to_string()
                         } else {
                             format_file_size(bytes)
                         }
