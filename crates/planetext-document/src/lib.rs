@@ -267,11 +267,17 @@ impl Application {
     }
 
     pub fn open_document(&self, path: String) -> Result<OpenedDocument, String> {
-        let (doc, scan) = Document::open(&path)?;
+        let (mut doc, scan) = Document::open(&path)?;
+        let bg_index = doc.take_background_index();
         let opened = self.adopt(doc);
         if let Some(scan) = scan {
             std::thread::spawn(move || {
                 let _ = scan.run();
+            });
+        }
+        if let Some(bg_index) = bg_index {
+            std::thread::spawn(move || {
+                bg_index.run();
             });
         }
         Ok(opened)
@@ -284,20 +290,27 @@ impl Application {
     ) -> Result<ReopenedDocument, String> {
         let enc = FileEncoding::from_label(&encoding)
             .ok_or_else(|| format!("未知の文字コードです: {encoding}"))?;
-        let (line_count, enc_label, line_ending, revision, scan) =
+        let (line_count, enc_label, line_ending, revision, scan, bg_index) =
             self.with_doc(handle, |doc| {
                 let scan = doc.reopen_with_encoding(enc)?;
+                let bg_index = doc.take_background_index();
                 Ok((
                     doc.line_count(),
                     doc.encoding().label().to_string(),
                     doc.line_ending().label().to_string(),
                     doc.revision(),
                     scan,
+                    bg_index,
                 ))
             })?;
         if let Some(scan) = scan {
             std::thread::spawn(move || {
                 let _ = scan.run();
+            });
+        }
+        if let Some(bg_index) = bg_index {
+            std::thread::spawn(move || {
+                bg_index.run();
             });
         }
         Ok(ReopenedDocument {

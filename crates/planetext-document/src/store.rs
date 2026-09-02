@@ -1582,4 +1582,38 @@ mod tests {
 
         std::fs::remove_file(path).ok();
     }
+
+    #[test]
+    fn search_index_undo_redo_updates_deltas() {
+        let (mut doc, path) = disk_doc(
+            "index-undo-test",
+            &["apple banana", "orange apple", "grape apple"],
+        );
+        doc.enable_search_index();
+
+        let re = regex::Regex::new("apple").unwrap();
+        assert_eq!(doc.estimate_matches(&re).unwrap(), 3);
+
+        // 1行目を置換
+        doc.replace(
+            0,
+            1,
+            vec!["kiwi banana".to_string()],
+            1,
+            "apple banana",
+            "kiwi banana",
+        )
+        .unwrap();
+        assert_eq!(doc.estimate_matches(&re).unwrap(), 2);
+
+        // undo で差分キャッシュが元に戻り、3 件になること
+        doc.undo().unwrap();
+        assert_eq!(doc.estimate_matches(&re).unwrap(), 3);
+
+        // redo で再度 2 件になること
+        doc.redo().unwrap();
+        assert_eq!(doc.estimate_matches(&re).unwrap(), 2);
+
+        std::fs::remove_file(path).ok();
+    }
 }

@@ -15,7 +15,7 @@ use crate::edit_buffers::{EditBuffers, EditRange};
 use crate::operation_log::{BulkOperation, Edit, OperationLog};
 use crate::piece_tree::{Piece, PieceTree};
 use crate::search::ScanHit;
-use crate::search_index::SearchIndex;
+use crate::search_index::{BackgroundIndex, SearchIndex};
 use crate::source::{BackgroundScan, FileEncoding, LineEnding, ScanIndex, Source};
 
 #[derive(Clone, Copy)]
@@ -36,6 +36,7 @@ pub(crate) struct Document {
     pub(crate) line_ending: LineEnding,
     pending_source: Option<PendingSource>,
     pub(crate) search_index: Option<SearchIndex>,
+    background_index: Option<BackgroundIndex>,
 }
 
 /// 元に戻す・やり直すの結果: 復元すべき控えと、行が変わった範囲の始まり。
@@ -47,6 +48,10 @@ pub(crate) struct Restored {
 }
 
 impl Document {
+    pub(crate) fn take_background_index(&mut self) -> Option<BackgroundIndex> {
+        self.background_index.take()
+    }
+
     fn source_pieces(source: &Source, count: usize) -> (Vec<Piece>, Option<PendingSource>) {
         let content_offset = source.content_offset as usize;
         let pending = source.pending_from.map(|from| PendingSource {
@@ -95,11 +100,20 @@ impl Document {
         let enc = source.encoding;
         let line_ending = source.line_ending;
         let (pieces, pending_source) = Self::source_pieces(&source, count);
-        let search_index = if source.bytes as usize >= crate::search_index::BIGRAM_INDEX_THRESHOLD {
-            Some(SearchIndex::new(source.bytes as usize, enc))
-        } else {
-            None
-        };
+        let (search_index, background_index) =
+            if source.bytes as usize >= crate::search_index::BIGRAM_INDEX_THRESHOLD {
+                let index = SearchIndex::new(source.bytes as usize, enc);
+                let bg = BackgroundIndex {
+                    path: Path::new(path).to_path_buf(),
+                    content_offset: source.content_offset,
+                    encoding: enc,
+                    total_bytes: source.bytes as usize,
+                    state: index.state.clone(),
+                };
+                (Some(index), Some(bg))
+            } else {
+                (None, None)
+            };
         Ok((
             Document {
                 pieces: PieceTree::new(pieces),
@@ -111,6 +125,7 @@ impl Document {
                 log: OperationLog::default(),
                 pending_source,
                 search_index,
+                background_index,
             },
             scan,
         ))
@@ -119,7 +134,11 @@ impl Document {
     #[allow(dead_code)]
     pub(crate) fn enable_search_index(&mut self) {
         let total_bytes = self.source.as_ref().map_or(0, |s| s.bytes as usize);
-        self.search_index = Some(SearchIndex::new(total_bytes, self.encoding));
+        let index = SearchIndex::new(total_bytes, self.encoding);
+        if let Some(source) = self.source.as_mut() {
+            let _ = index.ensure_all_blocks(source);
+        }
+        self.search_index = Some(index);
     }
 
     pub(crate) fn empty() -> Document {
@@ -145,6 +164,7 @@ impl Document {
             line_ending,
             pending_source: None,
             search_index: None,
+            background_index: None,
         }
     }
 
@@ -207,6 +227,22 @@ impl Document {
         self.pieces = PieceTree::new(pieces);
         self.buffers = EditBuffers::default();
         self.log.clear();
+        let (search_index, bg_index) =
+            if new_source.bytes as usize >= crate::search_index::BIGRAM_INDEX_THRESHOLD {
+                let index = SearchIndex::new(new_source.bytes as usize, encoding);
+                let bg = BackgroundIndex {
+                    path: path.clone(),
+                    content_offset: new_source.content_offset,
+                    encoding,
+                    total_bytes: new_source.bytes as usize,
+                    state: index.state.clone(),
+                };
+                (Some(index), Some(bg))
+            } else {
+                (None, None)
+            };
+        self.search_index = search_index;
+        self.background_index = bg_index;
         self.source = Some(new_source);
         Ok(scan)
     }
@@ -241,6 +277,7 @@ impl Document {
             line_ending: self.line_ending,
             pending_source: self.pending_source,
             search_index: self.search_index.clone(),
+            background_index: None,
         })
     }
 
@@ -344,6 +381,7 @@ impl Document {
             line_ending: self.line_ending,
             pending_source: self.pending_source,
             search_index: None,
+            background_index: None,
         }
     }
 
@@ -592,10 +630,14 @@ impl Document {
             .into_iter()
             .map(|line| line.trim_end_matches(['\r', '\n']).to_string())
             .collect();
-        let edit = self.splice(actual_from, actual_to, clean_lines)?;
-        if let Some(index) = self.search_index.as_mut() {
+        let removed_count = actual_to - actual_from;
+        let removed_lines = self.read(actual_from, removed_count).unwrap_or_default();
+        let edit = self.splice(actual_from, actual_to, clean_lines.clone())?;
+        if let Some(index) = self.search_index.as_ref() {
             let byte_pos = self.pieces.byte_offset(actual_from);
-            index.splice_delta(before, after, byte_pos);
+            let removed_text = removed_lines.join("\n");
+            let inserted_text = clean_lines.join("\n");
+            index.splice_delta(&removed_text, &inserted_text, byte_pos);
         }
         self.log
             .append_or_merge_transaction(base_revision, group, edit, before, after);
@@ -775,11 +817,18 @@ impl Document {
         for edit in edits.into_iter().rev() {
             touched_from = touched_from.min(edit.from_line);
             let restored_lines = self.log.read_deleted(edit.removed);
+            let inserted_lines = self.buffers.read_lines(edit.inserted);
             self.apply_raw_splice(
                 edit.from_line,
                 edit.from_line + edit.inserted_lines,
                 &restored_lines,
             )?;
+            if let Some(index) = self.search_index.as_ref() {
+                let byte_pos = edit.from;
+                let restored_text = restored_lines.join("\n");
+                let inserted_text = inserted_lines.join("\n");
+                index.splice_delta(&inserted_text, &restored_text, byte_pos);
+            }
         }
         Ok(Some(Restored {
             state,
@@ -802,11 +851,18 @@ impl Document {
         for edit in edits.into_iter() {
             touched_from = touched_from.min(edit.from_line);
             let reapply_lines = self.buffers.read_lines(edit.inserted);
+            let removed_lines = self.log.read_deleted(edit.removed);
             self.apply_raw_splice(
                 edit.from_line,
                 edit.from_line + edit.removed_lines,
                 &reapply_lines,
             )?;
+            if let Some(index) = self.search_index.as_ref() {
+                let byte_pos = edit.from;
+                let removed_text = removed_lines.join("\n");
+                let reapplied_text = reapply_lines.join("\n");
+                index.splice_delta(&removed_text, &reapplied_text, byte_pos);
+            }
         }
         Ok(Some(Restored {
             state,

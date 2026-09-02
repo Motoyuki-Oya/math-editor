@@ -611,22 +611,15 @@ impl Document {
     }
 
     pub(crate) fn estimate_matches(&mut self, pattern: &regex::Regex) -> Result<usize, String> {
-        if self.search_index.is_some() && self.source.is_some() {
-            let mut index = self.search_index.take().unwrap();
-            let mut source = self.source.take().unwrap();
+        if let Some(index) = &self.search_index {
             let query = pattern.as_str();
             let is_literal = !query.contains([
                 '\\', '.', '+', '*', '?', '(', ')', '|', '[', ']', '{', '}', '^', '$',
             ]);
-            let res = if is_literal {
-                index.estimate_matches(query, &mut source)
-            } else {
-                Ok(None)
-            };
-            self.source = Some(source);
-            self.search_index = Some(index);
-            if let Ok(Some(estimated)) = res {
-                return Ok(estimated);
+            if is_literal {
+                if let Some(estimated) = index.estimate_matches(query) {
+                    return Ok(estimated);
+                }
             }
         }
 

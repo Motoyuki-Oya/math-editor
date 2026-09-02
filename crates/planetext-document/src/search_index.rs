@@ -1,4 +1,8 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 
 use crate::source::{FileEncoding, Source};
 
@@ -70,66 +74,120 @@ impl DeltaCache {
     }
 }
 
-/// オンデマンド bi-gram 検索索引。
-/// 巨大ファイルでも全文一括読み込みを行わず、512KB ブロック単位でオンデマンドに構築・管理する。
-#[derive(Clone, Debug)]
-pub(crate) struct SearchIndex {
-    block_indices: HashMap<BlockId, HashMap<Bigram, u32>>,
-    total_blocks: usize,
+#[derive(Debug)]
+pub(crate) struct SearchIndexState {
+    pub(crate) block_indices: HashMap<BlockId, HashMap<Bigram, u32>>,
+    pub(crate) total_blocks: usize,
     pub(crate) deltas: DeltaCache,
     pub(crate) encoding: FileEncoding,
     pub(crate) total_bytes: usize,
+}
+
+/// バックグラウンドで非同期にインデックスを構築するワーカー。
+/// UIスレッドやドキュメント操作を邪魔せず、「こっそり」ブロックごとに進める。
+pub(crate) struct BackgroundIndex {
+    pub(crate) path: PathBuf,
+    pub(crate) content_offset: u64,
+    pub(crate) encoding: FileEncoding,
+    pub(crate) total_bytes: usize,
+    pub(crate) state: Arc<RwLock<SearchIndexState>>,
+}
+
+impl BackgroundIndex {
+    pub(crate) fn run(self) {
+        let Ok(file) = File::open(&self.path) else {
+            return;
+        };
+        let mut reader = BufReader::new(file);
+        let total_blocks = self.total_bytes.div_ceil(INDEX_BLOCK_BYTES);
+        for block in 0..total_blocks {
+            // ドキュメントが閉じられたら速やかに終了
+            if Arc::strong_count(&self.state) == 1 {
+                return;
+            }
+            {
+                let state = self.state.read().unwrap();
+                if state.block_indices.contains_key(&block) {
+                    continue;
+                }
+            }
+            let start_byte = block * INDEX_BLOCK_BYTES;
+            let read_start = if block > 0 && start_byte >= 4 {
+                start_byte - 4
+            } else {
+                start_byte
+            };
+            let end_byte = ((block + 1) * INDEX_BLOCK_BYTES).min(self.total_bytes);
+            if read_start >= end_byte {
+                continue;
+            }
+            let len = end_byte - read_start;
+            if reader
+                .seek(SeekFrom::Start(self.content_offset + read_start as u64))
+                .is_err()
+            {
+                return;
+            }
+            let mut buf = vec![0u8; len];
+            if reader.read_exact(&mut buf).is_err() {
+                return;
+            }
+            let counts = SearchIndex::extract_block_bigrams(
+                &buf,
+                read_start,
+                start_byte,
+                end_byte,
+                self.encoding,
+            );
+            {
+                let mut state = self.state.write().unwrap();
+                state.block_indices.insert(block, counts);
+            }
+            // CPUやディスクI/Oを占有しないよう、ブロック間に休止を入れる
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+}
+
+/// オンデマンド bi-gram 検索索引。
+/// 巨大ファイルでも全文一括読み込みを行わず、512KB ブロック単位でオンデマンド・非同期に構築・管理する。
+#[derive(Clone, Debug)]
+pub(crate) struct SearchIndex {
+    pub(crate) state: Arc<RwLock<SearchIndexState>>,
 }
 
 impl SearchIndex {
     pub(crate) fn new(total_bytes: usize, encoding: FileEncoding) -> Self {
         let total_blocks = total_bytes.div_ceil(INDEX_BLOCK_BYTES);
         Self {
-            block_indices: HashMap::new(),
-            total_blocks,
-            deltas: DeltaCache::default(),
-            encoding,
-            total_bytes,
+            state: Arc::new(RwLock::new(SearchIndexState {
+                block_indices: HashMap::new(),
+                total_blocks,
+                deltas: DeltaCache::default(),
+                encoding,
+                total_bytes,
+            })),
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn total_blocks(&self) -> usize {
-        self.total_blocks
-    }
-
-    /// 指定ブロックのベース索引をオンデマンドで構築（全文一括読み込みは行わない）
-    pub(crate) fn ensure_block(
-        &mut self,
-        block: BlockId,
-        source: &mut Source,
-    ) -> Result<(), String> {
-        if self.block_indices.contains_key(&block) || block >= self.total_blocks {
-            return Ok(());
-        }
-        let start_byte = block * INDEX_BLOCK_BYTES;
-        let read_start = if block > 0 && start_byte >= 4 {
-            start_byte - 4
-        } else {
-            start_byte
-        };
-        let end_byte = ((block + 1) * INDEX_BLOCK_BYTES).min(self.total_bytes);
-        if read_start >= end_byte {
-            return Ok(());
-        }
-        let len = end_byte - read_start;
-        let bytes = source.read_byte_range(source.content_offset as usize + read_start, len)?;
-        let text = self.encoding.decode_line(&bytes);
+    pub(crate) fn extract_block_bigrams(
+        bytes: &[u8],
+        read_start: usize,
+        start_byte: usize,
+        end_byte: usize,
+        encoding: FileEncoding,
+    ) -> HashMap<Bigram, u32> {
+        let text = encoding.decode_line(bytes);
         let mut counts = HashMap::new();
         let mut previous: Option<char> = None;
         let mut current_offset = read_start;
 
         for ch in text.chars() {
-            let ch_len = self.encoding.encode_str(&ch.to_string()).len();
+            let ch_len = encoding.encode_str(&ch.to_string()).len();
             if let Some(prev) = previous {
                 // 境界またぎ bi-gram は終了側ブロックに所属
                 if current_offset >= start_byte && current_offset < end_byte {
-                    if let Some(bg) = Bigram::new(prev, ch, self.encoding) {
+                    if let Some(bg) = Bigram::new(prev, ch, encoding) {
                         *counts.entry(bg).or_insert(0) += 1;
                     }
                 }
@@ -137,67 +195,93 @@ impl SearchIndex {
             previous = Some(ch);
             current_offset += ch_len;
         }
+        counts
+    }
 
-        self.block_indices.insert(block, counts);
+    /// テストや即時構築用: 指定ブロックのベース索引を同期的に構築
+    pub(crate) fn ensure_block(&self, block: BlockId, source: &mut Source) -> Result<(), String> {
+        {
+            let state = self.state.read().unwrap();
+            if state.block_indices.contains_key(&block) || block >= state.total_blocks {
+                return Ok(());
+            }
+        }
+        let (total_bytes, encoding) = {
+            let state = self.state.read().unwrap();
+            (state.total_bytes, state.encoding)
+        };
+        let start_byte = block * INDEX_BLOCK_BYTES;
+        let read_start = if block > 0 && start_byte >= 4 {
+            start_byte - 4
+        } else {
+            start_byte
+        };
+        let end_byte = ((block + 1) * INDEX_BLOCK_BYTES).min(total_bytes);
+        if read_start >= end_byte {
+            return Ok(());
+        }
+        let len = end_byte - read_start;
+        let bytes = source.read_byte_range(source.content_offset as usize + read_start, len)?;
+        let counts =
+            Self::extract_block_bigrams(&bytes, read_start, start_byte, end_byte, encoding);
+        let mut state = self.state.write().unwrap();
+        state.block_indices.insert(block, counts);
         Ok(())
     }
 
-    /// クエリに含まれる bi-gram から、特定ブロックでの推定件数を計算
-    pub(crate) fn estimate_block_matches(
-        &mut self,
-        block: BlockId,
-        query: &str,
-        source: &mut Source,
-    ) -> Result<Option<usize>, String> {
-        let bigrams = Bigram::from_query(query, self.encoding);
-        if bigrams.is_empty() {
-            return Ok(None);
+    /// 全ブロックを同期構築する（主に単体テスト用）
+    #[allow(dead_code)]
+    pub(crate) fn ensure_all_blocks(&self, source: &mut Source) -> Result<(), String> {
+        let total_blocks = self.state.read().unwrap().total_blocks;
+        for b in 0..total_blocks {
+            self.ensure_block(b, source)?;
         }
-        self.ensure_block(block, source)?;
-        let Some(counts) = self.block_indices.get(&block) else {
-            return Ok(None);
-        };
-
-        let mut min_count = i64::MAX;
-        for bg in &bigrams {
-            let base = counts.get(bg).copied().unwrap_or(0) as i64;
-            let delta = self.deltas.delta(bg, block);
-            let net = (base + delta).max(0);
-            min_count = min_count.min(net);
-        }
-        Ok(Some(if min_count == i64::MAX {
-            0
-        } else {
-            min_count as usize
-        }))
+        Ok(())
     }
 
-    /// 全ブロックにわたる推定件数を計算
-    pub(crate) fn estimate_matches(
-        &mut self,
-        query: &str,
-        source: &mut Source,
-    ) -> Result<Option<usize>, String> {
-        if self.total_blocks == 0 {
-            return Ok(Some(0));
+    /// 構築済みブロックのみを使って推定件数を計算する。
+    /// 未構築ブロックについては同期読み込みを行わず、現在のカバレッジから全体件数を按分推定する。
+    /// 「出来たところから使ってほしい」の仕様を満たす。
+    pub(crate) fn estimate_matches(&self, query: &str) -> Option<usize> {
+        let state = self.state.read().unwrap();
+        if state.total_blocks == 0 {
+            return Some(0);
         }
-        let bigrams = Bigram::from_query(query, self.encoding);
+        let bigrams = Bigram::from_query(query, state.encoding);
         if bigrams.is_empty() {
-            return Ok(None);
+            return None;
         }
-        let mut total = 0;
-        for block in 0..self.total_blocks {
-            if let Some(count) = self.estimate_block_matches(block, query, source)? {
-                total += count;
+        let indexed_blocks = state.block_indices.len();
+        if indexed_blocks == 0 {
+            return None; // まだ1ブロックも出来ていないのでサンプリング推定へフォールバック
+        }
+
+        let mut indexed_total: usize = 0;
+        for (&block, counts) in &state.block_indices {
+            let mut min_count = i64::MAX;
+            for bg in &bigrams {
+                let base = counts.get(bg).copied().unwrap_or(0) as i64;
+                let delta = state.deltas.delta(bg, block);
+                let net = (base + delta).max(0);
+                min_count = min_count.min(net);
+            }
+            if min_count != i64::MAX {
+                indexed_total += min_count as usize;
             }
         }
-        Ok(Some(total))
+
+        // 出来たブロックの比率で全体へ按分推定
+        let estimated =
+            (indexed_total as u128 * state.total_blocks as u128 / indexed_blocks as u128) as usize;
+        Some(estimated)
     }
 
     /// 編集発生時に差分キャッシュを更新
-    pub(crate) fn splice_delta(&mut self, before: &str, after: &str, byte_pos: usize) {
+    pub(crate) fn splice_delta(&self, before: &str, after: &str, byte_pos: usize) {
+        let mut state = self.state.write().unwrap();
+        let encoding = state.encoding;
         let block = byte_pos / INDEX_BLOCK_BYTES;
-        self.deltas.splice(before, after, self.encoding, block);
+        state.deltas.splice(before, after, encoding, block);
     }
 }
 
