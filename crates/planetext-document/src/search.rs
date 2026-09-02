@@ -235,6 +235,41 @@ fn scan_encoded_range(
             carry.len().saturating_sub(overlap) / unit * unit
         };
         let safe_end = data_start + safe_len;
+        let query_positions = if !query_has_delimiter {
+            aligned_positions(&carry, query, case_sensitive, unit)
+        } else {
+            Vec::new()
+        };
+        let marker_positions = aligned_positions(&carry, marker, true, unit);
+
+        let has_query = query_positions.iter().any(|&at| {
+            let absolute = data_start + at;
+            absolute >= processed && absolute < safe_end && absolute >= next_literal_end
+        });
+        let has_marker = marker_positions.iter().any(|&at| {
+            let absolute = data_start + at;
+            absolute >= processed && absolute < safe_end
+        });
+
+        if !has_query && !has_marker {
+            for at in aligned_positions(&carry, delimiter, true, unit) {
+                let absolute = data_start + at;
+                if absolute >= processed && absolute < safe_end {
+                    line += 1;
+                    line_start = absolute + delimiter.len();
+                    if line >= lines {
+                        return Ok((hits, line));
+                    }
+                }
+            }
+            processed = safe_end;
+            if eof {
+                break;
+            }
+            carry.drain(..safe_len);
+            continue;
+        }
+
         let mut events = Vec::new();
         for at in aligned_positions(&carry, delimiter, true, unit) {
             let absolute = data_start + at;
@@ -242,18 +277,16 @@ fn scan_encoded_range(
                 events.push((absolute, 2_u8));
             }
         }
-        for at in aligned_positions(&carry, marker, true, unit) {
+        for at in marker_positions {
             let absolute = data_start + at;
             if absolute >= processed && absolute < safe_end {
                 events.push((absolute, 1_u8));
             }
         }
-        if !query_has_delimiter {
-            for at in aligned_positions(&carry, query, case_sensitive, unit) {
-                let absolute = data_start + at;
-                if absolute >= processed && absolute < safe_end && absolute >= next_literal_end {
-                    events.push((absolute, 0_u8));
-                }
+        for at in query_positions {
+            let absolute = data_start + at;
+            if absolute >= processed && absolute < safe_end && absolute >= next_literal_end {
+                events.push((absolute, 0_u8));
             }
         }
         events.sort_unstable();
@@ -425,9 +458,9 @@ impl Document {
 
             let page_end = (at + page_lines).min(end);
             let (mut hits, _) = if let Some(query) = literal {
-                self.scan_literal(query, case_sensitive, marker, at, page_end - at, usize::MAX)?
+                self.scan_literal(query, case_sensitive, marker, at, page_end - at, 64)?
             } else {
-                self.scan(pattern, marker, at, page_end - at, usize::MAX)?
+                self.scan(pattern, marker, at, page_end - at, 64)?
             };
             if at == from {
                 if let Some(col) = after_col {
