@@ -241,6 +241,9 @@ impl OperationLog {
                 if let OperationKind::Splice(edits) = &mut last.kind {
                     edits.push(edit);
                     last.after = after.to_string();
+                    let new_rev = self.next_revision;
+                    self.next_revision = self.next_revision.saturating_add(1);
+                    last.revision = new_rev;
                     return;
                 }
             }

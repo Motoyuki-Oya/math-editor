@@ -325,9 +325,10 @@ impl Document {
     }
 
     pub(crate) fn line_column_to_bytes(&mut self, line: usize, col: usize) -> usize {
+        let enc = self.encoding;
         if let Ok(lines) = self.read(line, 1) {
             if let Some(text) = lines.first() {
-                return text.chars().take(col).map(|c| c.len_utf8()).sum();
+                return text.chars().take(col).map(|c| char_byte_len(c, enc)).sum();
             }
         }
         col
@@ -352,6 +353,7 @@ impl Document {
         let line = low;
         let line_start_byte = self.byte_offset_of_line(line).unwrap_or(0);
         let col_bytes = target_byte.saturating_sub(line_start_byte);
+        let enc = self.encoding;
         let col = if let Ok(lines) = self.read(line, 1) {
             if let Some(text) = lines.first() {
                 let mut current_bytes = 0;
@@ -360,7 +362,7 @@ impl Document {
                     if current_bytes >= col_bytes {
                         break;
                     }
-                    current_bytes += c.len_utf8();
+                    current_bytes += char_byte_len(c, enc);
                     chars += 1;
                 }
                 chars
@@ -539,6 +541,7 @@ impl Document {
         before: &str,
         after: &str,
     ) -> Result<usize, String> {
+        self.pending_redo_diffs.clear();
         self.log.validate_base(base_revision)?;
         self.log
             .append_bulk_transaction(base_revision, group, bulk, before, after);
@@ -684,6 +687,7 @@ impl Document {
         before: &str,
         after: &str,
     ) -> Result<usize, String> {
+        self.pending_redo_diffs.clear();
         self.log.validate_base(base_revision)?;
         let (actual_from, actual_to) = if base_revision == self.log.revision() {
             (from, to)
@@ -1129,5 +1133,19 @@ impl Document {
             .map(|idx| idx.memory_usage())
             .unwrap_or(0);
         self.buffers.len() + self.log.memory_usage() + index_mem
+    }
+}
+
+fn char_byte_len(c: char, encoding: FileEncoding) -> usize {
+    match encoding {
+        FileEncoding::Utf8 | FileEncoding::Utf8Bom => c.len_utf8(),
+        FileEncoding::Utf16Le | FileEncoding::Utf16Be => {
+            if c.len_utf16() == 1 {
+                2
+            } else {
+                4
+            }
+        }
+        _ => encoding.encode_str(&c.to_string()).len(),
     }
 }

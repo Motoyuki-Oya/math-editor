@@ -1439,6 +1439,7 @@ impl Shell {
             }
             tab.path.set(draft.path.clone());
             tab.dirty.set(!draft.clean);
+            editor::set_doc_path(draft.id, draft.path.clone());
             if draft.path.is_some() {
                 let draft_id = draft.id.to_string();
                 let doc_id = draft.id;
