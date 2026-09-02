@@ -242,6 +242,7 @@ impl View {
                 .or_else(|| state.language.cloned());
             let renderer = Renderer::new(doc)
                 .with_preedit(here.as_ref())
+                .with_overwrite(state.overwrite)
                 .with_active_path(active)
                 .with_language(line_lang.as_ref())
                 .with_ghost_text(ghost_on_line);
