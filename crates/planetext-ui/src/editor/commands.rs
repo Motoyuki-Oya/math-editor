@@ -79,11 +79,12 @@ fn insert_text_one(session: &Rc<RefCell<Session>>, text: &str) {
         }
     }
     // ドキュメントからコピーされた部分は、元の形状で戻ります。それ以外のテキストは、そのままの文字です。
+    let overwrite = session.borrow().overwrite_mode;
     session
         .borrow_mut()
         .edit(|editor| match clipboard::pasted(&text) {
             Some(clip) => editor.insert_clip(&clip),
-            None => editor.insert_text(&text),
+            None => editor.insert_text_with_mode(&text, overwrite),
         });
     changed(session);
 }

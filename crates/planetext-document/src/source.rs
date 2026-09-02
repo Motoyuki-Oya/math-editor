@@ -472,8 +472,8 @@ impl Source {
             let chunk_buf = reader
                 .fill_buf()
                 .map_err(|e| format!("{} を読めませんでした: {e}", path.display()))?;
-            let chunk = if initial_offset > 0 && chunk_buf.len() >= initial_offset as usize {
-                &chunk_buf[initial_offset as usize..]
+            let chunk = if initial_offset > 0 && chunk_buf.len() >= initial_offset {
+                &chunk_buf[initial_offset..]
             } else {
                 chunk_buf
             };
@@ -581,7 +581,7 @@ impl Source {
         let mut read_bytes = 0;
         while at > self.content_offset && newlines < count && read_bytes < MAX_TAIL_BYTES {
             let mut from = at.saturating_sub(TAIL_CHUNK).max(self.content_offset);
-            if self.encoding.unit_bytes() == 2 && (from - self.content_offset) % 2 != 0 {
+            if self.encoding.unit_bytes() == 2 && !(from - self.content_offset).is_multiple_of(2) {
                 from += 1;
             }
             let mut chunk = vec![0; (at - from) as usize];
@@ -595,7 +595,9 @@ impl Source {
                 memchr::memchr_iter(delimiter[0], &chunk).count()
             } else {
                 chunk
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .filter(|unit| *unit == delimiter.as_slice())
                     .count()
             };
@@ -656,7 +658,9 @@ impl Source {
                     memchr::memchr_iter(delimiter[0], &buffer[..take]).count()
                 } else {
                     buffer[..take]
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .filter(|unit| *unit == delimiter.as_slice())
                         .count()
                 };
@@ -707,10 +711,9 @@ impl Source {
                 let indexed_empty_tail = start == from.saturating_add(len) && remaining_skip == 0;
                 if (len == 0 || ended_after_delimiter || indexed_empty_tail)
                     && line >= remaining_skip
+                    && !f(line - remaining_skip, "")
                 {
-                    if !f(line - remaining_skip, "") {
-                        return Ok(false);
-                    }
+                    return Ok(false);
                 }
                 break;
             }
@@ -771,15 +774,15 @@ impl Source {
             };
             for at in delimiters {
                 let after = cursor + at + unit;
-                if selected_start.is_none() {
+                if let Some(start_pos) = selected_start {
+                    selected_lines += 1;
+                    if selected_lines == take {
+                        return Ok((start_pos, after));
+                    }
+                } else {
                     skipped += 1;
                     if skipped == remaining_skip {
                         selected_start = Some(after);
-                    }
-                } else {
-                    selected_lines += 1;
-                    if selected_lines == take {
-                        return Ok((selected_start.unwrap(), after));
                     }
                 }
             }

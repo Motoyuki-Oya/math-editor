@@ -29,6 +29,8 @@ pub struct Settings {
     pub show_whitespace: bool,
     /// フォントの合字（リガチャー: -> や != 等）を有効にするかどうか。
     pub font_ligatures: bool,
+    /// Insertキーによる挿入／上書き入力モード切り替えを有効にするかどうか。
+    pub enable_overwrite_mode: bool,
 }
 
 impl Default for Settings {
@@ -44,6 +46,7 @@ impl Default for Settings {
             global_shortcut: true,
             show_whitespace: false,
             font_ligatures: true,
+            enable_overwrite_mode: true,
         }
     }
 }
@@ -190,7 +193,7 @@ fn show(settings: &Settings) {
 /// ファイルに保存されている設定を書き込みます。1 行に 1 つの `name = value` で、これは TOML の小さなコーナーです。
 pub fn write(settings: &Settings) -> String {
     format!(
-        "font_size = {}\nfont_family = \"{}\"\ncaret_blink = {}\nwrap = {}\nline_numbers = {}\ncolumn_gap = {}\nhistory_limit = {}\nglobal_shortcut = {}\nshow_whitespace = {}\nfont_ligatures = {}\n",
+        "font_size = {}\nfont_family = \"{}\"\ncaret_blink = {}\nwrap = {}\nline_numbers = {}\ncolumn_gap = {}\nhistory_limit = {}\nglobal_shortcut = {}\nshow_whitespace = {}\nfont_ligatures = {}\nenable_overwrite_mode = {}\n",
         settings.font_size,
         settings.font_family.replace('"', ""),
         settings.caret_blink,
@@ -201,6 +204,7 @@ pub fn write(settings: &Settings) -> String {
         settings.global_shortcut,
         settings.show_whitespace,
         settings.font_ligatures,
+        settings.enable_overwrite_mode,
     )
 }
 
@@ -262,6 +266,11 @@ pub fn read(text: &str) -> Settings {
             "font_ligatures" => {
                 if let Ok(enabled) = value.parse() {
                     settings.font_ligatures = enabled;
+                }
+            }
+            "enable_overwrite_mode" => {
+                if let Ok(enabled) = value.parse() {
+                    settings.enable_overwrite_mode = enabled;
                 }
             }
             _ => {}

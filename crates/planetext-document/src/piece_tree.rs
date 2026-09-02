@@ -493,7 +493,7 @@ fn collapse(n: &mut Node) {
     }
     n.update();
 }
-fn get_piece<'a>(n: &'a Node, mut i: usize) -> Option<&'a Piece> {
+fn get_piece(n: &Node, mut i: usize) -> Option<&Piece> {
     match &n.kind {
         NodeKind::Leaf(p) => p.get(i),
         NodeKind::Branch(c) => {
