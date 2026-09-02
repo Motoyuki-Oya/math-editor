@@ -22,7 +22,6 @@ const CHUNK_LINES: usize = 20_000;
 const TAIL_LINES: usize = 200;
 
 enum Task {
-    Fetch(Range<usize>),
     FetchTail {
         pane: usize,
     },
@@ -49,6 +48,12 @@ thread_local! {
     static QUEUES: RefCell<HashMap<usize, VecDeque<(Tab, Task)>>> = RefCell::new(HashMap::new());
     /// 列が走っているタブ。二重に走らせない。
     static BUSY: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    /// 取り寄せ中（行描画）の範囲。重い検索タスクに巻き込まれず最優先で描画する。
+    static FETCH_RANGES: RefCell<HashMap<usize, Range<usize>>> = RefCell::new(HashMap::new());
+    /// 取り寄せが走っているタブ。
+    static FETCH_BUSY: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    /// 検索が走っているタブ。完了するまで次の検索をブロックして負荷を抑制する。
+    static SEARCH_BUSY: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
 pub(super) fn install(shell: Shell) {
@@ -69,32 +74,67 @@ pub(super) fn install(shell: Shell) {
     }));
 }
 
-/// 画面に入ったのにまだ無い行を取り寄せる。並んでいる取り寄せがあれば合流する。
+/// 画面に入ったのにまだ無い行を取り寄せる。重い検索タスクとは独立して最優先で取得し、白飛びを防ぐ。
 fn fetch(shell: Shell, editor_pane: usize, range: Range<usize>) {
+    if range.is_empty() {
+        return;
+    }
     let Some(tab) = shell.tab_of(editor_pane) else {
         return;
     };
     let id = tab.id.get_untracked();
-    let merged = QUEUES.with(|queues| {
-        let mut queues = queues.borrow_mut();
-        let queue = queues.entry(id).or_default();
-        for (_, task) in queue.iter_mut() {
-            if let Task::Fetch(current) = task {
-                // 重なるか隣り合う要求だけ 1 つにまとめる。離れた要求まで
-                // つなぐと間の何百万行も取り寄せてしまうので、古い方は
-                // 捨てて新しい窓を優先する。まだ要るなら描き直しが再要求する。
-                if range.start <= current.end && current.start <= range.end {
-                    *current = current.start.min(range.start)..current.end.max(range.end);
-                } else {
-                    *current = range.clone();
-                }
-                return true;
-            }
+    FETCH_RANGES.with(|ranges| {
+        let mut ranges = ranges.borrow_mut();
+        let current = ranges.entry(id).or_insert_with(|| range.clone());
+        if range.start <= current.end && current.start <= range.end {
+            *current = current.start.min(range.start)..current.end.max(range.end);
+        } else {
+            *current = range;
         }
-        false
     });
-    if !merged {
-        enqueue(tab, Task::Fetch(range));
+    let busy = FETCH_BUSY.with(|busy| busy.borrow().contains(&id));
+    if busy {
+        return;
+    }
+    FETCH_BUSY.with(|busy| busy.borrow_mut().push(id));
+    spawn_local(async move {
+        run_fetch(shell, tab).await;
+        FETCH_BUSY.with(|busy| busy.borrow_mut().retain(|other| *other != id));
+    });
+}
+
+async fn run_fetch(shell: Shell, tab: Tab) {
+    let id = tab.id.get_untracked();
+    loop {
+        let range = FETCH_RANGES.with(|ranges| ranges.borrow_mut().remove(&id));
+        let Some(range) = range else {
+            break;
+        };
+        if range.is_empty() {
+            continue;
+        }
+        let Some(handle) = handle_of(tab).await else {
+            break;
+        };
+        let count = range.len().min(CHUNK_LINES);
+        let Ok(lines) = framework::read_lines(handle, range.start, count).await else {
+            break;
+        };
+        if !lines.is_empty() {
+            shell.feed(tab, range.start, &lines);
+        }
+        let rest = range.start + lines.len()..range.end;
+        if !rest.is_empty() && !lines.is_empty() {
+            FETCH_RANGES.with(|ranges| {
+                let mut ranges = ranges.borrow_mut();
+                let current = ranges.entry(id).or_insert_with(|| rest.clone());
+                if rest.start <= current.end && current.start <= rest.end {
+                    *current = current.start.min(rest.start)..current.end.max(rest.end);
+                } else {
+                    *current = rest;
+                }
+            });
+        }
     }
 }
 
@@ -126,6 +166,7 @@ pub(super) fn draft(tab: Tab) {
 }
 
 /// 次を検索。手元に届いている行にあればその場で即座にジャンプ、そうでなければ本体の走査で。
+/// すでに検索が走っている間は重複実行をブロックし、負荷を抑制する。
 pub(super) fn find(
     shell: Shell,
     pane: usize,
@@ -143,7 +184,13 @@ pub(super) fn find(
     let Some(tab) = shell.tab_of(pane) else {
         return;
     };
-    cancel_running_search(tab);
+    let id = tab.id.get_untracked();
+    let already_running = SEARCH_BUSY.with(|busy| busy.borrow().contains(&id));
+    if already_running {
+        // 前の検索が完了するまで次の検索はブロックする（負荷抑制）
+        return;
+    }
+    SEARCH_BUSY.with(|busy| busy.borrow_mut().push(id));
     shell.status.set("検索しています…".into());
     enqueue(
         tab,
@@ -172,6 +219,7 @@ pub(super) fn find_previous(
 
 fn cancel_running_search(tab: Tab) {
     let id = tab.id.get_untracked();
+    SEARCH_BUSY.with(|busy| busy.borrow_mut().retain(|other| *other != id));
     if !BUSY.with(|busy| busy.borrow().contains(&id)) {
         return;
     }
@@ -199,22 +247,7 @@ fn enqueue(tab: Tab, task: Task) {
     QUEUES.with(|queues| {
         let mut queues = queues.borrow_mut();
         let queue = queues.entry(id).or_default();
-        match &task {
-            Task::Fetch(_) => {
-                // スクロール描画は最優先。進行中の検索があってもその手前に割り込ませて白飛びを防ぐ
-                if let Some(pos) = queue
-                    .iter()
-                    .position(|(_, t)| matches!(t, Task::Find { .. }))
-                {
-                    queue.insert(pos, (tab, task));
-                } else {
-                    queue.push_back((tab, task));
-                }
-            }
-            _ => {
-                queue.push_back((tab, task));
-            }
-        }
+        queue.push_back((tab, task));
     });
     let busy = BUSY.with(|busy| busy.borrow().contains(&id));
     if busy {
@@ -256,19 +289,6 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
         return false;
     };
     match task {
-        Task::Fetch(range) => {
-            let count = range.len().min(CHUNK_LINES);
-            let Ok(lines) = framework::read_lines(handle, range.start, count).await else {
-                return false;
-            };
-            if !lines.is_empty() {
-                shell.feed(tab, range.start, &lines);
-            }
-            let rest = range.start + lines.len()..range.end;
-            if !rest.is_empty() && !lines.is_empty() {
-                enqueue(tab, Task::Fetch(rest));
-            }
-        }
         Task::FetchTail { pane } => match framework::read_tail(handle, TAIL_LINES).await {
             Ok(lines) => {
                 editor::show_tail(pane, &lines);
@@ -334,12 +354,17 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
             query,
             options,
             file_size,
-        } => match find_far(shell, tab, pane, handle, &query, options, file_size).await {
-            Ok(Some(true)) => shell.status.set("見つかりました".into()),
-            Ok(Some(false)) => shell.status.set("見つかりませんでした".into()),
-            Ok(None) => {}
-            Err(error) => shell.status.set(error),
-        },
+        } => {
+            let result = find_far(shell, tab, pane, handle, &query, options, file_size).await;
+            let id = tab.id.get_untracked();
+            SEARCH_BUSY.with(|busy| busy.borrow_mut().retain(|other| *other != id));
+            match result {
+                Ok(Some(true)) => shell.status.set("見つかりました".into()),
+                Ok(Some(false)) => shell.status.set("見つかりませんでした".into()),
+                Ok(None) => {}
+                Err(error) => shell.status.set(error),
+            }
+        }
     }
     true
 }
