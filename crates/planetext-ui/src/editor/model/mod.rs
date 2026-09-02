@@ -109,9 +109,14 @@ impl Document {
     }
 
     pub fn load_pending(&mut self, line_count: usize) {
-        // 走査中（line_count == 0）のときは、画面を満たす初期描画枠（100行）を確保し、
-        // 届いた行が破棄されずに画面いっぱいに表示されるようにする。
-        let initial = if line_count == 0 { 100 } else { line_count };
+        // 走査中（line_count == 0）のときは、4K/8K縦画面や極小フォント等の最大解像度でも
+        // 画面が途切れない妥当な初期枠（1,000行）を確保する。走査完了時に真の絶対行数へ置換される。
+        const INITIAL_PENDING_LINES: usize = 1_000;
+        let initial = if line_count == 0 {
+            INITIAL_PENDING_LINES
+        } else {
+            line_count
+        };
         self.load(Text::pending(initial));
         self.counting = line_count == 0;
     }
@@ -354,7 +359,7 @@ pub(crate) mod tests {
         doc.feed(0, lines);
 
         // 0行目だけでなく、50行目まで正しく取得できること
-        assert_eq!(doc.text().line_count(), 100);
+        assert_eq!(doc.text().line_count(), 1_000);
         assert_eq!(doc.text().first_absent(0), Some(50));
         assert_eq!(crate::structure::plain::row(doc.text().line(0)), "Line 0");
         assert_eq!(crate::structure::plain::row(doc.text().line(49)), "Line 49");
