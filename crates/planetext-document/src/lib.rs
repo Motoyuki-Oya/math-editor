@@ -245,13 +245,19 @@ impl Application {
         let encoding = doc.encoding().label().to_string();
         let line_ending = doc.line_ending().label().to_string();
         let revision = doc.revision();
+        // 走査未完了の間は行数は未確定（0）として返す。初期スキャンチャンク行数は漏らさない。
+        let line_count = if doc.pending_source.is_some() {
+            0
+        } else {
+            doc.line_count()
+        };
         let opened = OpenedDocument {
             handle: {
                 let mut next = self.state.next_document.lock().unwrap();
                 *next += 1;
                 *next
             },
-            line_count: doc.line_count(),
+            line_count,
             bytes: doc.bytes(),
             encoding,
             line_ending,
@@ -294,8 +300,9 @@ impl Application {
             self.with_doc(handle, |doc| {
                 let scan = doc.reopen_with_encoding(enc)?;
                 let bg_index = doc.take_background_index();
+                let line_count = if scan.is_some() { 0 } else { doc.line_count() };
                 Ok((
-                    doc.line_count(),
+                    line_count,
                     doc.encoding().label().to_string(),
                     doc.line_ending().label().to_string(),
                     doc.revision(),

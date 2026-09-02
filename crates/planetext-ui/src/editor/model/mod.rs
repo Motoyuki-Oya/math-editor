@@ -323,7 +323,8 @@ pub(crate) mod tests {
         let mut doc = Document::default();
         assert!(!doc.is_counting());
 
-        doc.load_pending(20_000);
+        // 初期スキャン行数は渡さず 0 で保留開始
+        doc.load_pending(0);
         assert!(doc.is_counting(), "走査中は counting が true であること");
 
         doc.resize_pending(16_000_000);

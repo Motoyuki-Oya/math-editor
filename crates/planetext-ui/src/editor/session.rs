@@ -971,6 +971,9 @@ pub fn show_tail(pane: usize, lines: &[String]) {
     let from = {
         let mut borrowed = session.borrow_mut();
         borrowed.edit(|editor| {
+            if editor.text().line_count() < lines.len() {
+                editor.resize_pending(lines.len());
+            }
             let count = editor.text().line_count();
             let from = count.saturating_sub(lines.len());
             editor.forget_range(from..count);
@@ -1388,13 +1391,17 @@ mod tests {
     #[test]
     fn apply_line_count_correctly_remaps_tail_lines_and_moves_caret() {
         let mut editor = Editor::default();
-        // 1. 仮の20,000行で保留状態
-        editor.load_pending(20_000);
+        // 1. 初期スキャン行数は露出させず、未確定（0行）で保留状態を開始する
+        editor.load_pending(0);
 
-        // 2. 末尾2行を仮の末尾（19998..20000）に表示
+        // 2. 末尾2行を要求して表示（show_tail 相当）
         let tail_lines = vec!["tail 0".to_string(), "tail 1".to_string()];
-        let from = 20_000 - 2;
-        editor.forget_range(from..20_000);
+        if editor.text().line_count() < tail_lines.len() {
+            editor.resize_pending(tail_lines.len());
+        }
+        let count = editor.text().line_count();
+        let from = count.saturating_sub(tail_lines.len());
+        editor.forget_range(from..count);
         editor.feed(
             from,
             tail_lines
@@ -1402,10 +1409,11 @@ mod tests {
                 .map(|line| document::read_line(line))
                 .collect(),
         );
-        editor.set_caret(Pos::new(19_999, 6));
+        let last = count.saturating_sub(1);
+        editor.set_caret(Pos::new(last, 6));
 
-        assert_eq!(editor.text().line_count(), 20_000);
-        assert_eq!(editor.text().raw_line(19_999), Some("tail 1"));
+        assert_eq!(editor.text().line_count(), 2);
+        assert_eq!(editor.text().raw_line(1), Some("tail 1"));
 
         // 3. バックグラウンド走査完了で 16,000,000 行へ付け替え
         let pending_tail = Some((from, tail_lines));
@@ -1415,8 +1423,8 @@ mod tests {
         // 確定後の検証:
         // - 全体行数が 16,000,000 行になっていること
         assert_eq!(editor.text().line_count(), 16_000_000);
-        // - 仮配置されていた位置（19999）は未着（Line::Absent）に戻っていること
-        assert!(editor.text().is_absent(19_999));
+        // - 仮配置されていた位置（1）は未着（Line::Absent）に戻っていること
+        assert!(editor.text().is_absent(1));
         // - 真の末尾（15999999, 15999998）に正しく末尾行が移動・配置されていること
         assert_eq!(editor.text().raw_line(15_999_999), Some("tail 1"));
         assert_eq!(editor.text().raw_line(15_999_998), Some("tail 0"));
