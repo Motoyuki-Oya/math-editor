@@ -1539,6 +1539,12 @@ body {
   opacity: 0.7;
 }
 
+.mn-cursor-overwrite {
+  opacity: 0.65;
+  background: var(--fg);
+  border-radius: 1px;
+}
+
 /* キーストロークと IME を受け取り、候補 ウィンドウが適切な場所に表示されるようにキャレットに従います。 */
 .mn-input {
   position: absolute;

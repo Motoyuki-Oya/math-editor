@@ -70,6 +70,7 @@ pub struct Overlay<'a> {
     pub carets: &'a [Caret<'a>],
     pub focused: bool,
     pub linked: bool,
+    pub overwrite: bool,
     /// 行数確定前は仮の行番号を表示しない。
     pub show_numbers: bool,
     pub language: Option<&'a crate::syntax::lang::LanguageDef>,
@@ -494,8 +495,24 @@ impl View {
             }
             if show_carets {
                 let (path, at) = nested.place();
-                if let Some(rect) = self.place_box(nested.at.line, &path, at) {
-                    self.mark_caret(doc, rect, &origin, index + 1 == carets.len(), focused);
+                let rect_opt = if state.overwrite && cursor.is_caret() {
+                    let spans = self.span_in_row(nested.at.line, &path, at, Some(at + 1));
+                    spans
+                        .first()
+                        .copied()
+                        .or_else(|| self.place_box(nested.at.line, &path, at))
+                } else {
+                    self.place_box(nested.at.line, &path, at)
+                };
+                if let Some(rect) = rect_opt {
+                    self.mark_caret(
+                        doc,
+                        rect,
+                        &origin,
+                        index + 1 == carets.len(),
+                        focused,
+                        state.overwrite,
+                    );
                 }
             }
         }
@@ -508,13 +525,21 @@ impl View {
             if !show_carets {
                 continue;
             }
-            if let Some(rect) = self.caret_rect(sel.head) {
+            let rect_opt = if state.overwrite && sel.is_caret() {
+                let head = sel.head;
+                let spans = self.span_in_row(head.line, &[], head.col, Some(head.col + 1));
+                spans.first().copied().or_else(|| self.caret_rect(head))
+            } else {
+                self.caret_rect(sel.head)
+            };
+            if let Some(rect) = rect_opt {
                 self.mark_caret(
                     doc,
                     rect,
                     &origin,
                     caret.inside.is_none() && index + 1 == sels.len(),
                     focused,
+                    state.overwrite,
                 );
             }
         }
@@ -538,6 +563,7 @@ impl View {
         origin: &web_sys::DomRect,
         primary: bool,
         focused: bool,
+        overwrite: bool,
     ) {
         let Some(caret) = element(doc, "div", "mn-cursor") else {
             return;
@@ -547,7 +573,16 @@ impl View {
         } else if primary {
             caret.class_list().add_1("mn-cursor-primary").ok();
         }
-        set_box(&caret, Box2 { width: 2.0, ..rect }.fix(), origin);
+        if overwrite {
+            caret.class_list().add_1("mn-cursor-overwrite").ok();
+        }
+        let box_to_set = if overwrite {
+            let width = if rect.width > 2.0 { rect.width } else { 8.5 };
+            Box2 { width, ..rect }
+        } else {
+            Box2 { width: 2.0, ..rect }
+        };
+        set_box(&caret, box_to_set.fix(), origin);
         append(&self.overlay, &caret);
     }
 
