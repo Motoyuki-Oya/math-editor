@@ -41,10 +41,6 @@ pub struct Session {
     preview_options: search::SearchOptions,
     preview_file_size: Option<usize>,
     preview_found: Vec<search::Found>,
-    /// 行数の走査がまだ終わっていないか。終わるまで Ctrl+End は保留する。
-    pub counting: bool,
-    /// 走査完了を待っている Ctrl+End（値は shift）。確定したら跳ぶ。
-    pub jump_end: Option<bool>,
     /// 行数未確定中にEOFから読んだ末尾行。仮位置と再配置用の元文字列。
     pending_tail: Option<(usize, Vec<String>)>,
     /// インライン補完（ゴーストテキスト）の現在候補。
@@ -55,7 +51,7 @@ pub struct Session {
 
 impl Session {
     pub fn is_counting(&self) -> bool {
-        self.counting || self.document.borrow().is_counting()
+        self.document.borrow().is_counting()
     }
 
     pub fn primary(&self) -> Sel {
@@ -201,7 +197,6 @@ pub fn bind_doc(pane: usize, doc_id: usize) {
         return;
     };
     let doc = get_or_create_doc(doc_id);
-    let is_counting = doc.borrow().is_counting();
     {
         let mut borrowed = session.borrow_mut();
         borrowed.doc_id = doc_id;
@@ -209,7 +204,6 @@ pub fn bind_doc(pane: usize, doc_id: usize) {
         borrowed.cursors = vec![UnifiedCursor::caret(Pos::default())];
         borrowed.preedit.clear();
         borrowed.search_from = None;
-        borrowed.counting = is_counting;
         borrowed.pending_tail = None;
     }
     redraw(&session);
@@ -242,8 +236,6 @@ pub fn init(root: &HtmlElement) -> Option<usize> {
         preview_options: search::SearchOptions::default(),
         preview_file_size: None,
         preview_found: Vec::new(),
-        counting: false,
-        jump_end: None,
         pending_tail: None,
         ghost: None,
         overwrite_mode: false,
@@ -930,24 +922,19 @@ pub fn load(text: &str) {
     changed(&session);
 }
 
-/// 行数だけ分かっている文書を出します。行は見えた場所から取り寄せられます。
-/// 行数は走査中の途中値なので、確定は [set_line_count] で届く。
+/// 保留状態を開始します。line_count が 0 のときは行数未確定（走査中）として扱われます。
 pub fn load_pending(line_count: usize) {
     let Some(session) = session() else { return };
-    {
-        let borrowed = session.borrow();
-        borrowed.document.borrow_mut().load_pending(line_count);
-    }
-    {
-        let mut borrowed = session.borrow_mut();
-        borrowed.counting = true;
-        borrowed.jump_end = None;
-        borrowed.pending_tail = None;
-    }
+    session
+        .borrow()
+        .document
+        .borrow_mut()
+        .load_pending(line_count);
+    session.borrow_mut().pending_tail = None;
     changed(&session);
 }
 
-/// 指定ドキュメントを行数未確定の保留状態にし、現在バインドされているセッションがあれば同期する。
+/// 指定ドキュメントの保留状態を開始します。line_count が 0 のときは行数未確定（走査中）として扱われます。
 pub fn load_pending_doc(doc_id: usize, line_count: usize) {
     let doc = get_or_create_doc(doc_id);
     doc.borrow_mut().load_pending(line_count);
@@ -955,8 +942,6 @@ pub fn load_pending_doc(doc_id: usize, line_count: usize) {
         for session in panes.borrow().iter() {
             let mut borrowed = session.borrow_mut();
             if borrowed.doc_id == doc_id {
-                borrowed.counting = true;
-                borrowed.jump_end = None;
                 borrowed.pending_tail = None;
             }
         }
@@ -989,17 +974,12 @@ pub fn show_tail(pane: usize, lines: &[String]) {
     };
     {
         let mut borrowed = session.borrow_mut();
-        borrowed.pending_tail = borrowed.counting.then(|| (from, lines.to_vec()));
+        borrowed.pending_tail = borrowed.is_counting().then(|| (from, lines.to_vec()));
     }
     redraw(&session);
 }
 
-fn apply_line_count(
-    editor: &mut Editor,
-    pending_tail: Option<(usize, Vec<String>)>,
-    jump_end: Option<bool>,
-    count: usize,
-) {
+fn apply_line_count(editor: &mut Editor, pending_tail: Option<(usize, Vec<String>)>, count: usize) {
     if let Some((from, lines)) = &pending_tail {
         editor.forget_range(*from..*from + lines.len());
     }
@@ -1014,8 +994,6 @@ fn apply_line_count(
         let last = count.saturating_sub(1);
         let col = editor.text().line_len(last);
         editor.set_caret(Pos::new(last, col));
-    } else if let Some(shift) = jump_end {
-        editor.move_document_edge(true, shift);
     }
 }
 
@@ -1025,19 +1003,10 @@ pub fn set_line_count(pane: usize, count: usize) {
     let Some(session) = pane_session(pane) else {
         return;
     };
-    let (pending_tail, jump_end) = {
-        let mut borrowed = session.borrow_mut();
-        let pending_tail = borrowed.pending_tail.take();
-        let jump_end = borrowed.jump_end.take();
-        borrowed.counting = false;
-        (pending_tail, jump_end)
-    };
-    {
-        let mut borrowed = session.borrow_mut();
-        borrowed.edit(|editor| {
-            apply_line_count(editor, pending_tail, jump_end, count);
-        });
-    }
+    let pending_tail = session.borrow_mut().pending_tail.take();
+    session.borrow_mut().edit(|editor| {
+        apply_line_count(editor, pending_tail, count);
+    });
     redraw(&session);
 }
 
@@ -1418,7 +1387,7 @@ mod tests {
         // 3. バックグラウンド走査完了で 16,000,000 行へ付け替え
         let pending_tail = Some((from, tail_lines));
         let final_count = 16_000_000;
-        apply_line_count(&mut editor, pending_tail, None, final_count);
+        apply_line_count(&mut editor, pending_tail, final_count);
 
         // 確定後の検証:
         // - 全体行数が 16,000,000 行になっていること

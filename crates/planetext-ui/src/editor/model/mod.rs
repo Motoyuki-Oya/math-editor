@@ -110,7 +110,7 @@ impl Document {
 
     pub fn load_pending(&mut self, line_count: usize) {
         self.load(Text::pending(line_count));
-        self.counting = true;
+        self.counting = line_count == 0;
     }
 
     pub fn resize_pending(&mut self, line_count: usize) {
