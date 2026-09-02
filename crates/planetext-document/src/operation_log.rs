@@ -126,6 +126,16 @@ impl OperationLog {
         self.saved_revision == Some(self.revision())
     }
 
+    pub(crate) fn unsaved_transactions(&self) -> &[Transaction] {
+        let saved = self.saved_revision.unwrap_or(0);
+        let valid = &self.transactions[..self.head];
+        let start = valid
+            .iter()
+            .position(|tx| tx.revision > saved)
+            .unwrap_or(valid.len());
+        &valid[start..]
+    }
+
     pub(crate) fn append_transaction(
         &mut self,
         base_revision: u64,

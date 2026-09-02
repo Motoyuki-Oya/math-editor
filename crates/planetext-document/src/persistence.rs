@@ -163,28 +163,113 @@ impl Document {
         Ok(())
     }
 
-    /// 下書きを書き出す。元ファイルがあり変更がない場合は全文ダンプを行わず、
-    /// 元ファイルへの参照だけを記録してディスク消費とI/O負荷をゼロにする。
+    /// 下書きを書き出す。元ファイルがある場合は全文ダンプを絶対に行わず、
+    /// 元ファイルへの参照と未保存の差分行（JSON）だけを記録する。
     pub(crate) fn write_draft<W: Write>(
         &mut self,
         out: &mut W,
         path: Option<&str>,
     ) -> Result<(), String> {
         if let Some(p) = path {
-            if self.is_clean() {
-                writeln!(out, "// PLANETEXT_DRAFT_REF_V1")
-                    .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
-                writeln!(out, "{p}").map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
-                writeln!(out, "CLEAN").map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
-                return Ok(());
-            }
-            // 変更がある場合はパスを出力した上で本文を書き出す
+            writeln!(out, "// PLANETEXT_DRAFT_REF_V1")
+                .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
             writeln!(out, "{p}").map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
-            self.write_to(out)
+            if self.is_clean() {
+                writeln!(out, "CLEAN").map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+            } else {
+                writeln!(out, "DIFF").map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+                let diffs = self.collect_draft_diffs();
+                writeln!(out, "{}", diffs.len())
+                    .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+                for diff in &diffs {
+                    diff.write_to(out)
+                        .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+                }
+            }
+            Ok(())
         } else {
             // 無題ドキュメントは1行目を空にして本文を書き出す
             writeln!(out).map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
             self.write_to(out)
         }
+    }
+
+    /// 未保存のトランザクションから、変更された行範囲の差分データを抽出する。
+    pub(crate) fn collect_draft_diffs(&mut self) -> Vec<DraftDiff> {
+        let edits: Vec<(usize, usize, usize)> = self
+            .log
+            .unsaved_transactions()
+            .iter()
+            .flat_map(|tx| {
+                tx.edits()
+                    .iter()
+                    .map(|e| (e.from_line, e.removed_lines, e.inserted_lines))
+            })
+            .collect();
+        let mut diffs = Vec::new();
+        for (from_line, removed_lines, inserted_lines) in edits {
+            let mut lines = Vec::new();
+            let _ = self.each_line(from_line, inserted_lines, &mut |_, line| {
+                lines.push(line.to_string());
+                true
+            });
+            diffs.push(DraftDiff {
+                from_line,
+                removed_lines,
+                lines,
+            });
+        }
+        diffs
+    }
+
+    /// 元ファイルから開いた文書に対して、下書き差分を適用して編集状態を復元する。
+    pub(crate) fn apply_draft_diffs(&mut self, diffs: Vec<DraftDiff>) -> Result<(), String> {
+        for diff in diffs {
+            let to_line = diff.from_line + diff.removed_lines;
+            self.replace(diff.from_line, to_line, diff.lines, 0, "", "")?;
+        }
+        self.log.mark_dirty_without_history();
+        Ok(())
+    }
+}
+
+/// 下書きに記録される行範囲の変更差分。外部クレートに頼らない軽量なプレーンテキスト表現。
+#[derive(Clone, Debug)]
+pub struct DraftDiff {
+    pub from_line: usize,
+    pub removed_lines: usize,
+    pub lines: Vec<String>,
+}
+
+impl DraftDiff {
+    pub(crate) fn write_to<W: Write>(&self, out: &mut W) -> std::io::Result<()> {
+        writeln!(
+            out,
+            "{} {} {}",
+            self.from_line,
+            self.removed_lines,
+            self.lines.len()
+        )?;
+        for line in &self.lines {
+            writeln!(out, "{line}")?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn read_from<'a>(lines: &mut impl Iterator<Item = &'a str>) -> Option<Self> {
+        let header = lines.next()?;
+        let mut parts = header.split_whitespace();
+        let from_line = parts.next()?.parse().ok()?;
+        let removed_lines = parts.next()?.parse().ok()?;
+        let count: usize = parts.next()?.parse().ok()?;
+        let mut diff_lines = Vec::with_capacity(count);
+        for _ in 0..count {
+            diff_lines.push(lines.next()?.to_string());
+        }
+        Some(Self {
+            from_line,
+            removed_lines,
+            lines: diff_lines,
+        })
     }
 }

@@ -364,6 +364,46 @@ impl Application {
         Ok(self.adopt(doc))
     }
 
+    /// 下書きIDから文書を復元する。元ファイルがある場合は全文ダンプではなく
+    /// 元ファイルを開いて未保存差分を適用するため、巨大ファイルでも一瞬で安全に復旧できる。
+    pub fn open_draft(
+        &self,
+        config_dir: Option<PathBuf>,
+        id: String,
+    ) -> Result<OpenedDocument, String> {
+        let Some(dir) = drafts_dir(config_dir) else {
+            return Err("下書きディレクトリがありません".to_string());
+        };
+        let path = dir.join(draft_name(&id));
+        let file =
+            std::fs::read_to_string(&path).map_err(|e| format!("下書きを開けませんでした: {e}"))?;
+        let mut lines = file.lines();
+        let first = lines.next().unwrap_or_default();
+        if first == "// PLANETEXT_DRAFT_REF_V1" {
+            let orig_path = lines.next().unwrap_or_default();
+            let status = lines.next().unwrap_or_default();
+            let (mut doc, _) = Document::open(orig_path)?;
+            if status == "DIFF" {
+                if let Some(count_str) = lines.next() {
+                    let count: usize = count_str.parse().unwrap_or(0);
+                    let mut diffs = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        if let Some(diff) = crate::persistence::DraftDiff::read_from(&mut lines) {
+                            diffs.push(diff);
+                        }
+                    }
+                    let _ = doc.apply_draft_diffs(diffs);
+                }
+            }
+            Ok(self.adopt(doc))
+        } else {
+            let contents = file.split_once('\n').map_or("", |(_, rest)| rest);
+            let lines: Vec<String> = contents.lines().map(String::from).collect();
+            let doc = Document::from_draft(lines);
+            Ok(self.adopt(doc))
+        }
+    }
+
     pub fn read_lines(&self, handle: u64, from: usize, count: usize) -> Result<ReadLines, String> {
         self.with_doc(handle, |doc| {
             let lines = doc.read(from, count)?;
@@ -665,8 +705,42 @@ impl Application {
                             path: Some(orig_path),
                             contents,
                         })
+                    } else if status == "DIFF" {
+                        // 差分下書き: 元ファイルを開いて差分を適用した内容を復元する
+                        let contents = if let Some(count_str) = lines.next() {
+                            let count: usize = count_str.parse().unwrap_or(0);
+                            let mut diffs = Vec::with_capacity(count);
+                            for _ in 0..count {
+                                if let Some(diff) =
+                                    crate::persistence::DraftDiff::read_from(&mut lines)
+                                {
+                                    diffs.push(diff);
+                                }
+                            }
+                            if let Ok((mut doc, _)) = Document::open(&orig_path) {
+                                let _ = doc.apply_draft_diffs(diffs);
+                                let mut restored = String::new();
+                                let _ = doc.each_line(0, doc.line_count(), &mut |i, line| {
+                                    if i > 0 {
+                                        restored.push('\n');
+                                    }
+                                    restored.push_str(line);
+                                    true
+                                });
+                                restored
+                            } else {
+                                String::new()
+                            }
+                        } else {
+                            String::new()
+                        };
+                        Some(Draft {
+                            id,
+                            path: Some(orig_path),
+                            contents,
+                        })
                     } else {
-                        // 変更がある場合は後続のテキスト
+                        // 後方互換（旧形式の下書きテキスト）
                         let remaining: Vec<&str> = lines.collect();
                         Some(Draft {
                             id,
@@ -883,6 +957,90 @@ mod tests {
         assert_eq!(drafts[0].id, "1");
         assert_eq!(drafts[0].path.as_deref(), Some(file_path.to_str().unwrap()));
         assert!(drafts[0].contents.contains("original file line 1"));
+
+        application.clear_drafts(Some(temp_dir.clone()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let _ = std::fs::remove_file(&file_path);
+    }
+
+    /// 【回帰防止テスト】
+    /// 編集された実ファイル文書の下書き保存時、全文ダンプではなく「元ファイル参照＋差分JSON」が
+    /// 記録され、read_drafts または open_draft で編集後の状態が正確に復元されることを保証する。
+    #[test]
+    fn save_and_read_modified_referenced_file_draft() {
+        let application = Application::default();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let file_path =
+            std::env::temp_dir().join(format!("planetext_draft_modified_{timestamp}.txt"));
+        std::fs::write(&file_path, "base line 1\nbase line 2\nbase line 3").unwrap();
+
+        let doc = application
+            .open_document(file_path.to_str().unwrap().to_string())
+            .unwrap();
+        // 2行目を編集
+        application
+            .replace_lines(
+                doc.handle,
+                1,
+                2,
+                vec!["MODIFIED LINE 2".into()],
+                1,
+                "".into(),
+                "".into(),
+            )
+            .unwrap();
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "planetext_test_mod_draft_{timestamp}_{}",
+            doc.handle
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        application
+            .save_draft(
+                Some(temp_dir.clone()),
+                doc.handle,
+                "1".into(),
+                Some(file_path.to_str().unwrap().into()),
+            )
+            .unwrap();
+
+        // 1. 下書きファイルの中身を直接検査: 全文ダンプではなく DIFF フォーマットであること
+        let draft_file_path = temp_dir.join("drafts").join("1.draft");
+        let draft_content = std::fs::read_to_string(&draft_file_path).unwrap();
+        assert!(
+            draft_content.contains("DIFF"),
+            "下書きファイルに DIFF マーカーが含まれること"
+        );
+        assert!(
+            draft_content.contains("// PLANETEXT_DRAFT_REF_V1"),
+            "下書きファイルに参照マーカーが含まれること"
+        );
+
+        // 2. read_drafts で復元された内容に編集が反映されていること
+        let drafts = application.read_drafts(Some(temp_dir.clone()));
+        assert_eq!(drafts.len(), 1);
+        assert!(
+            drafts[0].contents.contains("MODIFIED LINE 2"),
+            "復元された下書きに編集後の行が含まれること"
+        );
+        assert!(
+            drafts[0].contents.contains("base line 1"),
+            "元ファイルの変更されていない行も正しく含まれること"
+        );
+
+        // 3. open_draft API でも直接 OpenedDocument として一発で復元できること
+        let reopened = application
+            .open_draft(Some(temp_dir.clone()), "1".into())
+            .unwrap();
+        let read = application.read_lines(reopened.handle, 0, 3).unwrap();
+        assert_eq!(
+            read.lines,
+            vec!["base line 1", "MODIFIED LINE 2", "base line 3"]
+        );
 
         application.clear_drafts(Some(temp_dir.clone()));
         let _ = std::fs::remove_dir_all(&temp_dir);
