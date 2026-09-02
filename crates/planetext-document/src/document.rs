@@ -15,6 +15,7 @@ use crate::edit_buffers::{EditBuffers, EditRange};
 use crate::operation_log::{BulkOperation, Edit, OperationLog};
 use crate::piece_tree::{Piece, PieceTree};
 use crate::search::ScanHit;
+use crate::search_index::SearchIndex;
 use crate::source::{BackgroundScan, FileEncoding, LineEnding, ScanIndex, Source};
 
 #[derive(Clone, Copy)]
@@ -34,6 +35,7 @@ pub(crate) struct Document {
     pub(crate) encoding: FileEncoding,
     pub(crate) line_ending: LineEnding,
     pending_source: Option<PendingSource>,
+    pub(crate) search_index: Option<SearchIndex>,
 }
 
 /// 元に戻す・やり直すの結果: 復元すべき控えと、行が変わった範囲の始まり。
@@ -93,6 +95,11 @@ impl Document {
         let enc = source.encoding;
         let line_ending = source.line_ending;
         let (pieces, pending_source) = Self::source_pieces(&source, count);
+        let search_index = if source.bytes as usize >= crate::search_index::BIGRAM_INDEX_THRESHOLD {
+            Some(SearchIndex::new(source.bytes as usize, enc))
+        } else {
+            None
+        };
         Ok((
             Document {
                 pieces: PieceTree::new(pieces),
@@ -103,9 +110,16 @@ impl Document {
                 source: Some(source),
                 log: OperationLog::default(),
                 pending_source,
+                search_index,
             },
             scan,
         ))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn enable_search_index(&mut self) {
+        let total_bytes = self.source.as_ref().map_or(0, |s| s.bytes as usize);
+        self.search_index = Some(SearchIndex::new(total_bytes, self.encoding));
     }
 
     pub(crate) fn empty() -> Document {
@@ -130,6 +144,7 @@ impl Document {
             encoding: FileEncoding::Utf8,
             line_ending,
             pending_source: None,
+            search_index: None,
         }
     }
 
@@ -225,6 +240,7 @@ impl Document {
             encoding: self.encoding,
             line_ending: self.line_ending,
             pending_source: self.pending_source,
+            search_index: self.search_index.clone(),
         })
     }
 
@@ -327,6 +343,7 @@ impl Document {
             encoding: self.encoding,
             line_ending: self.line_ending,
             pending_source: self.pending_source,
+            search_index: None,
         }
     }
 
@@ -576,6 +593,10 @@ impl Document {
             .map(|line| line.trim_end_matches(['\r', '\n']).to_string())
             .collect();
         let edit = self.splice(actual_from, actual_to, clean_lines)?;
+        if let Some(index) = self.search_index.as_mut() {
+            let byte_pos = self.pieces.byte_offset(actual_from);
+            index.splice_delta(before, after, byte_pos);
+        }
         self.log
             .append_or_merge_transaction(base_revision, group, edit, before, after);
         Ok(self.count)

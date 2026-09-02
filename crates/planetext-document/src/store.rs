@@ -1537,4 +1537,49 @@ mod tests {
 
         std::fs::remove_file(path).ok();
     }
+
+    #[test]
+    fn search_index_estimates_matches_and_updates_on_edit() {
+        let (mut doc, path) = disk_doc(
+            "index-test",
+            &["apple banana", "orange apple", "grape apple"],
+        );
+        doc.enable_search_index();
+
+        // 初期状態で "apple" が 3 件推定されること
+        let re = regex::Regex::new("apple").unwrap();
+        assert_eq!(doc.estimate_matches(&re).unwrap(), 3);
+
+        // 1行目を置換して "apple" を減らす
+        doc.replace(
+            0,
+            1,
+            vec!["kiwi banana".to_string()],
+            1,
+            "apple banana",
+            "kiwi banana",
+        )
+        .unwrap();
+
+        // 差分キャッシュにより推定件数が 2 件になること
+        assert_eq!(doc.estimate_matches(&re).unwrap(), 2);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn search_index_treats_structure_format_as_raw_text() {
+        // 構造フォーマット・数式記法を含むテキストもフィルタリングせずそのまま bi-gram インデックス化されること
+        let (mut doc, path) = disk_doc(
+            "index-notation-test",
+            &["formula: $(E = mc^2)$", "text line", "another $(x + y)$"],
+        );
+        doc.enable_search_index();
+
+        let re = regex::Regex::new(r"\$\(").unwrap();
+        // 記法プレフィックス "$(" を含む箇所が 2 件推定されること
+        assert_eq!(doc.estimate_matches(&re).unwrap(), 2);
+
+        std::fs::remove_file(path).ok();
+    }
 }
