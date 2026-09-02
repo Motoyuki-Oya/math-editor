@@ -18,14 +18,51 @@ pub(crate) struct Edit {
     pub(crate) inserted_lines: usize,
 }
 
+use std::sync::Arc;
+
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub(crate) enum BulkOperation {
+    AllLines {
+        from_line: usize,
+        to_line: usize,
+        column: usize,
+        delete: usize,
+        insert: String,
+    },
+    ReplaceAll {
+        from_line: usize,
+        to_line: usize,
+        query: String,
+        replacement: String,
+        case_sensitive: bool,
+        pattern: Arc<regex::Regex>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum OperationKind {
+    Splice(Vec<Edit>),
+    Bulk(BulkOperation),
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct Transaction {
     pub(crate) group: u64,
     pub(crate) base_revision: u64,
     pub(crate) revision: u64,
-    pub(crate) edits: Vec<Edit>,
+    pub(crate) kind: OperationKind,
     pub(crate) before: String,
     pub(crate) after: String,
+}
+
+impl Transaction {
+    pub(crate) fn edits(&self) -> &[Edit] {
+        match &self.kind {
+            OperationKind::Splice(edits) => edits,
+            OperationKind::Bulk(_) => &[],
+        }
+    }
 }
 
 /// 単一の追記専用操作ログ。
@@ -101,7 +138,39 @@ impl OperationLog {
             group,
             base_revision,
             revision,
-            edits,
+            kind: OperationKind::Splice(edits),
+            before: before.to_string(),
+            after: after.to_string(),
+        });
+        self.head = self.transactions.len();
+
+        if self.transactions.len() > HISTORY_LIMIT {
+            self.transactions.remove(0);
+            self.head = self.head.saturating_sub(1);
+            self.retained_base = self
+                .transactions
+                .first()
+                .map_or(self.next_revision, |tx| tx.base_revision);
+            self.base_revision = self.retained_base;
+        }
+    }
+
+    pub(crate) fn append_bulk_transaction(
+        &mut self,
+        base_revision: u64,
+        group: u64,
+        bulk: BulkOperation,
+        before: &str,
+        after: &str,
+    ) {
+        self.transactions.truncate(self.head);
+        let revision = self.next_revision;
+        self.next_revision = self.next_revision.saturating_add(1);
+        self.transactions.push(Transaction {
+            group,
+            base_revision,
+            revision,
+            kind: OperationKind::Bulk(bulk),
             before: before.to_string(),
             after: after.to_string(),
         });
@@ -131,12 +200,24 @@ impl OperationLog {
         let current_rev = self.revision();
         if let Some(last) = self.transactions.last_mut() {
             if last.group == group && last.revision == current_rev {
-                last.edits.push(edit);
-                last.after = after.to_string();
-                return;
+                if let OperationKind::Splice(edits) = &mut last.kind {
+                    edits.push(edit);
+                    last.after = after.to_string();
+                    return;
+                }
             }
         }
         self.append_transaction(base_revision, group, vec![edit], before, after);
+    }
+
+    pub(crate) fn active_bulk_operations(&self) -> Vec<(&BulkOperation, u64)> {
+        self.transactions[..self.head]
+            .iter()
+            .filter_map(|tx| match &tx.kind {
+                OperationKind::Bulk(bulk) => Some((bulk, tx.revision)),
+                OperationKind::Splice(_) => None,
+            })
+            .collect()
     }
 
     /// Undo: head を 1 つ戻し、巻き戻すべきトランザクションを返す
@@ -203,7 +284,7 @@ impl OperationLog {
         for tx in self.active_transactions_after(base_revision) {
             let mut delta: isize = 0;
             let input = value;
-            for edit in &tx.edits {
+            for edit in tx.edits() {
                 let from = edit.from;
                 let end = edit.to;
                 if input < from {
@@ -242,13 +323,13 @@ impl OperationLog {
         let mut start = from;
         let mut end = to;
         for tx in self.active_transactions_after(base_revision) {
-            for edit in &tx.edits {
+            for edit in tx.edits() {
                 if start < edit.to && edit.from < end {
                     return Err("range overlaps an edit".into());
                 }
             }
             let shift = |boundary: usize, include_boundary: bool| {
-                tx.edits
+                tx.edits()
                     .iter()
                     .take_while(|edit| {
                         edit.from < boundary || (include_boundary && edit.from == boundary)
@@ -290,7 +371,7 @@ impl OperationLog {
         let mut cur_from = from_line;
         let mut cur_to = to_line;
         for tx in self.active_transactions_after(base_revision) {
-            for edit in &tx.edits {
+            for edit in tx.edits() {
                 let edit_start = edit.from_line;
                 let edit_end = edit.from_line + edit.removed_lines;
                 if cur_from < edit_end && edit_start < cur_to {

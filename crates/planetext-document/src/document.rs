@@ -12,7 +12,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::edit_buffers::{EditBuffers, EditRange};
-use crate::operation_log::{Edit, OperationLog};
+use crate::operation_log::{BulkOperation, Edit, OperationLog};
 use crate::piece_tree::{Piece, PieceTree};
 use crate::search::ScanHit;
 use crate::source::{BackgroundScan, FileEncoding, LineEnding, ScanIndex, Source};
@@ -352,6 +352,76 @@ impl Document {
         self.pieces.source_range_index(pending.from, pending.len)
     }
 
+    fn apply_bulk_rules(
+        operations: &[(&BulkOperation, u64)],
+        line_idx: usize,
+        text: &str,
+    ) -> String {
+        if operations.is_empty() {
+            return text.to_string();
+        }
+        let mut current = text.to_string();
+        for (op, _) in operations {
+            match op {
+                BulkOperation::AllLines {
+                    from_line,
+                    to_line,
+                    column,
+                    delete,
+                    insert,
+                } => {
+                    if (*from_line..*to_line).contains(&line_idx) {
+                        let start = current
+                            .char_indices()
+                            .nth(*column)
+                            .map_or(current.len(), |(i, _)| i);
+                        let end = current
+                            .char_indices()
+                            .nth(column.saturating_add(*delete))
+                            .map_or(current.len(), |(i, _)| i);
+                        if start <= end {
+                            current.replace_range(start..end, insert);
+                        }
+                    }
+                }
+                BulkOperation::ReplaceAll {
+                    from_line,
+                    to_line,
+                    query,
+                    replacement,
+                    case_sensitive,
+                    pattern,
+                } => {
+                    if (*from_line..*to_line).contains(&line_idx) && !query.is_empty() {
+                        if *case_sensitive {
+                            current = current.replace(query, replacement);
+                        } else {
+                            // 事前コンパイル済みの pattern を使用し、行ごとの RegexBuilder 重複コンパイルを完全に排除！
+                            current = pattern
+                                .replace_all(&current, replacement.as_str())
+                                .into_owned();
+                        }
+                    }
+                }
+            }
+        }
+        current
+    }
+
+    pub(crate) fn apply_bulk_operation(
+        &mut self,
+        base_revision: u64,
+        group: u64,
+        bulk: BulkOperation,
+        before: &str,
+        after: &str,
+    ) -> Result<usize, String> {
+        self.log.validate_base(base_revision)?;
+        self.log
+            .append_bulk_transaction(base_revision, group, bulk, before, after);
+        Ok(self.count)
+    }
+
     /// 文書の行 `from..from+count` に `f` を呼ぶ。ディスクの範囲は seek して
     /// 読み流し、編集で入った行はそのまま渡す。`f` が `false` で打ち切り。
     pub(crate) fn each_line(
@@ -364,6 +434,7 @@ impl Document {
         if from >= to {
             return Ok(());
         }
+        let bulks = self.log.active_bulk_operations();
         let mut error = None;
         self.pieces
             .for_each_line_range(from, to, &mut |start, piece, skip, take| match piece {
@@ -389,13 +460,27 @@ impl Document {
                         },
                         skip,
                         take,
-                        &mut |i, text| f(start + skip + i, text),
+                        &mut |i, text| {
+                            let line_idx = start + skip + i;
+                            if bulks.is_empty() {
+                                f(line_idx, text)
+                            } else {
+                                let modified = Self::apply_bulk_rules(&bulks, line_idx, text);
+                                f(line_idx, &modified)
+                            }
+                        },
                     )
                 }
                 Piece::Source { from, len, .. } => match self.source.as_mut() {
                     Some(source) => {
                         match source.for_each_range_line(from, len, skip, take, &mut |i, text| {
-                            f(start + skip + i, text)
+                            let line_idx = start + skip + i;
+                            if bulks.is_empty() {
+                                f(line_idx, text)
+                            } else {
+                                let modified = Self::apply_bulk_rules(&bulks, line_idx, text);
+                                f(line_idx, &modified)
+                            }
                         }) {
                             Ok(done) => done,
                             Err(e) => {
@@ -663,7 +748,7 @@ impl Document {
         let Some(tx) = self.log.undo_pop() else {
             return Ok(None);
         };
-        let edits = tx.edits.clone();
+        let edits = tx.edits().to_vec();
         let state = tx.before.clone();
         let mut touched_from = usize::MAX;
         for edit in edits.into_iter().rev() {
@@ -690,7 +775,7 @@ impl Document {
         let Some(tx) = self.log.redo_pop() else {
             return Ok(None);
         };
-        let edits = tx.edits.clone();
+        let edits = tx.edits().to_vec();
         let state = tx.after.clone();
         let mut touched_from = usize::MAX;
         for edit in edits.into_iter() {

@@ -323,6 +323,42 @@ pub(crate) struct ScanHit {
     pub(crate) end: usize,
 }
 
+use std::sync::Arc;
+
+#[derive(Clone, Debug)]
+pub struct CompiledQuery {
+    pub pattern: Arc<regex::Regex>,
+    pub literal: Option<String>,
+    pub case_sensitive: bool,
+    pub marker: char,
+}
+
+impl CompiledQuery {
+    pub fn compile(
+        query: &str,
+        regex: bool,
+        case_sensitive: bool,
+        marker: char,
+    ) -> Result<Self, String> {
+        let pattern_str = if regex {
+            query.to_string()
+        } else {
+            regex::escape(query)
+        };
+        let pattern = regex::RegexBuilder::new(&pattern_str)
+            .case_insensitive(!case_sensitive)
+            .build()
+            .map_err(|e| format!("正規表現を読めませんでした: {e}"))?;
+        let literal = (!regex && (case_sensitive || query.is_ascii())).then(|| query.to_string());
+        Ok(Self {
+            pattern: Arc::new(pattern),
+            literal,
+            case_sensitive,
+            marker,
+        })
+    }
+}
+
 pub(crate) struct SearchCandidates {
     pub(crate) hits: Vec<ScanHit>,
     pub(crate) scanned_to: usize,
@@ -330,10 +366,7 @@ pub(crate) struct SearchCandidates {
 }
 
 pub(crate) struct SearchSpec<'a> {
-    pub(crate) pattern: &'a regex::Regex,
-    pub(crate) literal: Option<&'a str>,
-    pub(crate) case_sensitive: bool,
-    pub(crate) marker: char,
+    pub(crate) query: &'a CompiledQuery,
     pub(crate) from: usize,
     pub(crate) end: usize,
     pub(crate) after_col: Option<usize>,
@@ -350,15 +383,13 @@ impl Document {
         // 1回の読みを大きくしてseek・確保を減らしつつ、キャンセル確認は
         let mut page_lines = 10_000;
         const MAX_PAGE_LINES: usize = 1_000_000;
-        let SearchSpec {
-            pattern,
-            literal,
-            case_sensitive,
-            marker,
-            from,
-            end,
-            after_col,
-        } = spec;
+        let pattern = &spec.query.pattern;
+        let literal = spec.query.literal.as_deref();
+        let case_sensitive = spec.query.case_sensitive;
+        let marker = spec.query.marker;
+        let from = spec.from;
+        let end = spec.end;
+        let after_col = spec.after_col;
         let end = end.min(self.count);
         let mut at = from.min(end);
         while at < end {

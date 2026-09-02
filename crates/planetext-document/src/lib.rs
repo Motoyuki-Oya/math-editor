@@ -12,6 +12,7 @@ mod source;
 mod store;
 
 use document::Document;
+pub use search::CompiledQuery;
 use search::{ScanHit, SearchSpec};
 use source::{FileEncoding, LineEnding, ScanIndex};
 use std::collections::HashMap;
@@ -128,10 +129,7 @@ pub struct SearchJob {
     application: Application,
     handle: u64,
     snapshot: Document,
-    pattern: regex::Regex,
-    literal: Option<String>,
-    case_sensitive: bool,
-    needle: char,
+    query: CompiledQuery,
     from: usize,
     end: usize,
     after_col: Option<usize>,
@@ -143,10 +141,7 @@ impl SearchJob {
     pub fn run(mut self) -> Result<SearchPage, String> {
         let found = self.snapshot.search_candidates(
             SearchSpec {
-                pattern: &self.pattern,
-                literal: self.literal.as_deref(),
-                case_sensitive: self.case_sensitive,
-                marker: self.needle,
+                query: &self.query,
                 from: self.from,
                 end: self.end,
                 after_col: self.after_col,
@@ -465,24 +460,12 @@ impl Application {
             .ok_or_else(|| "文書はもう閉じられています".to_string())?;
         let ticket = generation.fetch_add(1, Ordering::Relaxed) + 1;
         let snapshot = self.with_doc(handle, |doc| doc.search_snapshot())?;
-        let pattern = if regex {
-            query.clone()
-        } else {
-            regex::escape(&query)
-        };
-        let pattern = regex::RegexBuilder::new(&pattern)
-            .case_insensitive(!case_sensitive)
-            .build()
-            .map_err(|e| format!("正規表現を読めませんでした: {e}"))?;
-        let literal = (!regex && (case_sensitive || query.is_ascii())).then_some(query);
+        let query = CompiledQuery::compile(&query, regex, case_sensitive, needle)?;
         Ok(SearchJob {
             application: self.clone(),
             handle,
             snapshot,
-            pattern,
-            literal,
-            case_sensitive,
-            needle,
+            query,
             from,
             end,
             after_col,
@@ -504,12 +487,43 @@ impl Application {
         regex: bool,
         case_sensitive: bool,
     ) -> Result<usize, String> {
-        let pattern = if regex { query } else { regex::escape(&query) };
-        let pattern = regex::RegexBuilder::new(&pattern)
+        let query = CompiledQuery::compile(&query, regex, case_sensitive, '\0')?;
+        self.with_doc(handle, |doc| doc.estimate_matches(&query.pattern))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn replace_all(
+        &self,
+        handle: u64,
+        base_revision: u64,
+        group: u64,
+        from_line: usize,
+        to_line: usize,
+        query: String,
+        replacement: String,
+        case_sensitive: bool,
+        before: String,
+        after: String,
+    ) -> Result<EditApplied, String> {
+        let pattern = regex::RegexBuilder::new(&regex::escape(&query))
             .case_insensitive(!case_sensitive)
             .build()
-            .map_err(|e| format!("正規表現を読めませんでした: {e}"))?;
-        self.with_doc(handle, |doc| doc.estimate_matches(&pattern))
+            .map_err(|e| format!("無効な検索語です: {e}"))?;
+        let op = crate::operation_log::BulkOperation::ReplaceAll {
+            from_line,
+            to_line,
+            query,
+            replacement,
+            case_sensitive,
+            pattern: Arc::new(pattern),
+        };
+        self.with_doc(handle, |doc| {
+            let line_count = doc.apply_bulk_operation(base_revision, group, op, &before, &after)?;
+            Ok(EditApplied {
+                line_count,
+                revision: doc.revision(),
+            })
+        })
     }
 
     pub fn lines_containing(

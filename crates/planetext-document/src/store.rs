@@ -315,7 +315,7 @@ mod tests {
         let (mut doc, path) = disk_doc("no-op", &["a", "b"]);
         doc.replace(1, 1, Vec::new(), 1, "before", "after").unwrap();
 
-        assert!(doc.log.transactions[0].edits[0].removed.lines == 0);
+        assert!(doc.log.transactions[0].edits()[0].removed.lines == 0);
         assert_eq!(all(&mut doc), vec!["a", "b"]);
         let undone = doc.undo().unwrap().unwrap();
         assert_eq!(undone.state, "before");
@@ -522,14 +522,11 @@ mod tests {
         doc.replace(0, 1, vec!["first".into()], 1, "", "").unwrap();
         let mut snapshot = doc.search_snapshot().unwrap();
         doc.replace(0, 1, vec!["second".into()], 2, "", "").unwrap();
-        let pattern = regex::Regex::new("first").unwrap();
+        let query = crate::search::CompiledQuery::compile("first", false, true, '$').unwrap();
         let found = snapshot
             .search_candidates(
                 SearchSpec {
-                    pattern: &pattern,
-                    literal: Some("first"),
-                    case_sensitive: true,
-                    marker: '$',
+                    query: &query,
                     from: 0,
                     end: 2,
                     after_col: None,
@@ -546,14 +543,11 @@ mod tests {
     fn native_search_stops_when_cancelled() {
         let (doc, path) = disk_doc("search-cancel", &["a", "b"]);
         let mut snapshot = doc.search_snapshot().unwrap();
-        let pattern = regex::Regex::new("missing").unwrap();
+        let query = crate::search::CompiledQuery::compile("missing", false, true, '$').unwrap();
         let found = snapshot
             .search_candidates(
                 SearchSpec {
-                    pattern: &pattern,
-                    literal: Some("missing"),
-                    case_sensitive: true,
-                    marker: '$',
+                    query: &query,
                     from: 0,
                     end: 2,
                     after_col: None,
@@ -570,14 +564,11 @@ mod tests {
     fn literal_search_candidates_resume_after_a_character_column() {
         let (doc, path) = disk_doc("literal-search-resume", &["前needle後needle", "needle"]);
         let mut snapshot = doc.search_snapshot().unwrap();
-        let pattern = regex::Regex::new("needle").unwrap();
+        let query = crate::search::CompiledQuery::compile("needle", false, true, '$').unwrap();
         let found = snapshot
             .search_candidates(
                 SearchSpec {
-                    pattern: &pattern,
-                    literal: Some("needle"),
-                    case_sensitive: true,
-                    marker: '$',
+                    query: &query,
                     from: 0,
                     end: 2,
                     after_col: Some(8),
@@ -1102,15 +1093,12 @@ mod tests {
             .unwrap();
         println!("ASCII fold full scan: {:?}", start.elapsed());
         let mut snapshot = doc.search_snapshot().unwrap();
-        let pattern = regex::Regex::new(missing).unwrap();
+        let query = crate::search::CompiledQuery::compile(missing, false, true, '$').unwrap();
         let start = std::time::Instant::now();
         let searched = snapshot
             .search_candidates(
                 SearchSpec {
-                    pattern: &pattern,
-                    literal: Some(missing),
-                    case_sensitive: true,
-                    marker: '$',
+                    query: &query,
                     from: 0,
                     end: doc.line_count(),
                     after_col: None,
@@ -1512,6 +1500,41 @@ mod tests {
             lines,
             vec!["new0", "line0", "line1", "replaced_line2", "line3"]
         );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn bulk_replace_all_is_evaluated_on_demand_and_undoable() {
+        let (mut doc, path) = disk_doc("bulk-test", &["foo 123", "bar 456", "foo 789"]);
+        let base_rev = doc.revision();
+        let pattern = regex::RegexBuilder::new("foo")
+            .case_insensitive(true)
+            .build()
+            .unwrap();
+        let op = crate::operation_log::BulkOperation::ReplaceAll {
+            from_line: 0,
+            to_line: 3,
+            query: "foo".to_string(),
+            replacement: "baz".to_string(),
+            case_sensitive: false,
+            pattern: std::sync::Arc::new(pattern),
+        };
+        doc.apply_bulk_operation(base_rev, 1, op, "", "").unwrap();
+
+        // オンデマンドに評価されて置換結果が返ること
+        let lines = doc.read(0, 3).unwrap();
+        assert_eq!(lines, vec!["baz 123", "bar 456", "baz 789"]);
+
+        // Undo すると瞬時に元に戻ること
+        doc.undo().unwrap().unwrap();
+        let restored = doc.read(0, 3).unwrap();
+        assert_eq!(restored, vec!["foo 123", "bar 456", "foo 789"]);
+
+        // Redo すると再度適用されること
+        doc.redo().unwrap().unwrap();
+        let reapplied = doc.read(0, 3).unwrap();
+        assert_eq!(reapplied, vec!["baz 123", "bar 456", "baz 789"]);
+
         std::fs::remove_file(path).ok();
     }
 }
