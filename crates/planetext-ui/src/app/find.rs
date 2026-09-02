@@ -142,9 +142,6 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
                             }
                             if ev.key() == "Enter" && !ev.is_composing() {
                                 ev.prevent_default();
-                                if super::sync::is_searching(shell, pane.editor_pane()) {
-                                    return;
-                                }
                                 let shell = shell;
                                 let query = query.get_untracked();
                                 let options = options();
@@ -216,9 +213,6 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
                         class="find-icon-btn"
                         title="前を検索 (Shift+Enter)"
                         on:click=move |_| {
-                            if super::sync::is_searching(shell, pane.editor_pane()) {
-                                return;
-                            }
                             let shell = shell;
                             let query = query.get_untracked();
                             let options = options();
@@ -236,9 +230,6 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
                         class="find-icon-btn"
                         title="次を検索 (Enter)"
                         on:click=move |_| {
-                            if super::sync::is_searching(shell, pane.editor_pane()) {
-                                return;
-                            }
                             let shell = shell;
                             let query = query.get_untracked();
                             let options = options();
@@ -280,9 +271,6 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
                                 }
                                 if ev.key() == "Enter" && !ev.is_composing() {
                                     ev.prevent_default();
-                                    if super::sync::is_searching(shell, pane.editor_pane()) {
-                                        return;
-                                    }
                                     let query = query.get_untracked();
                                     let replacement = replacement.get_untracked();
                                     let options = options();
@@ -301,9 +289,6 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
                             class="find-icon-btn"
                             title="置換して次へ"
                             on:click=move |_| {
-                                if super::sync::is_searching(shell, pane.editor_pane()) {
-                                    return;
-                                }
                                 let query = query.get_untracked();
                                 let replacement = replacement.get_untracked();
                                 let options = options();

@@ -165,15 +165,6 @@ pub(super) fn draft(tab: Tab) {
     enqueue(tab, Task::Draft);
 }
 
-/// 指定ペインで検索が実行中かどうかを返す。
-pub(super) fn is_searching(shell: Shell, pane: usize) -> bool {
-    let Some(tab) = shell.tab_of(pane) else {
-        return false;
-    };
-    let id = tab.id.get_untracked();
-    SEARCH_BUSY.with(|busy| busy.borrow().contains(&id))
-}
-
 /// 次を検索。手元に届いている行にあればその場で即座にジャンプ、そうでなければ本体の走査で。
 /// すでに検索が走っている間は重複実行をブロックし、負荷を抑制する。
 pub(super) fn find(
@@ -227,25 +218,15 @@ pub(super) fn find_previous(
 fn cancel_running_search(tab: Tab) {
     let id = tab.id.get_untracked();
     SEARCH_BUSY.with(|busy| busy.borrow_mut().retain(|other| *other != id));
-    if !BUSY.with(|busy| busy.borrow().contains(&id)) {
-        return;
-    }
-    let task = QUEUES.with(|queues| {
+    SEARCH_BUSY.with(|busy| busy.borrow_mut().retain(|other| *other != id));
+    QUEUES.with(|queues| {
         let mut queues = queues.borrow_mut();
-        let queue = queues.entry(id).or_default();
-        if let Some(pos) = queue
-            .iter()
-            .position(|(_, task)| matches!(task, Task::Find { .. }))
-        {
-            queue.remove(pos).map(|(_, task)| task)
-        } else {
-            None
+        if let Some(queue) = queues.get_mut(&id) {
+            queue.retain(|(_, task)| !matches!(task, Task::Find { .. }));
         }
     });
-    if let Some(Task::Find { .. }) = task {
-        if let Some(handle) = tab.doc.get_untracked() {
-            spawn_local(async move { framework::cancel_search(handle).await });
-        }
+    if let Some(handle) = tab.doc.get_untracked() {
+        spawn_local(async move { framework::cancel_search(handle).await });
     }
 }
 

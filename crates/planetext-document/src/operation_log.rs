@@ -182,15 +182,7 @@ impl OperationLog {
         });
         self.head = self.transactions.len();
 
-        if self.transactions.len() > HISTORY_LIMIT {
-            self.transactions.remove(0);
-            self.head = self.head.saturating_sub(1);
-            self.retained_base = self
-                .transactions
-                .first()
-                .map_or(self.next_revision, |tx| tx.base_revision);
-            self.base_revision = self.retained_base;
-        }
+        self.prune_history();
     }
 
     pub(crate) fn append_bulk_transaction(
@@ -213,15 +205,29 @@ impl OperationLog {
             after: after.to_string(),
         });
         self.head = self.transactions.len();
+        self.prune_history();
+    }
 
+    /// 履歴が上限を超えた場合、保存済み（ディスク反映済み）トランザクションのみを先頭から切り詰める。
+    /// 未保存ログは下書き永続化・クラッシュ復元に必要なため絶対に破棄しない。
+    fn prune_history(&mut self) {
         if self.transactions.len() > HISTORY_LIMIT {
-            self.transactions.remove(0);
-            self.head = self.head.saturating_sub(1);
-            self.retained_base = self
-                .transactions
-                .first()
-                .map_or(self.next_revision, |tx| tx.base_revision);
-            self.base_revision = self.retained_base;
+            let can_prune = if let Some(saved) = self.saved_revision {
+                self.transactions
+                    .first()
+                    .is_some_and(|tx| tx.revision <= saved)
+            } else {
+                false
+            };
+            if can_prune {
+                self.transactions.remove(0);
+                self.head = self.head.saturating_sub(1);
+                self.retained_base = self
+                    .transactions
+                    .first()
+                    .map_or(self.next_revision, |tx| tx.base_revision);
+                self.base_revision = self.retained_base;
+            }
         }
     }
 
