@@ -331,6 +331,15 @@ impl Document {
         Some((line, col))
     }
 
+    /// 指定バイト位置が含まれる行（またはその手前の安全な STRIDE 境界行）を高速に求める。
+    pub(crate) fn line_before_byte_offset(&self, target_byte: usize) -> usize {
+        if let Some(source) = &self.source {
+            source.line_before_byte_offset(target_byte).min(self.count)
+        } else {
+            0
+        }
+    }
+
     /// スナップショット時点で得られた検索結果を、現在のリビジョンにおける座標へ写像する。
     /// 編集と重なったヒットは無効化（除外）する。
     pub(crate) fn map_search_hits(

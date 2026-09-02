@@ -1616,4 +1616,38 @@ mod tests {
 
         std::fs::remove_file(path).ok();
     }
+
+    #[test]
+    fn search_candidates_skips_distant_empty_blocks_via_index() {
+        use crate::search::{CompiledQuery, SearchSpec};
+
+        // 512KB を超える複数ブロックのファイルを作成し、遠いブロックのみにターゲットを配置
+        let mut lines = Vec::new();
+        // 1行約100バイト * 15,000行 = 約1.5MB（約3ブロック分）
+        let padding = "x".repeat(95);
+        for _ in 0..15_000 {
+            lines.push(padding.clone());
+        }
+        lines.push("hello target_needle world".to_string());
+        lines.push(padding);
+
+        let lines_ref: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        let (mut doc, path) = disk_doc("distant-block-test", &lines_ref);
+        doc.enable_search_index();
+
+        let compiled = CompiledQuery::compile("target_needle", false, true, '\0').unwrap();
+        let spec = SearchSpec {
+            query: &compiled,
+            from: 0,
+            end: doc.line_count(),
+            after_col: None,
+        };
+        let candidates = doc.search_candidates(spec, &|| false).unwrap();
+        assert!(!candidates.cancelled);
+        assert_eq!(candidates.hits.len(), 1);
+        assert_eq!(candidates.hits[0].line, 15_000);
+        assert_eq!(candidates.hits[0].start, 6);
+
+        std::fs::remove_file(path).ok();
+    }
 }

@@ -29,6 +29,44 @@ impl Bigram {
             .filter_map(|w| Self::new(w[0], w[1], encoding))
             .collect()
     }
+
+    pub(crate) fn variants_from_query(
+        query: &str,
+        case_sensitive: bool,
+        encoding: FileEncoding,
+    ) -> Vec<Vec<Self>> {
+        let chars: Vec<_> = query.chars().collect();
+        chars
+            .windows(2)
+            .filter_map(|w| {
+                if case_sensitive {
+                    Self::new(w[0], w[1], encoding).map(|b| vec![b])
+                } else {
+                    let mut variants = Vec::new();
+                    let first_opts: Vec<char> = if w[0].is_alphabetic() {
+                        w[0].to_lowercase().chain(w[0].to_uppercase()).collect()
+                    } else {
+                        vec![w[0]]
+                    };
+                    let second_opts: Vec<char> = if w[1].is_alphabetic() {
+                        w[1].to_lowercase().chain(w[1].to_uppercase()).collect()
+                    } else {
+                        vec![w[1]]
+                    };
+                    for &c1 in &first_opts {
+                        for &c2 in &second_opts {
+                            if let Some(b) = Self::new(c1, c2, encoding) {
+                                if !variants.contains(&b) {
+                                    variants.push(b);
+                                }
+                            }
+                        }
+                    }
+                    (!variants.is_empty()).then_some(variants)
+                }
+            })
+            .collect()
+    }
 }
 
 /// 編集によって生じた bi-gram の正負のネット件数差分キャッシュ。
@@ -282,6 +320,56 @@ impl SearchIndex {
         let encoding = state.encoding;
         let block = byte_pos / INDEX_BLOCK_BYTES;
         state.deltas.splice(before, after, encoding, block);
+    }
+
+    /// `from_byte` 以降で、クエリの候補が存在しうる論理ブロックの開始バイト位置を返す。
+    /// 現在のブロックに候補がなければ、後続ブロックの索引を調べて最初に候補が存在しうるブロックへジャンプする。
+    /// - 未インデックスのブロック: 候補ありとみなしてそのブロックの開始位置を返す（見逃し防止）
+    /// - インデックス済みのブロック: クエリの全 bi-gram window のうち1つでもカウントが0ならスキップ
+    pub(crate) fn next_candidate_byte(
+        &self,
+        from_byte: usize,
+        query: &str,
+        case_sensitive: bool,
+    ) -> usize {
+        let state = self.state.read().unwrap();
+        let total_bytes = state.total_bytes;
+        let total_blocks = state.total_blocks;
+        if total_blocks == 0 || from_byte >= total_bytes {
+            return from_byte;
+        }
+        let windows = Bigram::variants_from_query(query, case_sensitive, state.encoding);
+        if windows.is_empty() {
+            return from_byte;
+        }
+
+        let start_block = from_byte / INDEX_BLOCK_BYTES;
+        for block in start_block..total_blocks {
+            if let Some(counts) = state.block_indices.get(&block) {
+                let mut has_all = true;
+                for variants in &windows {
+                    let mut sum_count = 0i64;
+                    for bg in variants {
+                        let base = counts.get(bg).copied().unwrap_or(0) as i64;
+                        let delta = state.deltas.delta(bg, block);
+                        sum_count += (base + delta).max(0);
+                    }
+                    if sum_count == 0 {
+                        has_all = false;
+                        break;
+                    }
+                }
+                if has_all {
+                    let block_start = block * INDEX_BLOCK_BYTES;
+                    return from_byte.max(block_start);
+                }
+            } else {
+                // 未インデックスのブロックは候補ありとみなす（出来たところから使う）
+                let block_start = block * INDEX_BLOCK_BYTES;
+                return from_byte.max(block_start);
+            }
+        }
+        total_bytes
     }
 }
 

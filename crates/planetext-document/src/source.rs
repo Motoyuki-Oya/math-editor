@@ -624,6 +624,20 @@ impl Source {
             .collect())
     }
 
+    /// 指定バイト位置が含まれる行（またはその手前の STRIDE 境界行）を高速に求める。
+    /// 戻り値の行頭バイト位置は必ず `target_byte` 以下となるため、検索時の安全なジャンプ先として使える。
+    pub(crate) fn line_before_byte_offset(&self, target_byte: usize) -> usize {
+        let index = self.index.state.lock().unwrap();
+        if index.marks.is_empty() {
+            return 0;
+        }
+        let before = index
+            .marks
+            .partition_point(|offset| *offset <= target_byte as u64)
+            .saturating_sub(1);
+        before * STRIDE
+    }
+
     fn indexed_start(
         &mut self,
         from: usize,
