@@ -124,6 +124,18 @@
   outline-offset: 1px;
 }
 
+.status-clickable:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  border-color: transparent;
+}
+
+.status-clickable:disabled:hover {
+  background: none;
+  border-color: transparent;
+  color: inherit;
+}
+
 .status-message {
   margin-left: auto;
   color: var(--fg);

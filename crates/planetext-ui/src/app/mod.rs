@@ -349,13 +349,32 @@ pub fn App() -> impl IntoView {
                     <button
                         type="button"
                         class="status-clickable"
-                        title="入力モード（Insertキーで切替）"
+                        prop:disabled=move || {
+                            let _ = shell.stats.get();
+                            !crate::settings::current().enable_overwrite_mode && !editor::is_focused_overwrite_mode()
+                        }
+                        title=move || {
+                            let _ = shell.stats.get();
+                            let is_overwrite = editor::is_focused_overwrite_mode();
+                            let enabled = crate::settings::current().enable_overwrite_mode;
+                            if !enabled && !is_overwrite {
+                                "入力モード: 挿入 (上書きモードは設定で無効化されています)".to_string()
+                            } else if is_overwrite {
+                                "入力モード: 上書き (クリックまたはInsertキーで挿入に切替)".to_string()
+                            } else {
+                                "入力モード: 挿入 (クリックまたはInsertキーで上書きに切替)".to_string()
+                            }
+                        }
                         aria-label=move || {
                             let _ = shell.stats.get();
-                            if editor::is_focused_overwrite_mode() {
-                                "入力モード: 上書き (Insertキーで挿入に切替)"
+                            let is_overwrite = editor::is_focused_overwrite_mode();
+                            let enabled = crate::settings::current().enable_overwrite_mode;
+                            if !enabled && !is_overwrite {
+                                "入力モード: 挿入 (上書きモードは設定で無効化されています)"
+                            } else if is_overwrite {
+                                "入力モード: 上書き (クリックまたはInsertキーで挿入に切替)"
                             } else {
-                                "入力モード: 挿入 (Insertキーで上書きに切替)"
+                                "入力モード: 挿入 (クリックまたはInsertキーで上書きに切替)"
                             }
                         }
                         on:click=move |_| {

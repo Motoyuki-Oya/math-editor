@@ -990,9 +990,8 @@ pub fn character_before(row: &[Node], index: usize) -> usize {
     if target == 0 {
         return 0;
     }
-    let min_start = target.saturating_sub(32);
     let mut char_start = target;
-    while char_start > min_start && as_char(&row[char_start - 1]).is_some() {
+    while char_start > 0 && as_char(&row[char_start - 1]).is_some() {
         char_start -= 1;
     }
     if char_start == target {
@@ -1011,9 +1010,8 @@ pub fn character_after(row: &[Node], index: usize) -> usize {
     if index >= row.len() {
         return row.len();
     }
-    let max_end = (index + 32).min(row.len());
     let mut char_end = index;
-    while char_end < max_end && as_char(&row[char_end]).is_some() {
+    while char_end < row.len() && as_char(&row[char_end]).is_some() {
         char_end += 1;
     }
     if char_end == index {
