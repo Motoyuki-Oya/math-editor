@@ -12,10 +12,6 @@ use crate::framework::{self, gui, GuiFramework};
 
 const UNTITLED: &str = "無題";
 
-/// これより大きい文書は下書き（自動控え）を書かない。下書きは全文を
-/// 書き出すので、巨大なファイルでは一時停止のたびに数百 MB を書くことになる。
-const LARGE_BYTES: usize = 5_000_000;
-
 async fn create_document_from_draft(contents: String) -> Result<framework::OpenedDocument, String> {
     let normalized = contents.replace("\r\n", "\n").replace('\r', "\n");
     let lines: Vec<String> = normalized.split('\n').map(String::from).collect();
@@ -68,8 +64,6 @@ pub(super) struct Tab {
     pub(super) untitled_num: RwSignal<Option<usize>>,
     pub(super) path: RwSignal<Option<String>>,
     pub(super) dirty: RwSignal<bool>,
-    /// 下書きを書くには大きすぎる文書。
-    pub(super) large: RwSignal<bool>,
     pub(super) bytes: RwSignal<usize>,
     /// このタブの文書の本体を指す、ネイティブ側ストアの取っ手。
     /// 新しいタブでは作成が非同期に届くまで `None`。
@@ -86,7 +80,6 @@ impl Tab {
             untitled_num: RwSignal::new(Some(1)),
             path: RwSignal::new(None),
             dirty: RwSignal::new(false),
-            large: RwSignal::new(false),
             bytes: RwSignal::new(0),
             doc: RwSignal::new(None),
             encoding: RwSignal::new("UTF-8".into()),
@@ -634,7 +627,6 @@ impl Shell {
                 tab.id.set(next_id());
                 tab.path.set(None);
                 tab.syntax_override.set(None);
-                tab.large.set(false);
                 tab.assign_document();
                 editor::set_doc_path(tab.id.get_untracked(), None);
                 editor::bind_doc(pane.editor_pane(), tab.id.get_untracked());
@@ -802,7 +794,6 @@ impl Shell {
             untitled_num: src_tab.untitled_num,
             path: src_tab.path,
             dirty: src_tab.dirty,
-            large: src_tab.large,
             bytes: src_tab.bytes,
             doc: src_tab.doc,
             encoding: src_tab.encoding,
@@ -1028,7 +1019,6 @@ impl Shell {
                     // 開いた文書の取っ手に替える。
                     tab.release_document();
                     tab.doc.set(Some(doc.handle));
-                    tab.large.set(doc.bytes > LARGE_BYTES);
                     tab.bytes.set(doc.bytes);
                     tab.encoding.set(doc.encoding);
                     tab.line_ending.set(doc.line_ending);
@@ -1271,7 +1261,6 @@ impl Shell {
                                                 framework::close_document(doc.handle).await;
                                             } else {
                                                 tab_copy.doc.set(Some(doc.handle));
-                                                tab_copy.large.set(doc.bytes > LARGE_BYTES);
                                                 tab_copy.bytes.set(doc.bytes);
                                                 tab_copy.encoding.set(doc.encoding);
                                                 tab_copy.line_ending.set(doc.line_ending);
@@ -1331,7 +1320,6 @@ impl Shell {
                                         framework::close_document(doc.handle).await;
                                     } else {
                                         tab_copy.doc.set(Some(doc.handle));
-                                        tab_copy.large.set(doc.bytes > LARGE_BYTES);
                                         tab_copy.bytes.set(doc.bytes);
                                         tab_copy.encoding.set(doc.encoding);
                                         tab_copy.line_ending.set(doc.line_ending);
