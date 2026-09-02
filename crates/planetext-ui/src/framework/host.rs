@@ -140,6 +140,7 @@ pub struct OpenedDocument {
     #[serde(default = "default_line_ending")]
     pub line_ending: String,
     #[serde(default)]
+    #[allow(dead_code)]
     pub revision: u64,
 }
 
@@ -157,6 +158,7 @@ pub struct ReopenedDocument {
     pub encoding: String,
     pub line_ending: String,
     #[serde(default)]
+    #[allow(dead_code)]
     pub revision: u64,
 }
 

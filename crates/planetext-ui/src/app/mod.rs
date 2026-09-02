@@ -397,7 +397,11 @@ pub fn App() -> impl IntoView {
                     </button>
                     <span>{move || {
                         let stats = shell.stats.get();
-                        format!("[ {} | {} ]", stats.caret_line, stats.caret_col)
+                        if stats.counting && stats.pending_tail {
+                            format!("[ 末尾 | {} ]", stats.caret_col)
+                        } else {
+                            format!("[ {} | {} ]", stats.caret_line, stats.caret_col)
+                        }
                     }}</span>
                     <span
                         class="status-clickable"

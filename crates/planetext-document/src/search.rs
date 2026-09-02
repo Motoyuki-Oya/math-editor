@@ -645,6 +645,7 @@ impl Document {
     }
 
     pub(crate) fn estimate_matches(&mut self, pattern: &regex::Regex) -> Result<usize, String> {
+        self.confirm_scan_if_done();
         if let Some(index) = &self.search_index {
             let query = pattern.as_str();
             let is_literal = !query.contains([
@@ -656,6 +657,20 @@ impl Document {
                 }
             }
         }
+
+        let effective_count =
+            if let (Some(pending), Some(source)) = (self.pending_source, &self.source) {
+                let pending_from = pending.from as u64;
+                if pending_from > source.content_offset && source.bytes > source.content_offset {
+                    let scanned_bytes = (pending_from - source.content_offset) as u128;
+                    let total_bytes = (source.bytes - source.content_offset) as u128;
+                    ((self.count as u128 * total_bytes) / scanned_bytes.max(1)) as usize
+                } else {
+                    self.count
+                }
+            } else {
+                self.count
+            };
 
         const WINDOWS: usize = 64;
         const LINES_PER_WINDOW: usize = 2_000;
@@ -675,7 +690,10 @@ impl Document {
             return Ok(0);
         }
         // 切り上げ丸めは全行ヒット時に count+1 を返してしまうので、切り捨てで推定する。
-        Ok(((hits as u128 * self.count as u128 / sampled as u128) as usize).min(self.count))
+        Ok(
+            ((hits as u128 * effective_count as u128 / sampled as u128) as usize)
+                .min(effective_count),
+        )
     }
 
     /// `from..=to` の行のうち `needle` を含むもの。

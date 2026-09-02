@@ -1301,8 +1301,7 @@ impl Shell {
                                         tab_copy.encoding.set(doc.encoding);
                                         tab_copy.line_ending.set(doc.line_ending);
                                         editor::set_doc_file_size(doc_id, Some(doc.bytes));
-                                        let doc_model = editor::get_or_create_doc(doc_id);
-                                        doc_model.borrow_mut().load_pending(doc.line_count);
+                                        editor::load_pending_doc(doc_id, doc.line_count);
                                         editor::redraw_doc(doc_id, None);
                                         let handle = doc.handle;
                                         spawn_local(async move {

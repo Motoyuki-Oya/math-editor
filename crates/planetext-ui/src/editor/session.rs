@@ -54,6 +54,10 @@ pub struct Session {
 }
 
 impl Session {
+    pub fn is_counting(&self) -> bool {
+        self.counting || self.document.borrow().is_counting()
+    }
+
     pub fn primary(&self) -> Sel {
         self.cursors.last().expect("at least one cursor").sel
     }
@@ -197,6 +201,7 @@ pub fn bind_doc(pane: usize, doc_id: usize) {
         return;
     };
     let doc = get_or_create_doc(doc_id);
+    let is_counting = doc.borrow().is_counting();
     {
         let mut borrowed = session.borrow_mut();
         borrowed.doc_id = doc_id;
@@ -204,6 +209,8 @@ pub fn bind_doc(pane: usize, doc_id: usize) {
         borrowed.cursors = vec![UnifiedCursor::caret(Pos::default())];
         borrowed.preedit.clear();
         borrowed.search_from = None;
+        borrowed.counting = is_counting;
+        borrowed.pending_tail = None;
     }
     redraw(&session);
 }
@@ -426,7 +433,7 @@ pub(super) fn request_tail(pane: usize) {
 
 pub(super) fn tail_locked(session: &Rc<RefCell<Session>>) -> bool {
     let borrowed = session.borrow();
-    borrowed.counting
+    borrowed.is_counting()
         && borrowed.pending_tail.as_ref().is_some_and(|(from, lines)| {
             let line = borrowed.primary().head.line;
             line >= *from && line < *from + lines.len()
@@ -538,7 +545,7 @@ fn redraw_preview_overlay(session: &Rc<RefCell<Session>>) {
             focused: session.focused,
             linked: session.linked,
             overwrite: session.overwrite_mode,
-            show_numbers: !session.counting,
+            show_numbers: !session.is_counting(),
             language: lang.as_ref(),
             ghost: session.ghost.as_ref(),
         },
@@ -742,7 +749,7 @@ pub fn redraw(session: &Rc<RefCell<Session>>) {
                 focused: session.focused,
                 linked: session.linked,
                 overwrite: session.overwrite_mode,
-                show_numbers: !session.counting,
+                show_numbers: !session.is_counting(),
                 language: lang.as_ref(),
                 ghost: session.ghost.as_ref(),
             },
@@ -797,7 +804,7 @@ pub fn scrolled(session: &Rc<RefCell<Session>>) {
                 focused: session.focused,
                 linked: session.linked,
                 overwrite: session.overwrite_mode,
-                show_numbers: !session.counting,
+                show_numbers: !session.is_counting(),
                 language: lang.as_ref(),
                 ghost: session.ghost.as_ref(),
             },
@@ -938,6 +945,22 @@ pub fn load_pending(line_count: usize) {
         borrowed.pending_tail = None;
     }
     changed(&session);
+}
+
+/// 指定ドキュメントを行数未確定の保留状態にし、現在バインドされているセッションがあれば同期する。
+pub fn load_pending_doc(doc_id: usize, line_count: usize) {
+    let doc = get_or_create_doc(doc_id);
+    doc.borrow_mut().load_pending(line_count);
+    PANES.with(|panes| {
+        for session in panes.borrow().iter() {
+            let mut borrowed = session.borrow_mut();
+            if borrowed.doc_id == doc_id {
+                borrowed.counting = true;
+                borrowed.jump_end = None;
+                borrowed.pending_tail = None;
+            }
+        }
+    });
 }
 
 /// 行数未確定でも、EOFから届いた末尾ウィンドウを仮の末尾へ表示する。
@@ -1141,6 +1164,8 @@ pub struct DocStats {
     pub total_lines: usize,
     /// バックグラウンドで行数走査中かどうか。
     pub counting: bool,
+    /// 行数未確定の末尾表示中かどうか。
+    pub pending_tail: bool,
     /// キャレットの1-based行番号。
     pub caret_line: usize,
     /// キャレットの1-based列番号。
@@ -1158,6 +1183,7 @@ impl Default for DocStats {
             file_bytes: None,
             total_lines: 1,
             counting: false,
+            pending_tail: false,
             caret_line: 1,
             caret_col: 1,
             caret_prefix: Some((0, 0)),
@@ -1186,7 +1212,7 @@ pub fn stats() -> DocStats {
     let doc = borrowed.document.borrow();
     let text = doc.text();
     let line_count = text.line_count();
-    let is_counting = borrowed.counting;
+    let is_counting = borrowed.is_counting();
     let is_large =
         doc.file_bytes.is_some_and(|s| s > MAX_CARET_STATS_BYTES) || text.absent_lines() > 0;
 
@@ -1258,11 +1284,14 @@ pub fn stats() -> DocStats {
         None
     };
 
+    let pending_tail = borrowed.pending_tail.is_some();
+
     DocStats {
         total_chars,
         file_bytes: doc.file_bytes,
         total_lines: if is_counting { 0 } else { line_count },
         counting: is_counting,
+        pending_tail,
         caret_line,
         caret_col,
         caret_prefix,
@@ -1346,4 +1375,52 @@ pub fn url_at_caret(pane: usize) -> Option<UrlTooltip> {
         left: rect.left,
         top: rect.top,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 【回帰防止テスト】
+    /// 巨大ファイルを行数確定前に開いて Ctrl+End を押した際、EOF基準で取得した末尾行が
+    /// 一旦仮の位置に表示され、その後のバックグラウンド走査完了（set_line_count）で
+    /// 真の絶対行番号へ正しく付け替えられ、キャレットも追従することを保証する。
+    #[test]
+    fn apply_line_count_correctly_remaps_tail_lines_and_moves_caret() {
+        let mut editor = Editor::default();
+        // 1. 仮の20,000行で保留状態
+        editor.load_pending(20_000);
+
+        // 2. 末尾2行を仮の末尾（19998..20000）に表示
+        let tail_lines = vec!["tail 0".to_string(), "tail 1".to_string()];
+        let from = 20_000 - 2;
+        editor.forget_range(from..20_000);
+        editor.feed(
+            from,
+            tail_lines
+                .iter()
+                .map(|line| document::read_line(line))
+                .collect(),
+        );
+        editor.set_caret(Pos::new(19_999, 6));
+
+        assert_eq!(editor.text().line_count(), 20_000);
+        assert_eq!(editor.text().raw_line(19_999), Some("tail 1"));
+
+        // 3. バックグラウンド走査完了で 16,000,000 行へ付け替え
+        let pending_tail = Some((from, tail_lines));
+        let final_count = 16_000_000;
+        apply_line_count(&mut editor, pending_tail, None, final_count);
+
+        // 確定後の検証:
+        // - 全体行数が 16,000,000 行になっていること
+        assert_eq!(editor.text().line_count(), 16_000_000);
+        // - 仮配置されていた位置（19999）は未着（Line::Absent）に戻っていること
+        assert!(editor.text().is_absent(19_999));
+        // - 真の末尾（15999999, 15999998）に正しく末尾行が移動・配置されていること
+        assert_eq!(editor.text().raw_line(15_999_999), Some("tail 1"));
+        assert_eq!(editor.text().raw_line(15_999_998), Some("tail 0"));
+        // - キャレットも真の末尾行（15999999）へ移動していること
+        assert_eq!(editor.primary().head.line, 15_999_999);
+    }
 }

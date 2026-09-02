@@ -496,6 +496,86 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
+    /// 【回帰防止テスト】
+    /// バックグラウンド走査中の巨大ファイル（pending_source が残る状態）であっても、
+    /// estimate_matches は最初のチャンク行数で頭打ちにならず、ファイル全体のサイズに
+    /// 正しく外挿された推定件数を返すことを保証する。
+    /// また、走査が完了した後は自動的に confirm_scan_if_done が走り、確定件数が返ることを保証する。
+    #[test]
+    fn estimate_matches_extrapolates_pending_source_and_confirms_when_done() {
+        use crate::document::PendingSource;
+        use crate::edit_buffers::EditBuffers;
+        use crate::operation_log::OperationLog;
+        use crate::piece_tree::{Piece, PieceTree};
+
+        let lines: Vec<String> = (0..100_000)
+            .map(|i| format!("line {i} with keyword target"))
+            .collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (mut doc, path) = disk_doc("estimate-pending-extrapolate", &refs);
+        let pattern = regex::Regex::new("target").unwrap();
+
+        let initial_lines = 1_000;
+        let initial_bytes = doc.pieces.byte_offset(initial_lines);
+        let total_bytes = doc.pieces.byte_offset(100_000);
+
+        let mut simulated_doc = Document {
+            pieces: PieceTree::new(vec![
+                Piece::Source {
+                    from: 0,
+                    len: initial_bytes,
+                    newlines: initial_lines - 1,
+                    starts_newline: false,
+                    ends_newline: true,
+                },
+                Piece::Source {
+                    from: initial_bytes,
+                    len: total_bytes - initial_bytes,
+                    newlines: 0,
+                    starts_newline: true,
+                    ends_newline: false,
+                },
+            ]),
+            buffers: EditBuffers::default(),
+            count: initial_lines,
+            encoding: doc.encoding,
+            line_ending: doc.line_ending,
+            source: doc.source.take(),
+            log: OperationLog::default(),
+            pending_source: Some(PendingSource {
+                from: initial_bytes,
+                len: total_bytes - initial_bytes,
+                prefix_newlines: initial_lines - 1,
+            }),
+            search_index: None,
+            background_index: None,
+        };
+
+        // 未確定状態（count = 1,000）でも、ファイル全体規模（約100,000件）に外挿されること
+        let estimated = simulated_doc.estimate_matches(&pattern).unwrap();
+        assert!(
+            (90_000..=110_000).contains(&estimated),
+            "未確定走査中でもファイル全体規模に外挿されること: expected ~100000, got {estimated}"
+        );
+
+        // 走査完了をシミュレート
+        if let Some(source) = &simulated_doc.source {
+            let mut state = source.index.state.lock().unwrap();
+            state.done = true;
+            state.lines = 100_000;
+        }
+
+        // 走査完了後は confirm_scan_if_done が自動で走り、count が 100,000 に確定すること
+        let final_estimated = simulated_doc.estimate_matches(&pattern).unwrap();
+        assert!(
+            (final_estimated as isize - 100_000).abs() <= 10,
+            "走査完了後の推定件数は約100,000件であること: got {final_estimated}"
+        );
+        assert_eq!(simulated_doc.count, 100_000);
+
+        std::fs::remove_file(path).ok();
+    }
+
     #[test]
     fn ascii_case_fold_finds_non_overlapping_matches() {
         assert_eq!(literal_positions(b"xxAbCaBC", b"abc", false), vec![2, 5]);

@@ -19,10 +19,10 @@ use crate::search_index::{BackgroundIndex, SearchIndex};
 use crate::source::{BackgroundScan, FileEncoding, LineEnding, ScanIndex, Source};
 
 #[derive(Clone, Copy)]
-struct PendingSource {
-    from: usize,
-    len: usize,
-    prefix_newlines: usize,
+pub(crate) struct PendingSource {
+    pub(crate) from: usize,
+    pub(crate) len: usize,
+    pub(crate) prefix_newlines: usize,
 }
 
 pub(crate) struct Document {
@@ -34,9 +34,9 @@ pub(crate) struct Document {
     pub(crate) log: OperationLog,
     pub(crate) encoding: FileEncoding,
     pub(crate) line_ending: LineEnding,
-    pending_source: Option<PendingSource>,
+    pub(crate) pending_source: Option<PendingSource>,
     pub(crate) search_index: Option<SearchIndex>,
-    background_index: Option<BackgroundIndex>,
+    pub(crate) background_index: Option<BackgroundIndex>,
 }
 
 /// 元に戻す・やり直すの結果: 復元すべき控えと、行が変わった範囲の始まり。
@@ -267,7 +267,7 @@ impl Document {
     /// 検索スレッドへ渡す読み取り専用の姿。ファイルカーソルは独立し、編集の
     /// ピースは開始時点の内容を複製するので、文書ロックを持たずに走査できる。
     pub(crate) fn search_snapshot(&self) -> Result<Document, String> {
-        Ok(Document {
+        let mut snapshot = Document {
             source: self.source.as_ref().map(Source::search_copy).transpose()?,
             pieces: PieceTree::new(self.pieces.pieces()),
             buffers: self.buffers.clone(),
@@ -278,7 +278,9 @@ impl Document {
             pending_source: self.pending_source,
             search_index: self.search_index.clone(),
             background_index: None,
-        })
+        };
+        snapshot.confirm_scan_if_done();
+        Ok(snapshot)
     }
 
     pub(crate) fn line_column_to_bytes(&mut self, line: usize, col: usize) -> usize {
@@ -400,6 +402,18 @@ impl Document {
         self.pieces
             .confirm_source_range(pending.from, pending.len, exact_newlines);
         self.count = self.pieces.line_count();
+    }
+
+    /// バックグラウンド走査が完了しているか確認し、完了していれば即座に行数を確定する。
+    pub(crate) fn confirm_scan_if_done(&mut self) {
+        let scan_done = self
+            .source
+            .as_ref()
+            .and_then(|source| source.index.status().ok().flatten())
+            .is_some();
+        if scan_done {
+            self.confirm_scan();
+        }
     }
 
     fn pending_source_index(&self) -> Option<usize> {

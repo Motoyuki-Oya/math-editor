@@ -43,9 +43,14 @@ pub struct Document {
     pub(crate) recorder: Recorder,
     pub(crate) modified_lines: std::collections::BTreeSet<usize>,
     pub(crate) file_bytes: Option<usize>,
+    pub(crate) counting: bool,
 }
 
 impl Document {
+    pub fn is_counting(&self) -> bool {
+        self.counting
+    }
+
     pub fn text(&self) -> &Text {
         &self.text
     }
@@ -100,14 +105,17 @@ impl Document {
         self.text = text;
         self.recorder = Recorder::default();
         self.clear_modified();
+        self.counting = false;
     }
 
     pub fn load_pending(&mut self, line_count: usize) {
         self.load(Text::pending(line_count));
+        self.counting = true;
     }
 
     pub fn resize_pending(&mut self, line_count: usize) {
         self.text.resize_pending(line_count);
+        self.counting = false;
     }
 
     pub fn resident_lines(&self) -> usize {
@@ -305,6 +313,21 @@ pub(crate) mod tests {
         editor.feed(0, vec![SourceLine::Plain("first".into())]);
         assert_eq!(editor.text().first_absent(0), None);
         assert_eq!(plain(&editor), "first\nlate");
+    }
+
+    /// 【回帰防止テスト】
+    /// Document::load_pending（バックグラウンド走査開始）で is_counting() が true になり、
+    /// 確定時（resize_pending や通常の load）で false になるライフサイクルを保証する。
+    #[test]
+    fn document_counting_lifecycle() {
+        let mut doc = Document::default();
+        assert!(!doc.is_counting());
+
+        doc.load_pending(20_000);
+        assert!(doc.is_counting(), "走査中は counting が true であること");
+
+        doc.resize_pending(16_000_000);
+        assert!(!doc.is_counting(), "確定後は counting が false であること");
     }
 
     /// 履歴の 1 ステップは文書の本体が持つ。ここではグループ番号の付き方
