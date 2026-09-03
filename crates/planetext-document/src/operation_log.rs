@@ -231,7 +231,9 @@ impl OperationLog {
         }
     }
 
-    /// 直前のトランザクションと同じ group であれば edits をマージする
+    /// 直前のトランザクションと同じ group であれば edits をマージする。
+    /// 公開済みの revision は一度発行したら不変であり、マージで上書きしない。
+    /// Undo のまとまりは group が担い、各編集は新しい revision で識別する。
     pub(crate) fn append_or_merge_transaction(
         &mut self,
         base_revision: u64,
@@ -247,9 +249,7 @@ impl OperationLog {
                 if let OperationKind::Splice(edits) = &mut last.kind {
                     edits.push(edit);
                     last.after = after.to_string();
-                    let new_rev = self.next_revision;
                     self.next_revision = self.next_revision.saturating_add(1);
-                    last.revision = new_rev;
                     return;
                 }
             }
@@ -299,21 +299,21 @@ impl OperationLog {
         self.buffers.read_lines(range)
     }
 
-    /// 指定された base_revision が有効（追跡範囲内）か検証する
+    /// 指定された base_revision が有効か検証する。
+    /// 現在の head から到達できる祖先（適用済み）の revision のみを受け付ける。
+    /// Undo 済みの Redo 枝にしか存在しない revision は、その座標系が現在と
+    /// 分岐しているため拒否する（現在座標へそのまま写像すると壊れるため）。
     pub(crate) fn validate_base(&self, revision: u64) -> Result<(), String> {
-        if revision == self.revision() {
+        if revision == self.base_revision {
             return Ok(());
         }
-        if revision < self.retained_base
-            || revision >= self.next_revision
-            || !self
-                .transactions
-                .iter()
-                .any(|tx| tx.revision == revision || tx.base_revision == revision)
+        if self.transactions[..self.head]
+            .iter()
+            .any(|tx| tx.revision == revision)
         {
-            return Err("revision is discarded, future, or unknown".into());
+            return Ok(());
         }
-        Ok(())
+        Err("revision is discarded, future, or on a discarded redo branch".into())
     }
 
     fn active_transactions_after(&self, revision: u64) -> impl Iterator<Item = &Transaction> {

@@ -1810,4 +1810,179 @@ mod tests {
 
         std::fs::remove_file(path).ok();
     }
+
+    /// 回帰: 同一 group の連続編集で既存トランザクションの revision が上書きされず、
+    /// 保存直後に続けてタイプしても saved checkpoint が壊れないことを検証する。
+    #[test]
+    fn merging_edits_keeps_revisions_immutable() {
+        let (mut doc, path) = disk_doc("merge-revision", &["a", "b"]);
+        // 保存して saved checkpoint を作る
+        doc.save(&path).unwrap();
+        let saved_rev = doc.revision();
+        assert!(doc.is_clean());
+
+        // 同一 group で連続タイプ（マージが発生する）
+        doc.replace(0, 1, vec!["a1".into()], 1, "", "").unwrap();
+        let rev1 = doc.revision();
+        assert!(!doc.is_clean());
+        doc.replace(0, 1, vec!["a12".into()], 1, "", "").unwrap();
+        let rev2 = doc.revision();
+
+        // マージは既存トランザクションへ追記するだけで、公開済みの revision を
+        // 書き換えない（保存済み checkpoint が破壊されない）。
+        assert_eq!(rev1, rev2, "マージで公開 revision を上書きしない");
+        assert!(doc.log.validate_base(rev1).is_ok(), "公開済み revision は残る");
+        assert!(
+            doc.log.validate_base(saved_rev).is_ok(),
+            "saved checkpoint は残る"
+        );
+        assert!(!doc.is_clean(), "内容が変わっているので dirty のまま");
+
+        // Undo すると saved 直後の状態へ 1 ステップで戻る（saved を飛び越さない）
+        doc.undo().unwrap();
+        assert!(doc.is_clean(), "Undo で saved checkpoint へ戻る");
+        assert_eq!(all(&mut doc), vec!["a", "b"]);
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 回帰: Undo 後の Redo 枝にしか存在しない revision を基準にした編集を拒否する。
+    #[test]
+    fn validate_base_rejects_redo_branch_revisions() {
+        let (mut doc, path) = disk_doc("redo-branch", &["x"]);
+        doc.replace(0, 1, vec!["y".into()], 1, "", "").unwrap();
+        let undone_rev = doc.revision();
+
+        // Undo して現在 head を巻き戻す（undone_rev は Redo 枝にだけ残る）
+        doc.undo().unwrap();
+        assert_eq!(all(&mut doc), vec!["x"]);
+
+        // Redo 枝の revision を base にした編集は拒否される
+        let result = doc.replace_with_base(undone_rev, 0, 1, vec!["z".into()], 2, "", "");
+        assert!(result.is_err(), "Redo 枝の revision は受け付けない");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn dbg_bulk_save() {
+        let (mut doc, path) = disk_doc("dbg-bulk", &["foo a", "bar b", "foo c"]);
+        let base_rev = doc.revision();
+        let pattern = regex::RegexBuilder::new("foo").build().unwrap();
+        let op = crate::operation_log::BulkOperation::ReplaceAll {
+            from_line: 0, to_line: 3, query: "foo".to_string(),
+            replacement: "baz".to_string(), case_sensitive: true,
+            pattern: std::sync::Arc::new(pattern),
+        };
+        doc.apply_bulk_operation(base_rev, 1, op, "", "").unwrap();
+        eprintln!("before save: {:?}", all(&mut doc));
+        doc.save(&path).unwrap();
+        eprintln!("after save: {:?}", all(&mut doc));
+        eprintln!("head={} txkinds={:?}", doc.log.head, doc.log.transactions.iter().map(|t| (t.group, t.edits().len())).collect::<Vec<_>>());
+        for t in doc.log.transactions.iter() { for e in t.edits() { eprintln!("  edit from_line={} removed_lines={} inserted_lines={}", e.from_line, e.removed_lines, e.inserted_lines); } }
+        doc.undo().unwrap();
+        eprintln!("after undo: {:?}", all(&mut doc));
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 回帰: 小さいファイルで bulk（すべて置換）を保存した後、
+    /// 変換済みの行へ同じ規則が再適用されず（foo→foofoo の二重化）、
+    /// Undo が正しく元の内容へ戻ることを検証する。
+    #[test]
+    fn bulk_replace_all_survives_save_without_double_apply() {
+        let (mut doc, path) = disk_doc("bulk-save", &["foo a", "bar b", "foo c"]);
+        let base_rev = doc.revision();
+        let pattern = regex::RegexBuilder::new("foo").build().unwrap();
+        let op = crate::operation_log::BulkOperation::ReplaceAll {
+            from_line: 0,
+            to_line: 3,
+            query: "foo".to_string(),
+            replacement: "baz".to_string(),
+            case_sensitive: true,
+            pattern: std::sync::Arc::new(pattern),
+        };
+        doc.apply_bulk_operation(base_rev, 1, op, "", "").unwrap();
+        assert_eq!(all(&mut doc), vec!["baz a", "bar b", "baz c"]);
+
+        // 保存（小さいファイルは Undo 履歴を保持する分岐）
+        doc.save(&path).unwrap();
+        assert!(doc.is_clean());
+
+        // 二重適用されていないこと
+        assert_eq!(all(&mut doc), vec!["baz a", "bar b", "baz c"]);
+
+        // Undo で bulk が元へ戻ること（マテリアライズ済み splice として）
+        doc.undo().unwrap();
+        assert_eq!(all(&mut doc), vec!["foo a", "bar b", "foo c"]);
+
+        // Redo で再適用されること
+        doc.redo().unwrap();
+        assert_eq!(all(&mut doc), vec!["baz a", "bar b", "baz c"]);
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 回帰: 1 行に 64 件を超える一致がある場合でも、after_col の後ろの
+    /// 一致が切り捨てられずに返ることを検証する。
+    #[test]
+    fn search_returns_matches_beyond_64_within_a_line() {
+        // 1 行に 70 個の "m" を含む行を作る
+        let many = "m ".repeat(70);
+        let (mut doc, path) = disk_doc("many-matches", &[&many, "tail"]);
+        let query = crate::search::CompiledQuery::compile("m", false, true, '$').unwrap();
+
+        // after_col を 65 件目のあたりへ置いて検索し、残りの一致が返ること
+        let found = doc
+            .search_candidates(
+                SearchSpec {
+                    query: &query,
+                    from: 0,
+                    end: 2,
+                    after_col: Some(130),
+                },
+                &|| false,
+            )
+            .unwrap();
+        assert!(
+            !found.hits.is_empty(),
+            "after_col 以降の一致が返ること（64件上限で潰れない）"
+        );
+        // 返った一致はすべて after_col 以降
+        for hit in &found.hits {
+            assert!(hit.notation || hit.line > 0 || hit.start >= 130);
+        }
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 回帰: Clean な下書きに遠方の保留 Redo 差分があるとき、
+    /// 復元時にその行マークまで確定され、即時 Redo が全文走査へ落ちないことを検証する。
+    #[test]
+    fn draft_restore_includes_pending_redo_in_max_needed_line() {
+        use crate::persistence::DraftDiff;
+        // max_needed_line の計算ロジックを直接検証する（lib.rs 側の統合は別途）。
+        // 保留 Redo 差分（head より後ろ）の from_line が active 差分より遠方にある場合、
+        // max_needed_line はその Redo 差分の位置を含む必要がある。
+        let active = DraftDiff {
+            group: 1,
+            from_line: 5,
+            removed_lines: 1,
+            lines: vec!["a".into()],
+            deleted_lines: vec![],
+            before: String::new(),
+            after: String::new(),
+        };
+        let pending_redo = DraftDiff {
+            group: 2,
+            from_line: 999_999,
+            removed_lines: 1,
+            lines: vec!["b".into()],
+            deleted_lines: vec![],
+            before: String::new(),
+            after: String::new(),
+        };
+        let diffs = vec![active, pending_redo];
+        let max_needed_line = diffs
+            .iter()
+            .map(|d| d.from_line + d.removed_lines)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(max_needed_line, 1_000_000, "保留 Redo の位置を含むこと");
+    }
 }

@@ -459,10 +459,13 @@ impl Document {
                 continue;
             }
 
+            // 上限なしで走査し、after_col で絞った残りから先頭 64 件を返す。
+            // 先に 64 件で切ると、1 行に 65 件以上あるとき after_col の後ろの
+            // 一致が二度と返らない。
             let (mut hits, _) = if let Some(query) = literal {
-                self.scan_literal(query, case_sensitive, marker, at, page_end - at, 64)?
+                self.scan_literal(query, case_sensitive, marker, at, page_end - at, usize::MAX)?
             } else {
-                self.scan(pattern, marker, at, page_end - at, 64)?
+                self.scan(pattern, marker, at, page_end - at, usize::MAX)?
             };
             if at == from {
                 if let Some(col) = after_col {

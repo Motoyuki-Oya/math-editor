@@ -51,6 +51,12 @@ impl Document {
     /// 文書をディスクへ流し、保存したファイルを新しい本体にする。
     /// 一時ファイルへ書いてから入れ替えるので、書きかけで元を壊さない。
     pub(crate) fn save(&mut self, path: &str) -> Result<(), String> {
+        // bulk（すべて置換等）は遅延評価のため、保存で書き出す前に等価な splice
+        // へ固める。これにより Undo の復元内容（元行）が読み取り時の bulk 再適用に
+        // 汚染されず、下書きへも通常の差分として残せる。失敗したら保存自体を中止する。
+        if self.log.has_active_bulk() {
+            self.materialize_bulk_transactions()?;
+        }
         let tmp = format!("{path}.saving");
         let fail = |e: String| format!("{path} を保存できませんでした: {e}");
         // 書きながら次の索引を作る。保存が終わった姿はこの索引そのもの。
@@ -158,7 +164,75 @@ impl Document {
             self.log.clear();
             self.buffers = crate::edit_buffers::EditBuffers::default();
         } else {
+            self.materialize_bulk_transactions()?;
             self.log.mark_saved();
+        }
+        // 保存で新しいバイト列へ差し替わったため、旧バイト列の索引は破棄する。
+        // 共有状態を持つバックグラウンド索引は、Arc の所有者がここだけになると自発的に終わる。
+        self.search_index = None;
+        Ok(())
+    }
+
+    /// 保存で bulk の結果が新しい Source へ書き込まれたため、active な bulk
+    /// トランザクションを等価な splice へ変換する。このまま active に残すと、
+    /// 変換後の行へ同じ規則が再適用され（foo→foofoo の二重化）、Undo も
+    /// 効かなくなる。変換後は通常の編集として Undo/Redo・下書き化できる。
+    fn materialize_bulk_transactions(&mut self) -> Result<(), String> {
+        use crate::operation_log::OperationKind;
+        let targets: Vec<usize> = self.log.transactions[..self.log.head]
+            .iter()
+            .enumerate()
+            .filter_map(|(i, tx)| matches!(tx.kind, OperationKind::Bulk(_)).then_some(i))
+            .collect();
+        for &index in targets.iter().rev() {
+            let (base_revision, group, revision, bulk, before_text, after_text) = {
+                let tx = &self.log.transactions[index];
+                match &tx.kind {
+                    OperationKind::Bulk(bulk) => (
+                        tx.base_revision,
+                        tx.group,
+                        tx.revision,
+                        bulk.clone(),
+                        tx.before.clone(),
+                        tx.after.clone(),
+                    ),
+                    OperationKind::Splice(_) => continue,
+                }
+            };
+            let mut edits = Vec::new();
+            match &bulk {
+                crate::operation_log::BulkOperation::AllLines {
+                    from_line,
+                    to_line,
+                    ..
+                }
+                | crate::operation_log::BulkOperation::ReplaceAll {
+                    from_line,
+                    to_line,
+                    ..
+                } => {
+                    // 範囲内の各行を 1 編集として記録する。内容の変化有無で絞ると、
+                    // たまたま元と同じ結果になった行が欠けて Undo で復元できない
+                    // ため、位置ベースで全行を固める。後ろの行から置き換え、
+                    // まだ置き換えていない行の座標を変えない。
+                    for line_idx in (*from_line..*to_line).rev() {
+                        if line_idx >= self.count {
+                            break;
+                        }
+                        let current = self.read(line_idx, 1)?;
+                        edits.push(self.splice(line_idx, line_idx + 1, current)?);
+                    }
+                }
+            }
+            let tx = crate::operation_log::Transaction {
+                group,
+                base_revision,
+                revision,
+                kind: OperationKind::Splice(edits),
+                before: before_text,
+                after: after_text,
+            };
+            self.log.transactions[index] = tx;
         }
         Ok(())
     }

@@ -418,6 +418,15 @@ impl Application {
                 doc.confirm_scan_with_total_lines(saved_line_count);
             }
 
+            // active 差分だけでなく、保留中の Redo 差分の位置も含める。
+            // これを外すと Clean 復元後の即時 Redo が未走査の後方を指し、
+            // indexed_start の全文走査で起動が止まる。
+            let max_needed_line = diffs
+                .iter()
+                .map(|d| d.from_line + d.removed_lines)
+                .max()
+                .unwrap_or(0);
+
             let active_count = if has_explicit_head {
                 head_offset.min(diffs.len())
             } else {
@@ -433,12 +442,6 @@ impl Application {
                 }
             }
             doc.pending_redo_diffs = redo_diffs;
-
-            let max_needed_line = active_diffs
-                .iter()
-                .map(|d| d.from_line + d.removed_lines)
-                .max()
-                .unwrap_or(0);
 
             if let Some(scan) = scan {
                 if max_needed_line >= initial_count {

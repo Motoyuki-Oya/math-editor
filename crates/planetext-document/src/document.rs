@@ -477,7 +477,7 @@ impl Document {
         self.pieces.source_range_index(pending.from, pending.len)
     }
 
-    fn apply_bulk_rules(
+    pub(crate) fn apply_bulk_rules(
         operations: &[(&BulkOperation, u64)],
         line_idx: usize,
         text: &str,
@@ -718,7 +718,12 @@ impl Document {
 
     /// 置き換えの本体。行 `from..to` を `lines` に置き換え、
     /// 取り除いた行を退避した `Edit` を返す。
-    fn splice(&mut self, from: usize, to: usize, lines: Vec<String>) -> Result<Edit, String> {
+    pub(crate) fn splice(
+        &mut self,
+        from: usize,
+        to: usize,
+        lines: Vec<String>,
+    ) -> Result<Edit, String> {
         let removed_count = to - from;
         let removed_lines = self.read(from, removed_count)?;
         if removed_lines.len() != removed_count {
@@ -994,6 +999,7 @@ impl Document {
             touched_from = touched_from.min(edit.from_line);
             let restored_lines = self.log.read_deleted(edit.removed);
             let inserted_lines = self.buffers.read_lines(edit.inserted);
+            eprintln!("DBG undo from_line={} restored={:?} inserted={:?}", edit.from_line, restored_lines, inserted_lines);
             self.apply_raw_splice(
                 edit.from_line,
                 edit.from_line + edit.inserted_lines,
