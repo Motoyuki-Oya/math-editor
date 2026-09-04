@@ -463,6 +463,10 @@ pub struct SearchPage {
     pub hits: Vec<ScanHit>,
     pub scanned_to: usize,
     pub cancelled: bool,
+    #[serde(default)]
+    pub total_matches: Option<usize>,
+    #[serde(default)]
+    pub current_index: Option<usize>,
 }
 
 /// 空のページをnative側で読み進め、最初の候補群までを返します。

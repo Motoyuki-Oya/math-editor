@@ -15,7 +15,7 @@ use crate::edit_buffers::{EditBuffers, EditRange};
 use crate::operation_log::{BulkOperation, Edit, OperationLog};
 use crate::persistence::DraftDiff;
 use crate::piece_tree::{Piece, PieceTree};
-use crate::search::{convert_raw_hits, scan_encoded_range, ScanHit};
+use crate::search::{convert_raw_hits, scan_encoded_range, ScanHit, SearchHitCache};
 use crate::search_index::{BackgroundIndex, SearchIndex};
 use crate::source::{BackgroundScan, FileEncoding, LineEnding, ScanIndex, Source};
 
@@ -39,6 +39,7 @@ pub(crate) struct Document {
     search_index: Option<SearchIndex>,
     background_index: Option<BackgroundIndex>,
     pending_redo_diffs: Vec<DraftDiff>,
+    pub(crate) search_cache: Option<SearchHitCache>,
 }
 
 /// 元に戻す・やり直すの結果: 復元すべき控えと、行が変わった範囲の始まり。
@@ -201,6 +202,7 @@ impl Document {
                 search_index,
                 background_index,
                 pending_redo_diffs: Vec::new(),
+                search_cache: None,
             },
             scan,
         ))
@@ -241,6 +243,7 @@ impl Document {
             search_index: None,
             background_index: None,
             pending_redo_diffs: Vec::new(),
+            search_cache: None,
         }
     }
 
@@ -322,6 +325,7 @@ impl Document {
         };
         self.search_index = search_index;
         self.background_index = bg_index;
+        self.search_cache = None;
         self.source = Some(new_source);
         Ok(scan)
     }
@@ -389,6 +393,7 @@ impl Document {
             search_index: self.search_index.clone(),
             background_index: None,
             pending_redo_diffs: Vec::new(),
+            search_cache: self.search_cache.clone(),
         };
         snapshot.confirm_scan_if_done();
         Ok(snapshot)
@@ -497,6 +502,7 @@ impl Document {
             search_index: None,
             background_index: None,
             pending_redo_diffs: Vec::new(),
+            search_cache: None,
         }
     }
 
@@ -806,14 +812,22 @@ impl Document {
             .as_ref()
             .and_then(|source| source.index.status().ok().flatten())
             .is_some();
-        if scan_done {
+        let res = if scan_done {
             self.confirm_scan();
-            return self.read(self.count.saturating_sub(count), count);
+            self.read(self.count.saturating_sub(count), count)
+        } else {
+            self.source
+                .as_mut()
+                .ok_or_else(|| "末尾を読むファイルがありません".to_string())?
+                .read_tail(count)
+        };
+        // 末尾アクセス時に末尾ブロックの索引をオンデマンド構築
+        if let (Some(index), Some(source)) = (self.search_index.as_ref(), self.source.as_mut()) {
+            let tail_byte =
+                (source.bytes.saturating_sub(source.content_offset)).saturating_sub(1) as usize;
+            let _ = index.ensure_block_at_byte(tail_byte, source);
         }
-        self.source
-            .as_mut()
-            .ok_or_else(|| "末尾を読むファイルがありません".to_string())?
-            .read_tail(count)
+        res
     }
 
     /// `from..to` の行を `lines` に置き換え、操作ログに追記する。
@@ -1483,6 +1497,7 @@ impl Document {
             return Ok((Vec::new(), from));
         }
         let query_characters = query.chars().count();
+        let mmap = self.source.as_ref().and_then(|s| s.mmap().ok());
         let mut hits = Vec::new();
         let mut scanned_to = from;
         let mut error = None;
@@ -1507,24 +1522,64 @@ impl Document {
                             let delimiter = source.delimiter();
                             let encoded_query = encoding.encode_str(query);
                             let encoded_marker = encoding.encode_str(&marker.to_string());
-                            let (raw, scanned) = scan_encoded_range(
-                                range_to - range_from,
-                                take,
-                                encoding,
-                                &delimiter,
-                                &encoded_query,
-                                &encoded_marker,
-                                case_sensitive,
-                                limit - hits.len(),
-                                |offset, size| source.read_byte_range(range_from + offset, size),
-                            )?;
-                            let converted = convert_raw_hits(
-                                raw,
-                                encoding,
-                                piece_line + skip,
-                                query_characters,
-                                |offset, size| source.read_byte_range(range_from + offset, size),
-                            )?;
+                            let (raw, scanned) = if let Some(ref mmap) = mmap {
+                                scan_encoded_range(
+                                    range_to - range_from,
+                                    take,
+                                    encoding,
+                                    &delimiter,
+                                    &encoded_query,
+                                    &encoded_marker,
+                                    case_sensitive,
+                                    limit - hits.len(),
+                                    |offset, size| {
+                                        let start = range_from + offset;
+                                        let end = (start + size).min(mmap.len());
+                                        if start <= mmap.len() {
+                                            Ok(mmap[start..end].to_vec())
+                                        } else {
+                                            Err("mmap 範囲外アクセス".to_string())
+                                        }
+                                    },
+                                )?
+                            } else {
+                                scan_encoded_range(
+                                    range_to - range_from,
+                                    take,
+                                    encoding,
+                                    &delimiter,
+                                    &encoded_query,
+                                    &encoded_marker,
+                                    case_sensitive,
+                                    limit - hits.len(),
+                                    |offset, size| source.read_byte_range(range_from + offset, size),
+                                )?
+                            };
+                            let converted = if let Some(ref mmap) = mmap {
+                                convert_raw_hits(
+                                    raw,
+                                    encoding,
+                                    piece_line + skip,
+                                    query_characters,
+                                    |offset, size| {
+                                        let start = range_from + offset;
+                                        let end = (start + size).min(mmap.len());
+                                        if start <= mmap.len() {
+                                            Ok(mmap[start..end].to_vec())
+                                        } else {
+                                            Err("mmap 範囲外アクセス".to_string())
+                                        }
+                                    },
+                                )?
+                            } else {
+                                convert_raw_hits(
+                                    raw,
+                                    encoding,
+                                    piece_line + skip,
+                                    query_characters,
+                                    |offset, size| source.read_byte_range(range_from + offset, size),
+                                )?
+                            };
                             Ok((converted, scanned))
                         })()
                     }

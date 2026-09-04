@@ -308,6 +308,18 @@ impl ScanIndex {
             state = self.cv.wait(state).unwrap();
         }
     }
+
+    /// 指定バイト位置の直前にあるマークの (マークインデックス, マークバイト位置) を二分探索で瞬時に返す。
+    /// マークインデックス * STRIDE がそのマーク時点での行番号となる。
+    #[allow(dead_code)]
+    pub(crate) fn mark_before_offset(&self, byte_offset: u64) -> (usize, u64) {
+        let state = self.state.lock().unwrap();
+        let idx = state
+            .marks
+            .partition_point(|&mark| mark <= byte_offset)
+            .saturating_sub(1);
+        (idx, state.marks.get(idx).copied().unwrap_or(0))
+    }
 }
 
 /// 開いたファイル。行の中身はここから seek で読む。
@@ -419,6 +431,20 @@ fn read_line_bounded<R: BufRead>(
 }
 
 impl Source {
+    /// 30MB 以上の巨大ファイルの検索やインデックス構築において、
+    /// 一時的なゼロコピー生バイト走査を行うための mmap を取得する。
+    /// Advice::Sequential を指示し、OS に最大先読み（Prefetch）を指示する。
+    pub(crate) fn mmap(&self) -> Result<memmap2::Mmap, String> {
+        let mmap = unsafe {
+            memmap2::MmapOptions::new()
+                .map(&self.file)
+                .map_err(|e| format!("メモリマップに失敗しました: {e}"))?
+        };
+        #[cfg(unix)]
+        let _ = mmap.advise(memmap2::Advice::Sequential);
+        Ok(mmap)
+    }
+
     pub(crate) fn delimiter(&self) -> Vec<u8> {
         let delimiter = match self.line_ending {
             LineEnding::Cr => "\r",

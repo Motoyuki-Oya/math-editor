@@ -169,10 +169,21 @@ pub(super) fn find(
     file_size: Option<usize>,
 ) {
     if editor::find_next_resident(&query, options, file_size) {
+        if let Some(pane_obj) = shell.pane_for_editor(pane) {
+            let total = pane_obj.search_status.get_untracked().1;
+            let num = editor::current_match_number(&query, options, total.unwrap_or(0));
+            pane_obj.search_status.set((num, total));
+        }
         return;
     }
     if editor::fully_resident() {
-        editor::find_next(&query, options, file_size);
+        if editor::find_next(&query, options, file_size) {
+            if let Some(pane_obj) = shell.pane_for_editor(pane) {
+                let total = pane_obj.search_status.get_untracked().1;
+                let num = editor::current_match_number(&query, options, total.unwrap_or(0));
+                pane_obj.search_status.set((num, total));
+            }
+        }
         return;
     }
     let Some(tab) = shell.tab_of(pane) else {
@@ -193,16 +204,27 @@ pub(super) fn find(
 
 /// 前を検索。手元に届いている行にあればその場で即座にジャンプ、そうでなければ全体から。
 pub(super) fn find_previous(
-    _shell: Shell,
-    _pane: usize,
+    shell: Shell,
+    pane: usize,
     query: String,
     options: editor::SearchOptions,
     file_size: Option<usize>,
 ) {
     if editor::find_previous_resident(&query, options, file_size) {
+        if let Some(pane_obj) = shell.pane_for_editor(pane) {
+            let total = pane_obj.search_status.get_untracked().1;
+            let num = editor::current_match_number(&query, options, total.unwrap_or(0));
+            pane_obj.search_status.set((num, total));
+        }
         return;
     }
-    editor::find_previous(&query, options, file_size);
+    if editor::find_previous(&query, options, file_size) {
+        if let Some(pane_obj) = shell.pane_for_editor(pane) {
+            let total = pane_obj.search_status.get_untracked().1;
+            let num = editor::current_match_number(&query, options, total.unwrap_or(0));
+            pane_obj.search_status.set((num, total));
+        }
+    }
 }
 
 fn drop_pending_find(tab: Tab) {
@@ -392,6 +414,11 @@ async fn find_far(
                     let lines = framework::read_lines(handle, hit.line, 1).await?;
                     shell.feed(tab, hit.line, &lines);
                     if editor::find_far_in_line(pane, hit.line, query, options, file_size, filter) {
+                        if let Some(pane_obj) = shell.pane_for_editor(pane) {
+                            if let Some(cur) = page.current_index {
+                                pane_obj.search_status.set((cur, page.total_matches));
+                            }
+                        }
                         return Ok(Some(true));
                     }
                 } else {
@@ -399,6 +426,11 @@ async fn find_far(
                     if filter.is_none_or(|after| &key >= after)
                         && editor::apply_far_match(pane, hit.line, hit.start, hit.end)
                     {
+                        if let Some(pane_obj) = shell.pane_for_editor(pane) {
+                            if let Some(cur) = page.current_index {
+                                pane_obj.search_status.set((cur, page.total_matches));
+                            }
+                        }
                         return Ok(Some(true));
                     }
                 }

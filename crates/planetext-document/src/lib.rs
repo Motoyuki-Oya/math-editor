@@ -97,6 +97,8 @@ pub struct SearchPage {
     pub hits: Vec<ScanHit>,
     pub scanned_to: usize,
     pub cancelled: bool,
+    pub total_matches: Option<usize>,
+    pub current_index: Option<usize>,
 }
 
 /// 下書きファイルは最初の行にドキュメントのパスがあり、その後にドキュメント自体が含まれているため、復元されたドラフトではそれがどのファイルに属しているかがわかります。
@@ -154,10 +156,15 @@ impl SearchJob {
             },
             &|| self.generation.load(Ordering::Relaxed) != self.ticket,
         )?;
-        let mapped_hits = self
+        let snapshot_cache = self.snapshot.search_cache.take();
+        let (mapped_hits, total_matches, current_index) = self
             .application
             .with_doc(self.handle, |doc| {
-                Ok(doc.map_search_hits(&self.snapshot, found.hits))
+                if let Some(cache) = snapshot_cache {
+                    doc.search_cache = Some(cache);
+                }
+                let mapped = doc.map_search_hits(&self.snapshot, found.hits);
+                Ok((mapped, found.total_matches, found.current_index))
             })
             .unwrap_or_default();
 
@@ -165,6 +172,8 @@ impl SearchJob {
             hits: mapped_hits,
             scanned_to: found.scanned_to,
             cancelled: found.cancelled,
+            total_matches,
+            current_index,
         })
     }
 }

@@ -156,6 +156,8 @@ pub(super) struct Pane {
     pub(super) palette: RwSignal<bool>,
     /// このペインで検索バーが表示されているかどうか。
     pub(super) searching: RwSignal<bool>,
+    /// 検索結果の (現在何件目か, 総ヒット件数)。
+    pub(super) search_status: RwSignal<(usize, Option<usize>)>,
     /// レンダリング間でペインの要素を保持します。
     pub(super) key: usize,
 }
@@ -170,6 +172,7 @@ impl Pane {
             current: RwSignal::new(0),
             palette: RwSignal::new(false),
             searching: RwSignal::new(false),
+            search_status: RwSignal::new((0, None)),
             key,
         }
     }
@@ -181,6 +184,7 @@ impl Pane {
             current: RwSignal::new(0),
             palette: RwSignal::new(false),
             searching: RwSignal::new(false),
+            search_status: RwSignal::new((0, None)),
             key,
         }
     }
@@ -441,6 +445,15 @@ impl Shell {
                 .filter(|pane| pane.tab_untracked().id.get_untracked() == id)
                 .copied()
                 .collect()
+        })
+    }
+
+    pub(super) fn pane_for_editor(&self, editor_pane: usize) -> Option<Pane> {
+        self.panes.with_untracked(|panes| {
+            panes
+                .iter()
+                .find(|pane| pane.editor_pane() == editor_pane)
+                .copied()
         })
     }
 

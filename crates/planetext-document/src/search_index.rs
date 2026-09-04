@@ -279,6 +279,13 @@ impl SearchIndex {
         Ok(())
     }
 
+    /// 指定バイト位置が含まれるブロックの索引をオンデマンドに同期構築する。
+    /// 末尾ジャンプ（read_tail）など、ユーザーが局所的にアクセスした際に発動する。
+    pub(crate) fn ensure_block_at_byte(&self, byte: usize, source: &mut Source) -> Result<(), String> {
+        let block = byte / INDEX_BLOCK_BYTES;
+        self.ensure_block(block, source)
+    }
+
     /// 全ブロックを同期構築する（主に単体テスト用）
     #[allow(dead_code)]
     pub(crate) fn ensure_all_blocks(&self, source: &mut Source) -> Result<(), String> {

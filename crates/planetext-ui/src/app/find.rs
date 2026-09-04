@@ -37,11 +37,14 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
     let step_match = move |forward: bool| {
         shell.focus_on(pane);
         let q = query.get_untracked();
-        let total = estimated_count.get_untracked().unwrap_or(0);
+        let (pane_cur, pane_total) = pane.search_status.get_untracked();
+        let total = pane_total.or_else(|| estimated_count.get_untracked()).unwrap_or(0);
         let cur_cursor = editor::current_cursor_pos();
         let caret_moved = last_matched_pos.get_untracked() != cur_cursor || cur_cursor.is_none();
 
-        let base = if caret_moved {
+        let base = if pane_cur > 0 {
+            pane_cur
+        } else if caret_moved {
             editor::current_match_number(&q, options(), total)
         } else {
             current_match.get_untracked()
@@ -63,6 +66,7 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
             base - 1
         };
         current_match.set(next);
+        pane.search_status.set((next, pane_total.or_else(|| estimated_count.get_untracked())));
     };
 
     // バーは開いた後のみ画面上に表示されるため、フィールドが存在するとすぐに、
@@ -92,8 +96,14 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
     let sync_on_focus = move || {
         shell.focus_on(pane);
         let q = query.get_untracked();
-        let total = estimated_count.get_untracked().unwrap_or(0);
-        current_match.set(editor::current_match_number(&q, options(), total));
+        let (pane_cur, pane_total) = pane.search_status.get_untracked();
+        let total = pane_total.or_else(|| estimated_count.get_untracked()).unwrap_or(0);
+        let num = if pane_cur > 0 {
+            pane_cur
+        } else {
+            editor::current_match_number(&q, options(), total)
+        };
+        current_match.set(num);
         last_matched_pos.set(editor::current_cursor_pos());
     };
 
@@ -125,6 +135,7 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
                             let value = event_target_value(&ev);
                             query.set(value.clone());
                             current_match.set(0);
+                            pane.search_status.set((0, None));
                             last_matched_pos.set(None);
                             update_preview(
                                 pane,
@@ -165,10 +176,16 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
                             if q.is_empty() {
                                 return "".to_string();
                             }
-                            let cur = current_match.get();
-                            match estimated_count.get() {
+                            let (pane_cur, pane_total) = pane.search_status.get();
+                            let cur = if pane_cur > 0 {
+                                pane_cur
+                            } else {
+                                current_match.get()
+                            };
+                            let total = pane_total.or_else(|| estimated_count.get());
+                            match total {
                                 Some(0) => "0/0".to_string(),
-                                Some(estimated) => format!("{cur}/{estimated}"),
+                                Some(t) => format!("{cur}/{t}"),
                                 None => format!("{cur}/…"),
                             }
                         }}

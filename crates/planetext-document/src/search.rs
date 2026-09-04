@@ -55,6 +55,16 @@ pub(crate) fn literal_positions(
         .collect()
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct SearchHitCache {
+    pub(crate) pattern: String,
+    pub(crate) literal: Option<String>,
+    pub(crate) case_sensitive: bool,
+    pub(crate) revision: u64,
+    pub(crate) hits: Vec<ScanHit>,
+    pub(crate) fully_scanned: bool,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct RawScanHit {
     pub(crate) line: usize,
@@ -393,6 +403,8 @@ pub(crate) struct SearchCandidates {
     pub(crate) hits: Vec<ScanHit>,
     pub(crate) scanned_to: usize,
     pub(crate) cancelled: bool,
+    pub(crate) total_matches: Option<usize>,
+    pub(crate) current_index: Option<usize>,
 }
 
 pub(crate) struct SearchSpec<'a> {
@@ -403,16 +415,14 @@ pub(crate) struct SearchSpec<'a> {
 }
 
 impl Document {
-    /// `from..end` を native 内で連続走査し、最初の候補群まで進む。空の
-    /// ページを frontend と往復せず、ページごとにキャンセルを確認する。
+    /// `from..end` を native 内で走査し、候補群を返す。
+    /// 未走査の場合はドキュメント全体を一気にゼロコピー走査して全ヒットをキャッシュに保存し、
+    /// 正確な件数（total_matches）と現在何件目か（current_index）を即座に特定する。
     pub(crate) fn search_candidates(
         &mut self,
         spec: SearchSpec<'_>,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<SearchCandidates, String> {
-        // 1回の読みを大きくしてseek・確保を減らしつつ、キャンセル確認は
-        let mut page_lines = 10_000;
-        const MAX_PAGE_LINES: usize = 1_000_000;
         let pattern = &spec.query.pattern;
         let literal = spec.query.literal.as_deref();
         let case_sensitive = spec.query.case_sensitive;
@@ -420,72 +430,131 @@ impl Document {
         let from = spec.from;
         let end = spec.end;
         let after_col = spec.after_col;
-        let end = end.min(self.line_count());
-        let mut at = from.min(end);
-        while at < end {
-            if cancelled() {
-                return Ok(SearchCandidates {
-                    hits: Vec::new(),
-                    scanned_to: at,
-                    cancelled: true,
-                });
-            }
+        let cur_rev = self.revision();
+        let pattern_str = pattern.as_str();
 
-            let page_end = (at + page_lines).min(end);
-            let skip_scan = if case_sensitive && self.is_clean() {
-                if let (Some(index), Some(query)) = (self.search_index().cloned(), literal) {
-                    if let (Ok(start_byte), Ok(end_byte)) = (
-                        self.byte_offset_of_line(at),
-                        self.byte_offset_of_line(page_end),
-                    ) {
-                        let start_block = start_byte / crate::search_index::INDEX_BLOCK_BYTES;
-                        let end_block = end_byte / crate::search_index::INDEX_BLOCK_BYTES;
-                        (start_block..=end_block).all(|b| !index.may_contain_query(b, query))
+        let is_cached = if let Some(cache) = &self.search_cache {
+            cache.revision == cur_rev
+                && cache.case_sensitive == case_sensitive
+                && cache.pattern == pattern_str
+                && cache.literal.as_deref() == literal
+                && cache.fully_scanned
+        } else {
+            false
+        };
+
+        if !is_cached {
+            let doc_lines = self.line_count();
+            let mut all_hits = Vec::new();
+            let mut at = 0;
+            let mut page_lines = 50_000;
+            const MAX_PAGE_LINES: usize = 1_000_000;
+            let is_clean = self.is_clean();
+            let mod_lines = if !is_clean {
+                self.modified_lines()
+            } else {
+                Vec::new()
+            };
+
+            while at < doc_lines {
+                if cancelled() {
+                    return Ok(SearchCandidates {
+                        hits: Vec::new(),
+                        scanned_to: at,
+                        cancelled: true,
+                        total_matches: None,
+                        current_index: None,
+                    });
+                }
+
+                let page_end = (at + page_lines).min(doc_lines);
+                let skip_scan = if case_sensitive {
+                    if let (Some(index), Some(query)) = (self.search_index().cloned(), literal) {
+                        if let (Ok(start_byte), Ok(end_byte)) = (
+                            self.byte_offset_of_line(at),
+                            self.byte_offset_of_line(page_end),
+                        ) {
+                            let start_block = start_byte / crate::search_index::INDEX_BLOCK_BYTES;
+                            let end_block = end_byte / crate::search_index::INDEX_BLOCK_BYTES;
+                            let is_clean_range = if is_clean {
+                                true
+                            } else {
+                                !mod_lines.iter().any(|&line| line >= at && line < page_end)
+                            };
+                            if is_clean_range {
+                                (start_block..=end_block).all(|b| !index.may_contain_query(b, query))
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
                     } else {
                         false
                     }
                 } else {
                     false
-                }
-            } else {
-                false
-            };
+                };
 
-            if skip_scan {
+                if skip_scan {
+                    at = page_end;
+                    page_lines = (page_lines * 4).min(MAX_PAGE_LINES);
+                    continue;
+                }
+
+                let (hits, _) = if let Some(query) = literal {
+                    self.scan_literal(query, case_sensitive, marker, at, page_end - at, usize::MAX)?
+                } else {
+                    self.scan(pattern, marker, at, page_end - at, usize::MAX)?
+                };
+                all_hits.extend(hits);
                 at = page_end;
                 page_lines = (page_lines * 4).min(MAX_PAGE_LINES);
-                continue;
             }
 
-            // 上限なしで走査し、after_col で絞った残りから先頭 64 件を返す。
-            // 先に 64 件で切ると、1 行に 65 件以上あるとき after_col の後ろの
-            // 一致が二度と返らない。
-            let (mut hits, _) = if let Some(query) = literal {
-                self.scan_literal(query, case_sensitive, marker, at, page_end - at, usize::MAX)?
-            } else {
-                self.scan(pattern, marker, at, page_end - at, usize::MAX)?
-            };
-            if at == from {
+            self.search_cache = Some(SearchHitCache {
+                pattern: pattern_str.to_string(),
+                literal: literal.map(|s| s.to_string()),
+                case_sensitive,
+                revision: cur_rev,
+                hits: all_hits,
+                fully_scanned: true,
+            });
+        }
+
+        let cache = self.search_cache.as_ref().unwrap();
+        let total_matches = Some(cache.hits.len());
+
+        let mut matching_hits = Vec::new();
+        let mut first_match_idx = None;
+
+        for (idx, hit) in cache.hits.iter().enumerate() {
+            if hit.line < from || hit.line >= end {
+                continue;
+            }
+            if hit.line == from {
                 if let Some(col) = after_col {
-                    hits.retain(|hit| hit.notation || hit.line > from || hit.start >= col);
+                    if !hit.notation && hit.start < col {
+                        continue;
+                    }
                 }
             }
-            if !hits.is_empty() {
-                hits.truncate(64);
-                let scanned_to = hits.last().map_or(at, |hit| hit.line + 1);
-                return Ok(SearchCandidates {
-                    hits,
-                    scanned_to,
-                    cancelled: false,
-                });
+            if first_match_idx.is_none() {
+                first_match_idx = Some(idx + 1); // 1-indexed
             }
-            at = page_end;
-            page_lines = (page_lines * 4).min(MAX_PAGE_LINES);
+            matching_hits.push(hit.clone());
+            if matching_hits.len() >= 64 {
+                break;
+            }
         }
+
+        let scanned_to = matching_hits.last().map_or(end, |hit| hit.line + 1);
         Ok(SearchCandidates {
-            hits: Vec::new(),
-            scanned_to: end,
+            hits: matching_hits,
+            scanned_to,
             cancelled: false,
+            total_matches,
+            current_index: first_match_idx,
         })
     }
 
@@ -535,6 +604,15 @@ impl Document {
 
     pub(crate) fn estimate_matches(&mut self, pattern: &regex::Regex) -> Result<usize, String> {
         self.confirm_scan_if_done();
+        let cur_rev = self.revision();
+        let pattern_str = pattern.as_str();
+
+        if let Some(cache) = &self.search_cache {
+            if cache.fully_scanned && cache.revision == cur_rev && cache.pattern == pattern_str {
+                return Ok(cache.hits.len());
+            }
+        }
+
         if let Some(index) = self.search_index() {
             let query = pattern.as_str();
             let is_literal = !query.contains([
