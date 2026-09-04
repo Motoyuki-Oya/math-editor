@@ -323,8 +323,6 @@ pub fn App() -> impl IntoView {
                             }
                         } else if let Some(chars) = stats.total_chars {
                             format!("全 {chars}文字")
-                        } else if stats.counting {
-                            "全 0文字".to_string()
                         } else {
                             format_file_size(bytes)
                         }
@@ -397,7 +395,11 @@ pub fn App() -> impl IntoView {
                     </button>
                     <span>{move || {
                         let stats = shell.stats.get();
-                        format!("[ {} | {} ]", stats.caret_line, stats.caret_col)
+                        if stats.counting && stats.pending_tail {
+                            format!("[ 末尾 | {} ]", stats.caret_col)
+                        } else {
+                            format!("[ {} | {} ]", stats.caret_line, stats.caret_col)
+                        }
                     }}</span>
                     <span
                         class="status-clickable"

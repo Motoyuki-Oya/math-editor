@@ -297,6 +297,12 @@ impl PieceTree {
     pub(crate) fn line_count(&self) -> usize {
         self.root.lines
     }
+    pub(crate) fn byte_offset(&self, line: usize) -> usize {
+        byte_at_line(&self.root, line.min(self.line_count()), 0)
+    }
+    pub(crate) fn byte_offset_of_piece(&self, piece_index: usize) -> usize {
+        byte_of_piece(&self.root, piece_index, 0)
+    }
     fn sync(&mut self) {
         self.byte_len = self.root.bytes;
         self.newline_count = self.root.newlines;
@@ -569,6 +575,56 @@ fn locate(n: &Node, line: usize, mut pi: usize, mut start: usize) -> (usize, usi
                 pi += x.pieces;
             }
             (pi, start)
+        }
+    }
+}
+
+fn byte_at_line(node: &Node, mut line: usize, mut bytes: usize) -> usize {
+    match &node.kind {
+        NodeKind::Leaf(pieces) => {
+            for piece in pieces {
+                if line < piece.lines() {
+                    return bytes;
+                }
+                line -= piece.lines();
+                bytes += piece.bytes();
+            }
+            bytes
+        }
+        NodeKind::Branch(children) => {
+            for child in children {
+                if line < child.lines {
+                    return byte_at_line(child, line, bytes);
+                }
+                line -= child.lines;
+                bytes += child.bytes;
+            }
+            bytes
+        }
+    }
+}
+
+fn byte_of_piece(node: &Node, mut index: usize, mut bytes: usize) -> usize {
+    match &node.kind {
+        NodeKind::Leaf(pieces) => {
+            for piece in pieces {
+                if index == 0 {
+                    return bytes;
+                }
+                index -= 1;
+                bytes += piece.bytes();
+            }
+            bytes
+        }
+        NodeKind::Branch(children) => {
+            for child in children {
+                if index < child.pieces {
+                    return byte_of_piece(child, index, bytes);
+                }
+                index -= child.pieces;
+                bytes += child.bytes;
+            }
+            bytes
         }
     }
 }

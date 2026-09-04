@@ -130,15 +130,20 @@ impl GuiFramework for HostFramework {
 }
 
 /// 範囲読みで開いた文書。行は [`read_lines`] で取り寄せる。
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct OpenedDocument {
     pub handle: u64,
-    pub line_count: usize,
+    pub line_count: Option<usize>,
     pub bytes: usize,
     #[serde(default = "default_encoding")]
     pub encoding: String,
     #[serde(default = "default_line_ending")]
     pub line_ending: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub revision: u64,
+    #[serde(default)]
+    pub clean: bool,
 }
 
 fn default_encoding() -> String {
@@ -149,11 +154,42 @@ fn default_line_ending() -> String {
     "CRLF".to_string()
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct ReopenedDocument {
-    pub line_count: usize,
+    pub line_count: Option<usize>,
     pub encoding: String,
     pub line_ending: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub revision: u64,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ReadLines {
+    pub lines: Vec<String>,
+    pub from: usize,
+    pub revision: u64,
+}
+
+impl std::ops::Deref for ReadLines {
+    type Target = [String];
+    fn deref(&self) -> &Self::Target {
+        &self.lines
+    }
+}
+
+impl IntoIterator for ReadLines {
+    type Item = String;
+    type IntoIter = std::vec::IntoIter<String>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.lines.into_iter()
+    }
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct EditApplied {
+    pub line_count: usize,
+    pub revision: u64,
 }
 
 /// 文書を全文の文字列で受け取らずに開きます。ネイティブ側が本体を保持します。
@@ -231,7 +267,18 @@ pub async fn create_document_from_draft(lines: &[String]) -> Result<OpenedDocume
     serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
 }
 
-pub async fn read_lines(handle: u64, from: usize, count: usize) -> Result<Vec<String>, String> {
+/// 下書きIDから文書を復元します。元ファイルがある場合は全文ダンプではなく
+/// 元ファイルを開いて未保存差分を適用するため、巨大ファイルでも一瞬で安全に復旧できます。
+pub async fn open_draft(id: &str) -> Result<OpenedDocument, String> {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        id: &'a str,
+    }
+    let value = call("open_draft", Args { id }).await?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
+}
+
+pub async fn read_lines(handle: u64, from: usize, count: usize) -> Result<ReadLines, String> {
     #[derive(Serialize)]
     struct Args {
         handle: u64,
@@ -250,7 +297,7 @@ pub async fn read_lines(handle: u64, from: usize, count: usize) -> Result<Vec<St
     serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
 }
 
-pub async fn read_tail(handle: u64, count: usize) -> Result<Vec<String>, String> {
+pub async fn read_tail(handle: u64, count: usize) -> Result<ReadLines, String> {
     #[derive(Serialize)]
     struct Args {
         handle: u64,
@@ -269,6 +316,7 @@ pub async fn close_document(handle: u64) {
 }
 
 /// 編集の到着: 文書の本体の `from..to` の行を `lines` へ置き換えます。
+#[allow(clippy::too_many_arguments)]
 pub async fn replace_lines(
     handle: u64,
     from: usize,
@@ -277,7 +325,8 @@ pub async fn replace_lines(
     group: u64,
     before: &str,
     after: &str,
-) -> Result<(), String> {
+    base_revision: Option<u64>,
+) -> Result<EditApplied, String> {
     #[derive(Serialize)]
     struct Args<'a> {
         handle: u64,
@@ -287,8 +336,9 @@ pub async fn replace_lines(
         group: u64,
         before: &'a str,
         after: &'a str,
+        base_revision: Option<u64>,
     }
-    call(
+    let value = call(
         "replace_lines",
         Args {
             handle,
@@ -298,10 +348,11 @@ pub async fn replace_lines(
             group,
             before,
             after,
+            base_revision,
         },
     )
-    .await
-    .map(|_| ())
+    .await?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
 }
 
 /// 元に戻す・やり直すの結果。`state` は預けたキャレットの控えそのもの。
@@ -312,6 +363,8 @@ pub struct RestoredLines {
     pub line_count: usize,
     #[serde(default)]
     pub clean: bool,
+    #[serde(default)]
+    pub modified_lines: Vec<usize>,
 }
 
 pub async fn undo_lines(handle: u64, redo: bool) -> Option<RestoredLines> {
@@ -532,6 +585,7 @@ pub struct Draft {
     pub id: usize,
     pub path: Option<String>,
     pub contents: String,
+    pub clean: bool,
 }
 
 pub async fn remove_draft(id: usize) {
@@ -548,6 +602,8 @@ pub async fn read_drafts() -> Vec<Draft> {
         id: String,
         path: Option<String>,
         contents: String,
+        #[serde(default)]
+        clean: bool,
     }
     let Ok(value) = call("read_drafts", NoArgs {}).await else {
         return Vec::new();
@@ -559,6 +615,7 @@ pub async fn read_drafts() -> Vec<Draft> {
                 id: raw.id.parse().ok()?,
                 path: raw.path,
                 contents: raw.contents,
+                clean: raw.clean,
             })
         })
         .collect()

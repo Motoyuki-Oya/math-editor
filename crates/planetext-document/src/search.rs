@@ -235,6 +235,41 @@ fn scan_encoded_range(
             carry.len().saturating_sub(overlap) / unit * unit
         };
         let safe_end = data_start + safe_len;
+        let query_positions = if !query_has_delimiter {
+            aligned_positions(&carry, query, case_sensitive, unit)
+        } else {
+            Vec::new()
+        };
+        let marker_positions = aligned_positions(&carry, marker, true, unit);
+
+        let has_query = query_positions.iter().any(|&at| {
+            let absolute = data_start + at;
+            absolute >= processed && absolute < safe_end && absolute >= next_literal_end
+        });
+        let has_marker = marker_positions.iter().any(|&at| {
+            let absolute = data_start + at;
+            absolute >= processed && absolute < safe_end
+        });
+
+        if !has_query && !has_marker {
+            for at in aligned_positions(&carry, delimiter, true, unit) {
+                let absolute = data_start + at;
+                if absolute >= processed && absolute < safe_end {
+                    line += 1;
+                    line_start = absolute + delimiter.len();
+                    if line >= lines {
+                        return Ok((hits, line));
+                    }
+                }
+            }
+            processed = safe_end;
+            if eof {
+                break;
+            }
+            carry.drain(..safe_len);
+            continue;
+        }
+
         let mut events = Vec::new();
         for at in aligned_positions(&carry, delimiter, true, unit) {
             let absolute = data_start + at;
@@ -242,18 +277,16 @@ fn scan_encoded_range(
                 events.push((absolute, 2_u8));
             }
         }
-        for at in aligned_positions(&carry, marker, true, unit) {
+        for at in marker_positions {
             let absolute = data_start + at;
             if absolute >= processed && absolute < safe_end {
                 events.push((absolute, 1_u8));
             }
         }
-        if !query_has_delimiter {
-            for at in aligned_positions(&carry, query, case_sensitive, unit) {
-                let absolute = data_start + at;
-                if absolute >= processed && absolute < safe_end && absolute >= next_literal_end {
-                    events.push((absolute, 0_u8));
-                }
+        for at in query_positions {
+            let absolute = data_start + at;
+            if absolute >= processed && absolute < safe_end && absolute >= next_literal_end {
+                events.push((absolute, 0_u8));
             }
         }
         events.sort_unstable();
@@ -322,6 +355,42 @@ pub(crate) struct ScanHit {
     pub(crate) end: usize,
 }
 
+use std::sync::Arc;
+
+#[derive(Clone, Debug)]
+pub struct CompiledQuery {
+    pub pattern: Arc<regex::Regex>,
+    pub literal: Option<String>,
+    pub case_sensitive: bool,
+    pub marker: char,
+}
+
+impl CompiledQuery {
+    pub fn compile(
+        query: &str,
+        regex: bool,
+        case_sensitive: bool,
+        marker: char,
+    ) -> Result<Self, String> {
+        let pattern_str = if regex {
+            query.to_string()
+        } else {
+            regex::escape(query)
+        };
+        let pattern = regex::RegexBuilder::new(&pattern_str)
+            .case_insensitive(!case_sensitive)
+            .build()
+            .map_err(|e| format!("正規表現を読めませんでした: {e}"))?;
+        let literal = (!regex && (case_sensitive || query.is_ascii())).then(|| query.to_string());
+        Ok(Self {
+            pattern: Arc::new(pattern),
+            literal,
+            case_sensitive,
+            marker,
+        })
+    }
+}
+
 pub(crate) struct SearchCandidates {
     pub(crate) hits: Vec<ScanHit>,
     pub(crate) scanned_to: usize,
@@ -329,10 +398,7 @@ pub(crate) struct SearchCandidates {
 }
 
 pub(crate) struct SearchSpec<'a> {
-    pub(crate) pattern: &'a regex::Regex,
-    pub(crate) literal: Option<&'a str>,
-    pub(crate) case_sensitive: bool,
-    pub(crate) marker: char,
+    pub(crate) query: &'a CompiledQuery,
     pub(crate) from: usize,
     pub(crate) end: usize,
     pub(crate) after_col: Option<usize>,
@@ -349,15 +415,13 @@ impl Document {
         // 1回の読みを大きくしてseek・確保を減らしつつ、キャンセル確認は
         let mut page_lines = 10_000;
         const MAX_PAGE_LINES: usize = 1_000_000;
-        let SearchSpec {
-            pattern,
-            literal,
-            case_sensitive,
-            marker,
-            from,
-            end,
-            after_col,
-        } = spec;
+        let pattern = &spec.query.pattern;
+        let literal = spec.query.literal.as_deref();
+        let case_sensitive = spec.query.case_sensitive;
+        let marker = spec.query.marker;
+        let from = spec.from;
+        let end = spec.end;
+        let after_col = spec.after_col;
         let end = end.min(self.count);
         let mut at = from.min(end);
         while at < end {
@@ -368,7 +432,36 @@ impl Document {
                     cancelled: true,
                 });
             }
+
             let page_end = (at + page_lines).min(end);
+            let skip_scan = if case_sensitive && self.log.is_clean() {
+                if let (Some(index), Some(query)) = (self.search_index.clone(), literal) {
+                    if let (Ok(start_byte), Ok(end_byte)) = (
+                        self.byte_offset_of_line(at),
+                        self.byte_offset_of_line(page_end),
+                    ) {
+                        let start_block = start_byte / crate::search_index::INDEX_BLOCK_BYTES;
+                        let end_block = end_byte / crate::search_index::INDEX_BLOCK_BYTES;
+                        (start_block..=end_block).all(|b| !index.may_contain_query(b, query))
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if skip_scan {
+                at = page_end;
+                page_lines = (page_lines * 4).min(MAX_PAGE_LINES);
+                continue;
+            }
+
+            // 上限なしで走査し、after_col で絞った残りから先頭 64 件を返す。
+            // 先に 64 件で切ると、1 行に 65 件以上あるとき after_col の後ろの
+            // 一致が二度と返らない。
             let (mut hits, _) = if let Some(query) = literal {
                 self.scan_literal(query, case_sensitive, marker, at, page_end - at, usize::MAX)?
             } else {
@@ -579,9 +672,34 @@ impl Document {
         Ok((hits, scanned_to))
     }
 
-    /// 文書から等間隔の窓を標本として検索し、全文の一致数を推定する。
-    /// 小さい文書は全行を調べるので正確な件数になる。
     pub(crate) fn estimate_matches(&mut self, pattern: &regex::Regex) -> Result<usize, String> {
+        self.confirm_scan_if_done();
+        if let Some(index) = &self.search_index {
+            let query = pattern.as_str();
+            let is_literal = !query.contains([
+                '\\', '.', '+', '*', '?', '(', ')', '|', '[', ']', '{', '}', '^', '$',
+            ]);
+            if is_literal {
+                if let Some(estimated) = index.estimate_matches(query) {
+                    return Ok(estimated);
+                }
+            }
+        }
+
+        let effective_count =
+            if let (Some(pending), Some(source)) = (self.pending_source, &self.source) {
+                let pending_from = pending.from as u64;
+                if pending_from > source.content_offset && source.bytes > source.content_offset {
+                    let scanned_bytes = (pending_from - source.content_offset) as u128;
+                    let total_bytes = (source.bytes - source.content_offset) as u128;
+                    ((self.count as u128 * total_bytes) / scanned_bytes.max(1)) as usize
+                } else {
+                    self.count
+                }
+            } else {
+                self.count
+            };
+
         const WINDOWS: usize = 64;
         const LINES_PER_WINDOW: usize = 2_000;
         let step = self.count.div_ceil(WINDOWS).max(1);
@@ -600,7 +718,10 @@ impl Document {
             return Ok(0);
         }
         // 切り上げ丸めは全行ヒット時に count+1 を返してしまうので、切り捨てで推定する。
-        Ok(((hits as u128 * self.count as u128 / sampled as u128) as usize).min(self.count))
+        Ok(
+            ((hits as u128 * effective_count as u128 / sampled as u128) as usize)
+                .min(effective_count),
+        )
     }
 
     /// `from..=to` の行のうち `needle` を含むもの。

@@ -12,10 +12,6 @@ use crate::framework::{self, gui, GuiFramework};
 
 const UNTITLED: &str = "無題";
 
-/// これより大きい文書は下書き（自動控え）を書かない。下書きは全文を
-/// 書き出すので、巨大なファイルでは一時停止のたびに数百 MB を書くことになる。
-const LARGE_BYTES: usize = 5_000_000;
-
 async fn create_document_from_draft(contents: String) -> Result<framework::OpenedDocument, String> {
     let normalized = contents.replace("\r\n", "\n").replace('\r', "\n");
     let lines: Vec<String> = normalized.split('\n').map(String::from).collect();
@@ -68,8 +64,6 @@ pub(super) struct Tab {
     pub(super) untitled_num: RwSignal<Option<usize>>,
     pub(super) path: RwSignal<Option<String>>,
     pub(super) dirty: RwSignal<bool>,
-    /// 下書きを書くには大きすぎる文書。
-    pub(super) large: RwSignal<bool>,
     pub(super) bytes: RwSignal<usize>,
     /// このタブの文書の本体を指す、ネイティブ側ストアの取っ手。
     /// 新しいタブでは作成が非同期に届くまで `None`。
@@ -86,7 +80,6 @@ impl Tab {
             untitled_num: RwSignal::new(Some(1)),
             path: RwSignal::new(None),
             dirty: RwSignal::new(false),
-            large: RwSignal::new(false),
             bytes: RwSignal::new(0),
             doc: RwSignal::new(None),
             encoding: RwSignal::new("UTF-8".into()),
@@ -381,13 +374,15 @@ impl Shell {
                 }
                 if index == current {
                     editor::set_line_count(pane.editor_pane(), count);
+                    self.status.set("行数を確定しました".into());
                 } else {
                     let doc_id = tab.id.get_untracked();
                     editor::get_or_create_doc(doc_id)
                         .borrow_mut()
                         .resize_pending(count);
                 }
-                self.status.set("行数を確定しました".into());
+                // 走査が完了して行数が確定したため、下書きを確定した真の総行数で更新保存する。
+                sync::draft(tab);
                 self.refresh();
                 return true;
             }
@@ -481,7 +476,12 @@ impl Shell {
 
     pub(super) fn mark_clean_tab(&self, tab: Tab) {
         tab.dirty.set(false);
-        drafts::forget(tab);
+        if tab.path.get_untracked().is_some() {
+            // 実ファイルタブは行数情報を含む CLEAN 下書きを保持し、次回起動時の高速即時オープンを担保する
+            drafts::touch(tab);
+        } else {
+            drafts::forget(tab);
+        }
         if let Some(pane) = self.pane_showing(tab) {
             editor::clear_modified(pane.editor_pane());
         }
@@ -563,9 +563,10 @@ impl Shell {
         editor::set_doc_path(doc_id, path);
         editor::bind_doc(pane.editor_pane(), doc_id);
         tab.dirty.set(dirty);
-        if self.restored.get_untracked() && !dirty {
+        if self.restored.get_untracked() && !dirty && tab.path.get_untracked().is_none() {
             drafts::forget(tab);
         }
+        self.status.set(String::new());
         self.sync_dirty();
         self.refresh();
         editor::focus_pane(pane.editor_pane());
@@ -634,7 +635,6 @@ impl Shell {
                 tab.id.set(next_id());
                 tab.path.set(None);
                 tab.syntax_override.set(None);
-                tab.large.set(false);
                 tab.assign_document();
                 editor::set_doc_path(tab.id.get_untracked(), None);
                 editor::bind_doc(pane.editor_pane(), tab.id.get_untracked());
@@ -802,7 +802,6 @@ impl Shell {
             untitled_num: src_tab.untitled_num,
             path: src_tab.path,
             dirty: src_tab.dirty,
-            large: src_tab.large,
             bytes: src_tab.bytes,
             doc: src_tab.doc,
             encoding: src_tab.encoding,
@@ -1028,13 +1027,12 @@ impl Shell {
                     // 開いた文書の取っ手に替える。
                     tab.release_document();
                     tab.doc.set(Some(doc.handle));
-                    tab.large.set(doc.bytes > LARGE_BYTES);
                     tab.bytes.set(doc.bytes);
                     tab.encoding.set(doc.encoding);
                     tab.line_ending.set(doc.line_ending);
                     // 行は見えた場所から取り寄せられる。最初の描き直しが
                     // 見えている窓を要求する。
-                    editor::load_pending(doc.line_count);
+                    editor::load_sparse(doc.line_count);
                     let doc_id = tab.id.get_untracked();
                     editor::set_doc_path(doc_id, Some(path.clone()));
                     editor::set_doc_file_size(doc_id, Some(doc.bytes));
@@ -1044,16 +1042,18 @@ impl Shell {
                     shell.status.set("開きました".into());
                     shell.mark_clean();
                     shell.save_session();
-                    // 行数はバックグラウンドで走査中。確定したら手元へ合わせる。
-                    let handle = doc.handle;
-                    spawn_local(async move {
-                        match framework::finish_document(handle).await {
-                            Ok(count) => {
-                                shell.document_scanned(handle, count);
+                    // 行数が未確定の場合のみ、バックグラウンド走査完了を待機する。
+                    if doc.line_count.is_none() {
+                        let handle = doc.handle;
+                        spawn_local(async move {
+                            match framework::finish_document(handle).await {
+                                Ok(count) => {
+                                    shell.document_scanned(handle, count);
+                                }
+                                Err(error) => shell.status.set(error),
                             }
-                            Err(error) => shell.status.set(error),
-                        }
-                    });
+                        });
+                    }
                 }
                 Err(error) => shell.status.set(error),
             }
@@ -1073,7 +1073,7 @@ impl Shell {
                 Ok(reopened) => {
                     tab.encoding.set(reopened.encoding.clone());
                     tab.line_ending.set(reopened.line_ending);
-                    editor::load_pending(reopened.line_count);
+                    editor::load_sparse(reopened.line_count);
                     shell.mark_clean_tab(tab);
                     shell
                         .status
@@ -1258,33 +1258,82 @@ impl Shell {
                         editor::set_doc_path(doc_id, syntax_path);
 
                         if let Some(draft) = draft_map.get(&t_state.id) {
-                            tab.dirty.set(true);
-                            let doc = editor::get_or_create_doc(doc_id);
-                            doc.borrow_mut()
-                                .load(crate::format::document::read(&draft.contents));
-                            if !t_state.modified_lines.is_empty() {
-                                doc.borrow_mut().set_modified_lines(t_state.modified_lines);
-                            } else if t_state.path.is_none() {
-                                let count = doc.borrow().text().line_count();
-                                doc.borrow_mut().set_modified_lines((0..count).collect());
-                            }
-                            let tab_copy = tab;
-                            let draft_contents = draft.contents.clone();
-                            let shell_copy = *self;
-                            spawn_local(async move {
-                                match create_document_from_draft(draft_contents).await {
-                                    Ok(opened) => {
-                                        if tab_copy.doc.get_untracked().is_some() {
-                                            framework::close_document(opened.handle).await;
-                                        } else {
-                                            tab_copy.doc.set(Some(opened.handle));
-                                            tab_copy.encoding.set(opened.encoding);
-                                            tab_copy.line_ending.set(opened.line_ending);
+                            tab.dirty.set(!draft.clean);
+                            if t_state.path.is_some() {
+                                // 実ファイルの下書き復元: 元ファイル参照＋操作ログ再生API（open_draft）を使用
+                                let draft_id = t_state.id.to_string();
+                                let tab_copy = tab;
+                                let shell_copy = *self;
+                                let modified_lines = t_state.modified_lines.clone();
+                                spawn_local(async move {
+                                    match framework::open_draft(&draft_id).await {
+                                        Ok(doc) => {
+                                            if tab_copy.doc.get_untracked().is_some() {
+                                                framework::close_document(doc.handle).await;
+                                            } else {
+                                                tab_copy.dirty.set(!doc.clean);
+                                                shell_copy.sync_dirty();
+                                                tab_copy.doc.set(Some(doc.handle));
+                                                tab_copy.bytes.set(doc.bytes);
+                                                tab_copy.encoding.set(doc.encoding);
+                                                tab_copy.line_ending.set(doc.line_ending);
+                                                editor::set_doc_file_size(doc_id, Some(doc.bytes));
+                                                editor::load_sparse_doc(doc_id, doc.line_count);
+                                                let doc_ref = editor::get_or_create_doc(doc_id);
+                                                if !modified_lines.is_empty() {
+                                                    doc_ref
+                                                        .borrow_mut()
+                                                        .set_modified_lines(modified_lines);
+                                                }
+                                                editor::redraw_doc(doc_id, None);
+                                                shell_copy.save_session();
+                                                // 行数が未確定の場合のみ、バックグラウンド走査完了を待機する。
+                                                // 下書き復元ですでに行数が確定している（Some）場合は走査待ち不要。
+                                                if doc.line_count.is_none() {
+                                                    let handle = doc.handle;
+                                                    spawn_local(async move {
+                                                        if let Ok(count) =
+                                                            framework::finish_document(handle).await
+                                                        {
+                                                            shell_copy
+                                                                .document_scanned(handle, count);
+                                                        }
+                                                    });
+                                                }
+                                            }
                                         }
+                                        Err(error) => shell_copy.status.set(error),
                                     }
-                                    Err(error) => shell_copy.status.set(error),
+                                });
+                            } else {
+                                // 無題ドキュメントの下書き復元
+                                let doc = editor::get_or_create_doc(doc_id);
+                                doc.borrow_mut()
+                                    .load(crate::format::document::read(&draft.contents));
+                                if !t_state.modified_lines.is_empty() {
+                                    doc.borrow_mut().set_modified_lines(t_state.modified_lines);
+                                } else {
+                                    let count = doc.borrow().text().line_count();
+                                    doc.borrow_mut().set_modified_lines((0..count).collect());
                                 }
-                            });
+                                let tab_copy = tab;
+                                let draft_contents = draft.contents.clone();
+                                let shell_copy = *self;
+                                spawn_local(async move {
+                                    match create_document_from_draft(draft_contents).await {
+                                        Ok(opened) => {
+                                            if tab_copy.doc.get_untracked().is_some() {
+                                                framework::close_document(opened.handle).await;
+                                            } else {
+                                                tab_copy.doc.set(Some(opened.handle));
+                                                tab_copy.encoding.set(opened.encoding);
+                                                tab_copy.line_ending.set(opened.line_ending);
+                                            }
+                                        }
+                                        Err(error) => shell_copy.status.set(error),
+                                    }
+                                });
+                            }
                         } else if let Some(ref path) = t_state.path {
                             tab.dirty.set(false);
                             let p = path.clone();
@@ -1296,22 +1345,21 @@ impl Shell {
                                         framework::close_document(doc.handle).await;
                                     } else {
                                         tab_copy.doc.set(Some(doc.handle));
-                                        tab_copy.large.set(doc.bytes > LARGE_BYTES);
                                         tab_copy.bytes.set(doc.bytes);
                                         tab_copy.encoding.set(doc.encoding);
                                         tab_copy.line_ending.set(doc.line_ending);
-                                        editor::set_doc_file_size(doc_id, Some(doc.bytes));
-                                        let doc_model = editor::get_or_create_doc(doc_id);
-                                        doc_model.borrow_mut().load_pending(doc.line_count);
+                                        editor::load_sparse_doc(doc_id, doc.line_count);
                                         editor::redraw_doc(doc_id, None);
-                                        let handle = doc.handle;
-                                        spawn_local(async move {
-                                            if let Ok(count) =
-                                                framework::finish_document(handle).await
-                                            {
-                                                shell_copy.document_scanned(handle, count);
-                                            }
-                                        });
+                                        if doc.line_count.is_none() {
+                                            let handle = doc.handle;
+                                            spawn_local(async move {
+                                                if let Ok(count) =
+                                                    framework::finish_document(handle).await
+                                                {
+                                                    shell_copy.document_scanned(handle, count);
+                                                }
+                                            });
+                                        }
                                     }
                                 }
                             });
@@ -1386,31 +1434,68 @@ impl Shell {
                 tab.untitled_num.set(None);
             }
             tab.path.set(draft.path.clone());
-            tab.dirty.set(true);
+            tab.dirty.set(!draft.clean);
             editor::set_doc_path(draft.id, draft.path.clone());
-            let doc = editor::get_or_create_doc(draft.id);
-            doc.borrow_mut()
-                .load(crate::format::document::read(&draft.contents));
-            let count = doc.borrow().text().line_count();
-            doc.borrow_mut().set_modified_lines((0..count).collect());
-
-            let tab_copy = tab;
-            let draft_contents = draft.contents.clone();
-            let shell_copy = *self;
-            spawn_local(async move {
-                match create_document_from_draft(draft_contents).await {
-                    Ok(opened) => {
-                        if tab_copy.doc.get_untracked().is_some() {
-                            framework::close_document(opened.handle).await;
-                        } else {
-                            tab_copy.doc.set(Some(opened.handle));
-                            tab_copy.encoding.set(opened.encoding);
-                            tab_copy.line_ending.set(opened.line_ending);
+            if draft.path.is_some() {
+                let draft_id = draft.id.to_string();
+                let doc_id = draft.id;
+                let tab_copy = tab;
+                let shell_copy = *self;
+                spawn_local(async move {
+                    match framework::open_draft(&draft_id).await {
+                        Ok(doc) => {
+                            if tab_copy.doc.get_untracked().is_some() {
+                                framework::close_document(doc.handle).await;
+                            } else {
+                                tab_copy.dirty.set(!doc.clean);
+                                shell_copy.sync_dirty();
+                                tab_copy.doc.set(Some(doc.handle));
+                                tab_copy.bytes.set(doc.bytes);
+                                tab_copy.encoding.set(doc.encoding);
+                                tab_copy.line_ending.set(doc.line_ending);
+                                editor::set_doc_file_size(doc_id, Some(doc.bytes));
+                                editor::load_sparse_doc(doc_id, doc.line_count);
+                                editor::redraw_doc(doc_id, None);
+                                shell_copy.save_session();
+                                if doc.line_count.is_none() {
+                                    let handle = doc.handle;
+                                    spawn_local(async move {
+                                        if let Ok(count) = framework::finish_document(handle).await
+                                        {
+                                            shell_copy.document_scanned(handle, count);
+                                        }
+                                    });
+                                }
+                            }
                         }
+                        Err(error) => shell_copy.status.set(error),
                     }
-                    Err(error) => shell_copy.status.set(error),
-                }
-            });
+                });
+            } else {
+                let doc = editor::get_or_create_doc(draft.id);
+                doc.borrow_mut()
+                    .load(crate::format::document::read(&draft.contents));
+                let count = doc.borrow().text().line_count();
+                doc.borrow_mut().set_modified_lines((0..count).collect());
+
+                let tab_copy = tab;
+                let draft_contents = draft.contents.clone();
+                let shell_copy = *self;
+                spawn_local(async move {
+                    match create_document_from_draft(draft_contents).await {
+                        Ok(opened) => {
+                            if tab_copy.doc.get_untracked().is_some() {
+                                framework::close_document(opened.handle).await;
+                            } else {
+                                tab_copy.doc.set(Some(opened.handle));
+                                tab_copy.encoding.set(opened.encoding);
+                                tab_copy.line_ending.set(opened.line_ending);
+                            }
+                        }
+                        Err(error) => shell_copy.status.set(error),
+                    }
+                });
+            }
             tabs.push(tab);
         }
         if !tabs.is_empty() {

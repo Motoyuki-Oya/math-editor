@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::document::Document;
 use crate::piece_tree::Piece;
@@ -51,6 +51,12 @@ impl Document {
     /// 文書をディスクへ流し、保存したファイルを新しい本体にする。
     /// 一時ファイルへ書いてから入れ替えるので、書きかけで元を壊さない。
     pub(crate) fn save(&mut self, path: &str) -> Result<(), String> {
+        // bulk（すべて置換等）は遅延評価のため、保存で書き出す前に等価な splice
+        // へ固める。これにより Undo の復元内容（元行）が読み取り時の bulk 再適用に
+        // 汚染されず、下書きへも通常の差分として残せる。失敗したら保存自体を中止する。
+        if self.log.has_active_bulk() {
+            self.materialize_bulk_transactions()?;
+        }
         let tmp = format!("{path}.saving");
         let fail = |e: String| format!("{path} を保存できませんでした: {e}");
         // 書きながら次の索引を作る。保存が終わった姿はこの索引そのもの。
@@ -129,14 +135,12 @@ impl Document {
         self.source = Some(Source {
             path: Path::new(path).to_path_buf(),
             file,
-            index: Arc::new(ScanIndex {
-                state: Mutex::new(ScanState {
-                    marks,
-                    lines: self.count,
-                    done: true,
-                    broken: None,
-                }),
-            }),
+            index: Arc::new(ScanIndex::new(ScanState {
+                marks,
+                lines: self.count,
+                done: true,
+                broken: None,
+            })),
             bytes: written,
             content_offset: initial_offset,
             pending_from: None,
@@ -152,7 +156,356 @@ impl Document {
             starts_newline: false,
             ends_newline: false,
         }]);
-        self.log.mark_saved();
+        // 小さいファイルは保存後も Undo 履歴を保持し、
+        // 巨大ファイル（10MB超）は新しいベースへ切り替えて操作ログと編集実体を破棄しメモリを解放する。
+        if written > 10 * 1024 * 1024 {
+            self.log.clear();
+            self.buffers = crate::edit_buffers::EditBuffers::default();
+        } else {
+            self.materialize_bulk_transactions()?;
+            self.log.mark_saved();
+        }
+        // 保存で新しいバイト列へ差し替わったため、旧バイト列の索引は破棄する。
+        // 共有状態を持つバックグラウンド索引は、Arc の所有者がここだけになると自発的に終わる。
+        self.search_index = None;
         Ok(())
+    }
+
+    /// 保存で bulk の結果が新しい Source へ書き込まれたため、active な bulk
+    /// トランザクションを等価な splice へ変換する。このまま active に残すと、
+    /// 変換後の行へ同じ規則が再適用され（foo→foofoo の二重化）、Undo も
+    /// 効かなくなる。変換後は通常の編集として Undo/Redo・下書き化できる。
+    pub(crate) fn materialize_bulk_transactions(&mut self) -> Result<(), String> {
+        use crate::operation_log::OperationKind;
+        let targets: Vec<usize> = self.log.transactions[..self.log.head]
+            .iter()
+            .enumerate()
+            .filter_map(|(i, tx)| matches!(tx.kind, OperationKind::Bulk(_)).then_some(i))
+            .collect();
+        for &index in targets.iter().rev() {
+            let (base_revision, group, revision, bulk, before_text, after_text) = {
+                let tx = &self.log.transactions[index];
+                match &tx.kind {
+                    OperationKind::Bulk(bulk) => (
+                        tx.base_revision,
+                        tx.group,
+                        tx.revision,
+                        bulk.clone(),
+                        tx.before.clone(),
+                        tx.after.clone(),
+                    ),
+                    OperationKind::Splice(_) => continue,
+                }
+            };
+            let mut edits = Vec::new();
+            match &bulk {
+                crate::operation_log::BulkOperation::AllLines {
+                    from_line, to_line, ..
+                }
+                | crate::operation_log::BulkOperation::ReplaceAll {
+                    from_line, to_line, ..
+                } => {
+                    // 範囲内の各行を 1 編集として記録する。内容の変化有無で絞ると、
+                    // たまたま元と同じ結果になった行が欠けて Undo で復元できない
+                    // ため、位置ベースで全行を固める。後ろの行から置き換え、
+                    // まだ置き換えていない行の座標を変えない。
+                    for line_idx in (*from_line..*to_line).rev() {
+                        if line_idx >= self.count {
+                            break;
+                        }
+                        let original = self.read_raw(line_idx, 1)?;
+                        let current = self.read(line_idx, 1)?;
+                        edits.push(self.splice_with_deleted(
+                            line_idx,
+                            line_idx + 1,
+                            current,
+                            original,
+                        )?);
+                    }
+                }
+            }
+            let tx = crate::operation_log::Transaction {
+                group,
+                base_revision,
+                revision,
+                kind: OperationKind::Splice(edits),
+                before: before_text,
+                after: after_text,
+            };
+            self.log.transactions[index] = tx;
+        }
+        Ok(())
+    }
+
+    /// 下書きを書き出す。元ファイルがある場合は全文ダンプを絶対に行わず、
+    /// 元ファイルへの参照、総行数、未保存の差分行、および Redo 履歴を含む head 位置を記録する。
+    pub(crate) fn write_draft<W: Write>(
+        &mut self,
+        out: &mut W,
+        path: Option<&str>,
+    ) -> Result<(), String> {
+        if self.log.has_active_bulk() {
+            self.materialize_bulk_transactions()?;
+        }
+        if let Some(p) = path {
+            writeln!(out, "// PLANETEXT_DRAFT_REF_V2")
+                .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+            writeln!(out, "{p}").map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+            let (diffs, head_offset) = self.collect_draft_diffs();
+            // 過去の重大ミスと再発防止の記録:
+            // 800MB 等の巨大ファイル読み込み時、背景走査が完了していない段階で下書きが保存されると、
+            // self.count は「先頭 1MB の読み込みバッファ内の改行数（20,971）」という仮の数値にすぎない。
+            // それを base_count として下書きに保存してしまうと、次回起動時にその仮の数値を「確定した真の行数」
+            // と誤認して 800MB のファイルの走査を 20,971 行で打ち切る致命的な先祖返り事故を引き起こした。
+            // したがって、走査未完了（confirmed_line_count() が None）のときは、仮の行数は絶対に下書きに書かず、
+            // 未確定を示す 0 を書き出さなければならない。この不変条件を絶対に崩してはならない。
+            let base_count = if let Some(confirmed) = self.confirmed_line_count() {
+                let active_count = head_offset.min(diffs.len());
+                let mut line_delta: isize = 0;
+                for diff in &diffs[..active_count] {
+                    line_delta += diff.lines.len() as isize - diff.removed_lines as isize;
+                }
+                (confirmed as isize - line_delta).max(0) as usize
+            } else {
+                0
+            };
+            writeln!(out, "{}", base_count)
+                .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+            if diffs.is_empty() {
+                writeln!(out, "CLEAN").map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+            } else {
+                writeln!(out, "DIFF").map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+                writeln!(out, "{} {}", diffs.len(), head_offset)
+                    .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+                for diff in &diffs {
+                    diff.write_to(out)
+                        .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+                }
+            }
+            Ok(())
+        } else {
+            // 無題ドキュメントは1行目を空にして本文を書き出す
+            writeln!(out).map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
+            self.write_to(out)
+        }
+    }
+
+    /// 未保存のトランザクションから、発生した時系列順に操作ログ（差分）を抽出する。
+    /// Undo された（Redo 可能な）トランザクションも含めて保持し、復元後に Redo できるようにする。
+    pub(crate) fn collect_draft_diffs(&mut self) -> (Vec<DraftDiff>, usize) {
+        let (txs, head_tx_offset) = self.log.all_unsaved_transactions();
+        let mut diffs = Vec::new();
+        let mut active_diffs_count = 0;
+        for (tx_idx, tx) in txs.iter().enumerate() {
+            let group = (tx_idx as u64) + 1;
+            for edit in tx.edits() {
+                let mut lines = Vec::with_capacity(edit.inserted_lines);
+                self.buffers.for_each_line(
+                    edit.inserted,
+                    0,
+                    edit.inserted_lines,
+                    &mut |_, line| {
+                        lines.push(line.to_string());
+                        true
+                    },
+                );
+                let deleted_lines = self.log.read_deleted(edit.removed);
+                let fallback_pos = format!("{}.0-{}.0", edit.from_line, edit.from_line);
+                let before = if tx.before.is_empty() {
+                    fallback_pos.clone()
+                } else {
+                    tx.before.clone()
+                };
+                let after = if tx.after.is_empty() {
+                    fallback_pos
+                } else {
+                    tx.after.clone()
+                };
+                diffs.push(DraftDiff {
+                    group,
+                    from_line: edit.from_line,
+                    removed_lines: edit.removed_lines,
+                    lines,
+                    deleted_lines,
+                    before,
+                    after,
+                });
+                if tx_idx < head_tx_offset {
+                    active_diffs_count += 1;
+                }
+            }
+        }
+        for pending in &self.pending_redo_diffs {
+            diffs.push(pending.clone());
+        }
+        (diffs, active_diffs_count)
+    }
+
+    /// 元ファイルから開いた文書に対して、未保存の操作ログを時系列順に再生し、
+    /// メモリ上のピースツリーを編集状態へ再構成する。
+    /// 下書きに記録された deleted_lines を使用するため、元ファイルへのディスクリードは一切発生しない。
+    pub(crate) fn apply_draft_diffs(&mut self, diffs: Vec<DraftDiff>) -> Result<(), String> {
+        for diff in diffs {
+            let to_line = diff.from_line + diff.removed_lines;
+            self.replace_with_deleted(
+                diff.from_line,
+                to_line,
+                diff.lines,
+                diff.group,
+                &diff.before,
+                &diff.after,
+                diff.deleted_lines,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// 下書きに記録される行範囲の変更差分。外部クレートに頼らない軽量なプレーンテキスト表現。
+#[derive(Clone, Debug)]
+pub struct DraftDiff {
+    pub group: u64,
+    pub from_line: usize,
+    pub removed_lines: usize,
+    pub lines: Vec<String>,
+    pub deleted_lines: Vec<String>,
+    pub before: String,
+    pub after: String,
+}
+
+impl DraftDiff {
+    pub(crate) fn write_to<W: Write>(&self, out: &mut W) -> std::io::Result<()> {
+        writeln!(
+            out,
+            "{} {} {} {} {}",
+            self.group,
+            self.from_line,
+            self.removed_lines,
+            self.lines.len(),
+            self.deleted_lines.len()
+        )?;
+        writeln!(
+            out,
+            "{}",
+            if self.before.is_empty() {
+                "-"
+            } else {
+                &self.before
+            }
+        )?;
+        writeln!(
+            out,
+            "{}",
+            if self.after.is_empty() {
+                "-"
+            } else {
+                &self.after
+            }
+        )?;
+        for line in &self.lines {
+            writeln!(out, "{line}")?;
+        }
+        for line in &self.deleted_lines {
+            writeln!(out, "{line}")?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn read_from<'a>(lines: &mut impl Iterator<Item = &'a str>) -> Option<Self> {
+        let header = lines.next()?;
+        let parts: Vec<&str> = header.split_whitespace().collect();
+        let (group, from_line, removed_lines, count, deleted_count) = if parts.len() >= 5 {
+            (
+                parts[0].parse().ok()?,
+                parts[1].parse().ok()?,
+                parts[2].parse().ok()?,
+                parts[3].parse::<usize>().ok()?,
+                parts[4].parse::<usize>().ok()?,
+            )
+        } else if parts.len() >= 4 {
+            (
+                parts[0].parse().ok()?,
+                parts[1].parse().ok()?,
+                parts[2].parse().ok()?,
+                parts[3].parse::<usize>().ok()?,
+                0,
+            )
+        } else if parts.len() == 3 {
+            (
+                0,
+                parts[0].parse().ok()?,
+                parts[1].parse().ok()?,
+                parts[2].parse::<usize>().ok()?,
+                0,
+            )
+        } else {
+            return None;
+        };
+        let before_line = lines.next()?;
+        let after_line = lines.next()?;
+        let before = if before_line == "-" {
+            String::new()
+        } else {
+            before_line.to_string()
+        };
+        let after = if after_line == "-" {
+            String::new()
+        } else {
+            after_line.to_string()
+        };
+        let mut diff_lines = Vec::with_capacity(count);
+        for _ in 0..count {
+            diff_lines.push(lines.next()?.to_string());
+        }
+        let mut deleted_lines = Vec::with_capacity(deleted_count);
+        for _ in 0..deleted_count {
+            deleted_lines.push(lines.next()?.to_string());
+        }
+        Some(Self {
+            group,
+            from_line,
+            removed_lines,
+            lines: diff_lines,
+            deleted_lines,
+            before,
+            after,
+        })
+    }
+
+    /// 旧フォーマット（V1: before/after/deleted_lines なし）からの読み出し
+    pub(crate) fn read_from_v1<'a>(lines: &mut impl Iterator<Item = &'a str>) -> Option<Self> {
+        let header = lines.next()?;
+        let parts: Vec<&str> = header.split_whitespace().collect();
+        let (group, from_line, removed_lines, count) = if parts.len() >= 4 {
+            (
+                parts[0].parse().ok()?,
+                parts[1].parse().ok()?,
+                parts[2].parse().ok()?,
+                parts[3].parse::<usize>().ok()?,
+            )
+        } else if parts.len() == 3 {
+            (
+                0,
+                parts[0].parse().ok()?,
+                parts[1].parse().ok()?,
+                parts[2].parse::<usize>().ok()?,
+            )
+        } else {
+            return None;
+        };
+        let mut diff_lines = Vec::with_capacity(count);
+        for _ in 0..count {
+            diff_lines.push(lines.next()?.to_string());
+        }
+        let fallback_pos = format!("{from_line}.0-{from_line}.0");
+        Some(Self {
+            group,
+            from_line,
+            removed_lines,
+            lines: diff_lines,
+            deleted_lines: Vec::new(),
+            before: fallback_pos.clone(),
+            after: fallback_pos,
+        })
     }
 }

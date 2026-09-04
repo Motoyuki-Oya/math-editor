@@ -43,9 +43,14 @@ pub struct Document {
     pub(crate) recorder: Recorder,
     pub(crate) modified_lines: std::collections::BTreeSet<usize>,
     pub(crate) file_bytes: Option<usize>,
+    pub(crate) counting: bool,
 }
 
 impl Document {
+    pub fn is_counting(&self) -> bool {
+        self.counting
+    }
+
     pub fn text(&self) -> &Text {
         &self.text
     }
@@ -100,14 +105,39 @@ impl Document {
         self.text = text;
         self.recorder = Recorder::default();
         self.clear_modified();
+        self.counting = false;
+    }
+
+    /// 疎（スライス）テキストとして読み込む。
+    /// line_count が Some(count) の場合は行数確定済み（下書き復元等）として counting = false で開く。
+    /// line_count が None の場合は走査中（未確定）として 1,000 行枠を仮確保し counting = true で開く。
+    pub fn load_sparse(&mut self, line_count: Option<usize>) {
+        const INITIAL_PENDING_LINES: usize = 1_000;
+        match line_count {
+            Some(count) => {
+                self.load(Text::pending(count.max(1)));
+                self.counting = false;
+            }
+            None => {
+                self.load(Text::pending(INITIAL_PENDING_LINES));
+                self.counting = true;
+            }
+        }
     }
 
     pub fn load_pending(&mut self, line_count: usize) {
-        self.load(Text::pending(line_count));
+        if line_count == 0 {
+            self.load_sparse(None);
+        } else {
+            self.load_sparse(Some(line_count));
+            // 単体テスト等で明示的に走査中をシミュレートする場合の互換性
+            self.counting = true;
+        }
     }
 
     pub fn resize_pending(&mut self, line_count: usize) {
         self.text.resize_pending(line_count);
+        self.counting = false;
     }
 
     pub fn resident_lines(&self) -> usize {
@@ -123,6 +153,10 @@ impl Document {
     }
 
     pub fn feed(&mut self, from: usize, lines: Vec<crate::structure::text::SourceLine>) {
+        let end = from + lines.len();
+        if self.counting && end > self.text.line_count() {
+            self.text.resize_pending(end);
+        }
         for (offset, line) in lines.into_iter().enumerate() {
             self.text.fill_line(from + offset, line);
         }
@@ -217,6 +251,13 @@ impl Editor {
         self.document.text.mark_all_changed();
     }
 
+    /// 疎（スライス）テキストとして読み込む。
+    #[allow(dead_code)]
+    pub fn load_sparse(&mut self, line_count: Option<usize>) {
+        self.document.load_sparse(line_count);
+        self.cursors = vec![UnifiedCursor::caret(Pos::default())];
+    }
+
     /// 行数だけ分かっている文書を表示し、行は見えた場所から届く。
     #[allow(dead_code)]
     pub fn load_pending(&mut self, line_count: usize) {
@@ -305,6 +346,44 @@ pub(crate) mod tests {
         editor.feed(0, vec![SourceLine::Plain("first".into())]);
         assert_eq!(editor.text().first_absent(0), None);
         assert_eq!(plain(&editor), "first\nlate");
+    }
+
+    /// 【回帰防止テスト】
+    /// Document::load_pending（バックグラウンド走査開始）で is_counting() が true になり、
+    /// 確定時（resize_pending や通常の load）で false になるライフサイクルを保証する。
+    #[test]
+    fn document_counting_lifecycle() {
+        let mut doc = Document::default();
+        assert!(!doc.is_counting());
+
+        // 初期スキャン行数は渡さず 0 で保留開始
+        doc.load_pending(0);
+        assert!(doc.is_counting(), "走査中は counting が true であること");
+
+        doc.resize_pending(16_000_000);
+        assert!(!doc.is_counting(), "確定後は counting が false であること");
+    }
+
+    /// 【回帰防止テスト】
+    /// 走査中（load_pending(0)）の初期状態で複数行の feed が届いたとき、
+    /// 1行目だけでなく届いたすべての行が破棄されずに保持されることを保証する。
+    #[test]
+    fn pending_counting_document_feeds_and_retains_multiple_lines() {
+        use crate::structure::text::SourceLine;
+        let mut doc = Document::default();
+        doc.load_pending(0);
+        assert!(doc.is_counting());
+
+        let lines: Vec<SourceLine> = (0..50)
+            .map(|i| SourceLine::Plain(format!("Line {i}")))
+            .collect();
+        doc.feed(0, lines);
+
+        // 0行目だけでなく、50行目まで正しく取得できること
+        assert_eq!(doc.text().line_count(), 1_000);
+        assert_eq!(doc.text().first_absent(0), Some(50));
+        assert_eq!(crate::structure::plain::row(doc.text().line(0)), "Line 0");
+        assert_eq!(crate::structure::plain::row(doc.text().line(49)), "Line 49");
     }
 
     /// 履歴の 1 ステップは文書の本体が持つ。ここではグループ番号の付き方

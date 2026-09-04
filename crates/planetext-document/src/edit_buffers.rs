@@ -109,6 +109,10 @@ impl EditBuffers {
         )
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.insert.len()
+    }
+
     pub(crate) fn line_separator_len(encoding: FileEncoding, line_ending: LineEnding) -> usize {
         encoded_separator(encoding, line_ending).len()
     }

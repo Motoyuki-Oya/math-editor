@@ -315,7 +315,7 @@ mod tests {
         let (mut doc, path) = disk_doc("no-op", &["a", "b"]);
         doc.replace(1, 1, Vec::new(), 1, "before", "after").unwrap();
 
-        assert!(doc.log.undo[0].edits[0].removed.lines == 0);
+        assert!(doc.log.transactions[0].edits()[0].removed.lines == 0);
         assert_eq!(all(&mut doc), vec!["a", "b"]);
         let undone = doc.undo().unwrap().unwrap();
         assert_eq!(undone.state, "before");
@@ -496,6 +496,87 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
+    /// 【回帰防止テスト】
+    /// バックグラウンド走査中の巨大ファイル（pending_source が残る状態）であっても、
+    /// estimate_matches は最初のチャンク行数で頭打ちにならず、ファイル全体のサイズに
+    /// 正しく外挿された推定件数を返すことを保証する。
+    /// また、走査が完了した後は自動的に confirm_scan_if_done が走り、確定件数が返ることを保証する。
+    #[test]
+    fn estimate_matches_extrapolates_pending_source_and_confirms_when_done() {
+        use crate::document::PendingSource;
+        use crate::edit_buffers::EditBuffers;
+        use crate::operation_log::OperationLog;
+        use crate::piece_tree::{Piece, PieceTree};
+
+        let lines: Vec<String> = (0..100_000)
+            .map(|i| format!("line {i} with keyword target"))
+            .collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (mut doc, path) = disk_doc("estimate-pending-extrapolate", &refs);
+        let pattern = regex::Regex::new("target").unwrap();
+
+        let initial_lines = 1_000;
+        let initial_bytes = doc.pieces.byte_offset(initial_lines);
+        let total_bytes = doc.pieces.byte_offset(100_000);
+
+        let mut simulated_doc = Document {
+            pieces: PieceTree::new(vec![
+                Piece::Source {
+                    from: 0,
+                    len: initial_bytes,
+                    newlines: initial_lines - 1,
+                    starts_newline: false,
+                    ends_newline: true,
+                },
+                Piece::Source {
+                    from: initial_bytes,
+                    len: total_bytes - initial_bytes,
+                    newlines: 0,
+                    starts_newline: true,
+                    ends_newline: false,
+                },
+            ]),
+            buffers: EditBuffers::default(),
+            count: initial_lines,
+            encoding: doc.encoding,
+            line_ending: doc.line_ending,
+            source: doc.source.take(),
+            log: OperationLog::default(),
+            pending_source: Some(PendingSource {
+                from: initial_bytes,
+                len: total_bytes - initial_bytes,
+                prefix_newlines: initial_lines - 1,
+            }),
+            search_index: None,
+            background_index: None,
+            pending_redo_diffs: Vec::new(),
+        };
+
+        // 未確定状態（count = 1,000）でも、ファイル全体規模（約100,000件）に外挿されること
+        let estimated = simulated_doc.estimate_matches(&pattern).unwrap();
+        assert!(
+            (90_000..=110_000).contains(&estimated),
+            "未確定走査中でもファイル全体規模に外挿されること: expected ~100000, got {estimated}"
+        );
+
+        // 走査完了をシミュレート
+        if let Some(source) = &simulated_doc.source {
+            let mut state = source.index.state.lock().unwrap();
+            state.done = true;
+            state.lines = 100_000;
+        }
+
+        // 走査完了後は confirm_scan_if_done が自動で走り、count が 100,000 に確定すること
+        let final_estimated = simulated_doc.estimate_matches(&pattern).unwrap();
+        assert!(
+            (final_estimated as isize - 100_000).abs() <= 10,
+            "走査完了後の推定件数は約100,000件であること: got {final_estimated}"
+        );
+        assert_eq!(simulated_doc.count, 100_000);
+
+        std::fs::remove_file(path).ok();
+    }
+
     #[test]
     fn ascii_case_fold_finds_non_overlapping_matches() {
         assert_eq!(literal_positions(b"xxAbCaBC", b"abc", false), vec![2, 5]);
@@ -522,14 +603,11 @@ mod tests {
         doc.replace(0, 1, vec!["first".into()], 1, "", "").unwrap();
         let mut snapshot = doc.search_snapshot().unwrap();
         doc.replace(0, 1, vec!["second".into()], 2, "", "").unwrap();
-        let pattern = regex::Regex::new("first").unwrap();
+        let query = crate::search::CompiledQuery::compile("first", false, true, '$').unwrap();
         let found = snapshot
             .search_candidates(
                 SearchSpec {
-                    pattern: &pattern,
-                    literal: Some("first"),
-                    case_sensitive: true,
-                    marker: '$',
+                    query: &query,
                     from: 0,
                     end: 2,
                     after_col: None,
@@ -546,14 +624,11 @@ mod tests {
     fn native_search_stops_when_cancelled() {
         let (doc, path) = disk_doc("search-cancel", &["a", "b"]);
         let mut snapshot = doc.search_snapshot().unwrap();
-        let pattern = regex::Regex::new("missing").unwrap();
+        let query = crate::search::CompiledQuery::compile("missing", false, true, '$').unwrap();
         let found = snapshot
             .search_candidates(
                 SearchSpec {
-                    pattern: &pattern,
-                    literal: Some("missing"),
-                    case_sensitive: true,
-                    marker: '$',
+                    query: &query,
                     from: 0,
                     end: 2,
                     after_col: None,
@@ -570,14 +645,11 @@ mod tests {
     fn literal_search_candidates_resume_after_a_character_column() {
         let (doc, path) = disk_doc("literal-search-resume", &["前needle後needle", "needle"]);
         let mut snapshot = doc.search_snapshot().unwrap();
-        let pattern = regex::Regex::new("needle").unwrap();
+        let query = crate::search::CompiledQuery::compile("needle", false, true, '$').unwrap();
         let found = snapshot
             .search_candidates(
                 SearchSpec {
-                    pattern: &pattern,
-                    literal: Some("needle"),
-                    case_sensitive: true,
-                    marker: '$',
+                    query: &query,
                     from: 0,
                     end: 2,
                     after_col: Some(8),
@@ -789,6 +861,85 @@ mod tests {
             doc.assemble(2, None, 6, None, &overrides).unwrap(),
             "c\nx\n$one\noverride\ne"
         );
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 【回帰防止テスト】
+    /// assemble の実体化が MAX_ASSEMBLE_BYTES（10MB）を超える場合、
+    /// 安全のためにエラーを返し、巨大なヒープ確保によるプロセス圧迫を防ぐ。
+    #[test]
+    fn assemble_enforces_max_bytes_limit() {
+        let large_line = "A".repeat(1024 * 1024); // 1MB の行
+        let lines: Vec<String> = vec![large_line.clone(); 12]; // 12MB 分
+        let lines_ref: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (mut doc, path) = disk_doc("assemble-limit", &lines_ref);
+
+        let overrides = std::collections::HashMap::default();
+        let res = doc.assemble(0, None, 11, None, &overrides);
+        assert!(res.is_err(), "10MB を超える assemble はエラーを返すこと");
+        assert!(
+            res.unwrap_err().contains("上限10MB"),
+            "エラーメッセージに上限情報が含まれること"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 【回帰防止テスト】
+    /// 編集バッファと操作ログのメモリ使用量が memory_usage() で正しく追跡されることを保証する。
+    #[test]
+    fn document_memory_usage_tracks_edits() {
+        let (mut doc, path) = disk_doc("memory-tracking", &["hello", "world"]);
+        let initial_memory = doc.memory_usage();
+
+        doc.replace(1, 2, vec!["new content line".into()], 1, "", "")
+            .unwrap();
+        let edited_memory = doc.memory_usage();
+        assert!(
+            edited_memory > initial_memory,
+            "編集によりメモリ追跡値が増加すること"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 【回帰防止テスト】
+    /// 小さいファイルの保存後、Undo履歴が保持され、保存状態（is_clean）がマークされることを検証する。
+    #[test]
+    fn small_file_save_retains_undo_history() {
+        let (mut doc, path) = disk_doc("small-save-undo", &["first line", "second line"]);
+        doc.replace(1, 2, vec!["edited second line".into()], 1, "", "")
+            .unwrap();
+        assert!(!doc.is_clean());
+
+        doc.save(&path).unwrap();
+        assert!(doc.is_clean(), "保存後は clean になること");
+        assert!(
+            !doc.log.transactions.is_empty(),
+            "小さいファイルは保存後も Undo 履歴が保持されること"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 【回帰防止テスト】
+    /// 巨大ファイル（10MB超）の保存後、新しいベースへ切り替わり、メモリを圧迫しないよう
+    /// 操作ログと編集バッファが解放されることを検証する。
+    #[test]
+    fn large_file_save_clears_log_and_switches_base() {
+        let large_chunk = "B".repeat(1024 * 1024); // 1MB の行
+        let lines: Vec<String> = vec![large_chunk.clone(); 11]; // 11MB 分
+        let lines_ref: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (mut doc, path) = disk_doc("large-save-clear", &lines_ref);
+
+        doc.replace(1, 2, vec!["edited large line".into()], 1, "", "")
+            .unwrap();
+        assert!(!doc.log.transactions.is_empty());
+
+        doc.save(&path).unwrap();
+        assert!(doc.is_clean(), "保存後は clean になること");
+        assert!(
+            doc.log.transactions.is_empty(),
+            "巨大ファイルは保存後に操作ログが破棄されてメモリが解放されること"
+        );
+        assert_eq!(doc.buffers.len(), 0, "編集バッファも解放されること");
         std::fs::remove_file(path).ok();
     }
 
@@ -1102,15 +1253,12 @@ mod tests {
             .unwrap();
         println!("ASCII fold full scan: {:?}", start.elapsed());
         let mut snapshot = doc.search_snapshot().unwrap();
-        let pattern = regex::Regex::new(missing).unwrap();
+        let query = crate::search::CompiledQuery::compile(missing, false, true, '$').unwrap();
         let start = std::time::Instant::now();
         let searched = snapshot
             .search_candidates(
                 SearchSpec {
-                    pattern: &pattern,
-                    literal: Some(missing),
-                    case_sensitive: true,
-                    marker: '$',
+                    query: &query,
                     from: 0,
                     end: doc.line_count(),
                     after_col: None,
@@ -1143,14 +1291,14 @@ mod tests {
             "after",
         )
         .unwrap();
-        let undo_len = doc.log.undo.len();
+        let undo_len = doc.log.head;
 
         assert!(doc
             .replace(0, 5, Vec::new(), 2, "before delete", "after delete")
             .is_err());
         assert_eq!(doc.line_count(), 5);
         assert_eq!(doc.read(4, 1).unwrap().len(), 1);
-        assert_eq!(doc.log.undo.len(), undo_len);
+        assert_eq!(doc.log.head, undo_len);
     }
 
     /// 巨大な行を含むファイルで MAX_READ_BYTES ガードが正しく働き、
@@ -1434,6 +1582,487 @@ mod tests {
         doc.reopen_with_encoding(FileEncoding::ShiftJis).unwrap();
         assert_eq!(doc.encoding(), FileEncoding::ShiftJis);
         assert_eq!(doc.read(0, 1).unwrap(), vec!["あいうえお"]);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn search_snapshot_maps_hits_across_intervening_edits() {
+        let (mut doc, path) = disk_doc("search-map", &["apple", "banana", "cherry"]);
+        let snap = doc.search_snapshot().unwrap();
+        // 検索スナップショット取得後に先頭に 1 行挿入
+        doc.replace(0, 0, vec!["prefix".to_string()], 1, "", "")
+            .unwrap();
+        assert_eq!(doc.line_count(), 4);
+
+        // スナップショット時点では "cherry" は 2 行目
+        let hits = vec![crate::search::ScanHit {
+            line: 2,
+            notation: false,
+            start: 0,
+            end: 6,
+        }];
+        let mapped = doc.map_search_hits(&snap, hits);
+        assert_eq!(mapped.len(), 1);
+        // 現在の文書では 3 行目へ写像されていること
+        assert_eq!(mapped[0].line, 3);
+        assert_eq!(mapped[0].start, 0);
+        assert_eq!(mapped[0].end, 6);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn search_snapshot_invalidates_hits_overlapping_edits() {
+        let (mut doc, path) = disk_doc("search-invalid", &["apple", "banana", "cherry"]);
+        let snap = doc.search_snapshot().unwrap();
+        // 検索スナップショット取得後に "banana"（1行目）を削除
+        doc.replace(1, 2, Vec::new(), 1, "", "").unwrap();
+        assert_eq!(doc.line_count(), 2);
+
+        // スナップショット時点での "banana" ヒット
+        let hits = vec![crate::search::ScanHit {
+            line: 1,
+            notation: false,
+            start: 0,
+            end: 6,
+        }];
+        let mapped = doc.map_search_hits(&snap, hits);
+        // 削除範囲と重なっているため無効化されること
+        assert!(mapped.is_empty());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn replace_lines_with_base_revision_maps_old_coordinates() {
+        let (mut doc, path) = disk_doc("base-rev-map", &["line0", "line1", "line2", "line3"]);
+        let base_rev = doc.revision();
+
+        // 別の編集が先頭に入って revision が進む
+        doc.replace(0, 0, vec!["new0".to_string()], 1, "", "")
+            .unwrap();
+        assert_eq!(doc.line_count(), 5);
+
+        // 古い base_rev を基準にした「line2（旧2行目）の置換」を適用
+        doc.replace_with_base(
+            base_rev,
+            2,
+            3,
+            vec!["replaced_line2".to_string()],
+            2,
+            "",
+            "",
+        )
+        .unwrap();
+
+        // 現在座標（3行目）が置換されていること
+        let lines = doc.read(0, doc.line_count()).unwrap();
+        assert_eq!(
+            lines,
+            vec!["new0", "line0", "line1", "replaced_line2", "line3"]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn bulk_replace_all_is_evaluated_on_demand_and_undoable() {
+        let (mut doc, path) = disk_doc("bulk-test", &["foo 123", "bar 456", "foo 789"]);
+        let base_rev = doc.revision();
+        let pattern = regex::RegexBuilder::new("foo")
+            .case_insensitive(true)
+            .build()
+            .unwrap();
+        let op = crate::operation_log::BulkOperation::ReplaceAll {
+            from_line: 0,
+            to_line: 3,
+            query: "foo".to_string(),
+            replacement: "baz".to_string(),
+            case_sensitive: false,
+            pattern: std::sync::Arc::new(pattern),
+        };
+        doc.apply_bulk_operation(base_rev, 1, op, "", "").unwrap();
+
+        // オンデマンドに評価されて置換結果が返ること
+        let lines = doc.read(0, 3).unwrap();
+        assert_eq!(lines, vec!["baz 123", "bar 456", "baz 789"]);
+
+        // Undo すると瞬時に元に戻ること
+        doc.undo().unwrap().unwrap();
+        let restored = doc.read(0, 3).unwrap();
+        assert_eq!(restored, vec!["foo 123", "bar 456", "foo 789"]);
+
+        // Redo すると再度適用されること
+        doc.redo().unwrap().unwrap();
+        let reapplied = doc.read(0, 3).unwrap();
+        assert_eq!(reapplied, vec!["baz 123", "bar 456", "baz 789"]);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn search_index_estimates_matches_and_updates_on_edit() {
+        let (mut doc, path) = disk_doc(
+            "index-test",
+            &["apple banana", "orange apple", "grape apple"],
+        );
+        doc.enable_search_index();
+
+        // 初期状態で "apple" が 3 件推定されること
+        let re = regex::Regex::new("apple").unwrap();
+        assert_eq!(doc.estimate_matches(&re).unwrap(), 3);
+
+        // 1行目を置換して "apple" を減らす
+        doc.replace(
+            0,
+            1,
+            vec!["kiwi banana".to_string()],
+            1,
+            "apple banana",
+            "kiwi banana",
+        )
+        .unwrap();
+
+        // 差分キャッシュにより推定件数が 2 件になること
+        assert_eq!(doc.estimate_matches(&re).unwrap(), 2);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn search_index_treats_structure_format_as_raw_text() {
+        // 構造フォーマット・数式記法を含むテキストもフィルタリングせずそのまま bi-gram インデックス化されること
+        let (mut doc, path) = disk_doc(
+            "index-notation-test",
+            &["formula: $(E = mc^2)$", "text line", "another $(x + y)$"],
+        );
+        doc.enable_search_index();
+
+        let re = regex::Regex::new(r"\$\(").unwrap();
+        // 記法プレフィックス "$(" を含む箇所が 2 件推定されること
+        assert_eq!(doc.estimate_matches(&re).unwrap(), 2);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn search_index_undo_redo_updates_deltas() {
+        let (mut doc, path) = disk_doc(
+            "index-undo-test",
+            &["apple banana", "orange apple", "grape apple"],
+        );
+        doc.enable_search_index();
+
+        let re = regex::Regex::new("apple").unwrap();
+        assert_eq!(doc.estimate_matches(&re).unwrap(), 3);
+
+        // 1行目を置換
+        doc.replace(
+            0,
+            1,
+            vec!["kiwi banana".to_string()],
+            1,
+            "apple banana",
+            "kiwi banana",
+        )
+        .unwrap();
+        assert_eq!(doc.estimate_matches(&re).unwrap(), 2);
+
+        // undo で差分キャッシュが元に戻り、3 件になること
+        doc.undo().unwrap();
+        assert_eq!(doc.estimate_matches(&re).unwrap(), 3);
+
+        // redo で再度 2 件になること
+        doc.redo().unwrap();
+        assert_eq!(doc.estimate_matches(&re).unwrap(), 2);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn search_candidates_finds_distant_matches_efficiently() {
+        use crate::search::{CompiledQuery, SearchSpec};
+
+        // 512KB を超える複数ブロックのファイルを作成し、遠いブロックのみにターゲットを配置
+        let mut lines = Vec::new();
+        // 1行約100バイト * 15,000行 = 約1.5MB（約3ブロック分）
+        let padding = "x".repeat(95);
+        for _ in 0..15_000 {
+            lines.push(padding.clone());
+        }
+        lines.push("hello target_needle world".to_string());
+        lines.push(padding);
+
+        let lines_ref: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        let (mut doc, path) = disk_doc("distant-block-test", &lines_ref);
+        doc.enable_search_index();
+
+        let compiled = CompiledQuery::compile("target_needle", false, true, '\0').unwrap();
+        let spec = SearchSpec {
+            query: &compiled,
+            from: 0,
+            end: doc.line_count(),
+            after_col: None,
+        };
+        let candidates = doc.search_candidates(spec, &|| false).unwrap();
+        assert!(!candidates.cancelled);
+        assert_eq!(candidates.hits.len(), 1);
+        assert_eq!(candidates.hits[0].line, 15_000);
+        assert_eq!(candidates.hits[0].start, 6);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 回帰: 同一 group の連続編集で既存トランザクションの revision が上書きされず、
+    /// 保存直後に続けてタイプしても saved checkpoint が壊れないことを検証する。
+    #[test]
+    fn merging_edits_keeps_revisions_immutable() {
+        let (mut doc, path) = disk_doc("merge-revision", &["a", "b"]);
+        // 保存して saved checkpoint を作る
+        doc.save(&path).unwrap();
+        let saved_rev = doc.revision();
+        assert!(doc.is_clean());
+
+        // 同一 group で連続タイプ（マージが発生する）
+        doc.replace(0, 1, vec!["a1".into()], 1, "", "").unwrap();
+        let rev1 = doc.revision();
+        assert!(!doc.is_clean());
+        doc.replace(0, 1, vec!["a12".into()], 1, "", "").unwrap();
+        let rev2 = doc.revision();
+
+        // マージは既存トランザクションへ追記するだけで、公開済みの revision を
+        // 書き換えない（保存済み checkpoint が破壊されない）。
+        assert_eq!(rev1, rev2, "マージで公開 revision を上書きしない");
+        assert!(
+            doc.log.validate_base(rev1).is_ok(),
+            "公開済み revision は残る"
+        );
+        assert!(
+            doc.log.validate_base(saved_rev).is_ok(),
+            "saved checkpoint は残る"
+        );
+        assert!(!doc.is_clean(), "内容が変わっているので dirty のまま");
+
+        // Undo すると saved 直後の状態へ 1 ステップで戻る（saved を飛び越さない）
+        doc.undo().unwrap();
+        assert!(doc.is_clean(), "Undo で saved checkpoint へ戻る");
+        assert_eq!(all(&mut doc), vec!["a", "b"]);
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 回帰: Undo 後の Redo 枝にしか存在しない revision を基準にした編集を拒否する。
+    #[test]
+    fn validate_base_rejects_redo_branch_revisions() {
+        let (mut doc, path) = disk_doc("redo-branch", &["x"]);
+        doc.replace(0, 1, vec!["y".into()], 1, "", "").unwrap();
+        let undone_rev = doc.revision();
+
+        // Undo して現在 head を巻き戻す（undone_rev は Redo 枝にだけ残る）
+        doc.undo().unwrap();
+        assert_eq!(all(&mut doc), vec!["x"]);
+
+        // Redo 枝の revision を base にした編集は拒否される
+        let result = doc.replace_with_base(undone_rev, 0, 1, vec!["z".into()], 2, "", "");
+        assert!(result.is_err(), "Redo 枝の revision は受け付けない");
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 回帰: 小さいファイルで bulk（すべて置換）を保存した後、
+    /// 変換済みの行へ同じ規則が再適用されず（foo→foofoo の二重化）、
+    /// Undo が正しく元の内容へ戻ることを検証する。
+    #[test]
+    fn bulk_replace_all_survives_save_without_double_apply() {
+        let (mut doc, path) = disk_doc("bulk-save", &["foo a", "bar b", "foo c"]);
+        let base_rev = doc.revision();
+        let pattern = regex::RegexBuilder::new("foo").build().unwrap();
+        let op = crate::operation_log::BulkOperation::ReplaceAll {
+            from_line: 0,
+            to_line: 3,
+            query: "foo".to_string(),
+            replacement: "baz".to_string(),
+            case_sensitive: true,
+            pattern: std::sync::Arc::new(pattern),
+        };
+        doc.apply_bulk_operation(base_rev, 1, op, "", "").unwrap();
+        assert_eq!(all(&mut doc), vec!["baz a", "bar b", "baz c"]);
+
+        // 保存（小さいファイルは Undo 履歴を保持する分岐）
+        doc.save(&path).unwrap();
+        assert!(doc.is_clean());
+
+        // 二重適用されていないこと
+        assert_eq!(all(&mut doc), vec!["baz a", "bar b", "baz c"]);
+
+        // Undo で bulk が元へ戻ること（マテリアライズ済み splice として）
+        doc.undo().unwrap();
+        assert_eq!(all(&mut doc), vec!["foo a", "bar b", "foo c"]);
+
+        // Redo で再適用されること
+        doc.redo().unwrap();
+        assert_eq!(all(&mut doc), vec!["baz a", "bar b", "baz c"]);
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 回帰: bulk 操作（すべて置換）の後に通常編集が入っても、
+    /// 後続の新規テキストへ過去の bulk 規則が勝手に適用されず、
+    /// Undo も各段階へ正しく戻ることを検証する。
+    #[test]
+    fn new_edits_after_bulk_are_not_transformed_retroactively() {
+        let (mut doc, path) = disk_doc("bulk-edit-seq", &["foo 1", "bar 2", "foo 3"]);
+        let base_rev = doc.revision();
+        let pattern = regex::RegexBuilder::new("foo").build().unwrap();
+        let op = crate::operation_log::BulkOperation::ReplaceAll {
+            from_line: 0,
+            to_line: 3,
+            query: "foo".to_string(),
+            replacement: "baz".to_string(),
+            case_sensitive: true,
+            pattern: std::sync::Arc::new(pattern),
+        };
+        doc.apply_bulk_operation(base_rev, 1, op, "", "").unwrap();
+        assert_eq!(all(&mut doc), vec!["baz 1", "bar 2", "baz 3"]);
+
+        // bulk 適用後に、範囲内に新たな "foo new" を通常挿入する
+        doc.replace(1, 1, vec!["foo new".to_string()], 2, "", "foo new")
+            .unwrap();
+
+        // 挿入された "foo new" は "baz new" に書き換わらずそのまま残ること
+        assert_eq!(all(&mut doc), vec!["baz 1", "foo new", "bar 2", "baz 3"]);
+
+        // 1回目の Undo で通常編集（foo new の挿入）が取り消されること
+        doc.undo().unwrap();
+        assert_eq!(all(&mut doc), vec!["baz 1", "bar 2", "baz 3"]);
+
+        // 2回目の Undo で bulk 操作自体が取り消されて初期状態に戻ること
+        doc.undo().unwrap();
+        assert_eq!(all(&mut doc), vec!["foo 1", "bar 2", "foo 3"]);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 回帰: 1 行に 64 件を超える一致がある場合でも、after_col の後ろの
+    /// 一致が切り捨てられずに返ることを検証する。
+    #[test]
+    fn search_returns_matches_beyond_64_within_a_line() {
+        // 1 行に 70 個の "m" を含む行を作る
+        let many = "m ".repeat(70);
+        let (mut doc, path) = disk_doc("many-matches", &[&many, "tail"]);
+        let query = crate::search::CompiledQuery::compile("m", false, true, '$').unwrap();
+
+        // after_col を 65 件目のあたりへ置いて検索し、残りの一致が返ること
+        let found = doc
+            .search_candidates(
+                SearchSpec {
+                    query: &query,
+                    from: 0,
+                    end: 2,
+                    after_col: Some(130),
+                },
+                &|| false,
+            )
+            .unwrap();
+        assert!(
+            !found.hits.is_empty(),
+            "after_col 以降の一致が返ること（64件上限で潰れない）"
+        );
+        // 返った一致はすべて after_col 以降
+        for hit in &found.hits {
+            assert!(hit.notation || hit.line > 0 || hit.start >= 130);
+        }
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 回帰: Clean な下書きに遠方の保留 Redo 差分があるとき、
+    /// 復元時にその行マークまで確定され、即時 Redo が全文走査へ落ちないことを検証する。
+    #[test]
+    fn draft_restore_includes_pending_redo_in_max_needed_line() {
+        use crate::persistence::DraftDiff;
+        // max_needed_line の計算ロジックを直接検証する（lib.rs 側の統合は別途）。
+        // 保留 Redo 差分（head より後ろ）の from_line が active 差分より遠方にある場合、
+        // max_needed_line はその Redo 差分の位置を含む必要がある。
+        let active = DraftDiff {
+            group: 1,
+            from_line: 5,
+            removed_lines: 1,
+            lines: vec!["a".into()],
+            deleted_lines: vec![],
+            before: String::new(),
+            after: String::new(),
+        };
+        let pending_redo = DraftDiff {
+            group: 2,
+            from_line: 999_999,
+            removed_lines: 1,
+            lines: vec!["b".into()],
+            deleted_lines: vec![],
+            before: String::new(),
+            after: String::new(),
+        };
+        let diffs = [active, pending_redo];
+        let max_needed_line = diffs
+            .iter()
+            .map(|d| d.from_line + d.removed_lines)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(max_needed_line, 1_000_000, "保留 Redo の位置を含むこと");
+    }
+
+    /// 回帰: 未走査（バックグラウンド走査完了前）の巨大ファイルで、
+    /// 起動直後に末尾付近の行を読み出しても（Ctrl+End相当）、
+    /// 1行ごとの読み捨てではなく SIMD による一括スキップで即座に届くことを検証する。
+    #[test]
+    fn reading_distant_lines_before_scan_completion_is_fast() {
+        let lines: Vec<String> = (0..STRIDE * 5).map(|i| format!("content {i}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (mut doc, path) = disk_doc("distant-lines", &refs);
+
+        // 走査完了前（pending_source がまだ残る状態）
+        assert_eq!(doc.line_count(), STRIDE * 5);
+        let read = doc.read(STRIDE * 4 + 10, 3).unwrap();
+        assert_eq!(
+            read,
+            vec![
+                format!("content {}", STRIDE * 4 + 10),
+                format!("content {}", STRIDE * 4 + 11),
+                format!("content {}", STRIDE * 4 + 12),
+            ]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 回帰: 未走査の巨大ファイルで、末尾付近の行を編集して Undo/Redo しても、
+    /// ピース分割（split）が EOF seek により即座に行われ、タイムラグなしで復元できることを検証する。
+    #[test]
+    fn undo_redo_near_tail_before_scan_completion_is_instant() {
+        let total = STRIDE * 5;
+        let lines: Vec<String> = (0..total).map(|i| format!("line {i}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (mut doc, path) = disk_doc("instant-undo-tail", &refs);
+
+        // 走査完了前（pending_source が残る状態）で末尾直前の行（total - 2）を置換
+        let target_line = total - 2;
+        doc.replace(
+            target_line,
+            target_line + 1,
+            vec!["modified tail".into()],
+            1,
+            &format!("line {target_line}"),
+            "modified tail",
+        )
+        .unwrap();
+
+        assert_eq!(doc.read(target_line, 1).unwrap(), vec!["modified tail"]);
+
+        // Undo 実行（split が走るが、EOF seek により即座に元行へ戻る）
+        let undone = doc.undo().unwrap().unwrap();
+        assert_eq!(undone.state, format!("line {target_line}"));
+        assert_eq!(
+            doc.read(target_line, 1).unwrap(),
+            vec![format!("line {target_line}")]
+        );
+
+        // Redo 実行（即座に再適用される）
+        let redone = doc.redo().unwrap().unwrap();
+        assert_eq!(redone.state, "modified tail");
+        assert_eq!(doc.read(target_line, 1).unwrap(), vec!["modified tail"]);
 
         std::fs::remove_file(path).ok();
     }

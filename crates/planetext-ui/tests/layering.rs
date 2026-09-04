@@ -217,3 +217,22 @@ fn framework_specific_apis_stop_at_the_connectors() {
         }
     }
 }
+
+#[test]
+fn document_search_boundary_has_no_format_domain_dependency() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../planetext-document/src");
+    for file in sources(&root) {
+        let source = fs::read_to_string(&file).expect("a document source file");
+        let production = without_comments(without_tests(&source));
+        assert!(
+            !production.contains("NOTATION_MARK"),
+            "{} mentions NOTATION_MARK",
+            file.display()
+        );
+        assert!(
+            !production.contains("crate::format"),
+            "{} mentions crate::format",
+            file.display()
+        );
+    }
+}

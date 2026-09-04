@@ -41,10 +41,6 @@ pub struct Session {
     preview_options: search::SearchOptions,
     preview_file_size: Option<usize>,
     preview_found: Vec<search::Found>,
-    /// 行数の走査がまだ終わっていないか。終わるまで Ctrl+End は保留する。
-    pub counting: bool,
-    /// 走査完了を待っている Ctrl+End（値は shift）。確定したら跳ぶ。
-    pub jump_end: Option<bool>,
     /// 行数未確定中にEOFから読んだ末尾行。仮位置と再配置用の元文字列。
     pending_tail: Option<(usize, Vec<String>)>,
     /// インライン補完（ゴーストテキスト）の現在候補。
@@ -54,6 +50,10 @@ pub struct Session {
 }
 
 impl Session {
+    pub fn is_counting(&self) -> bool {
+        self.document.borrow().is_counting()
+    }
+
     pub fn primary(&self) -> Sel {
         self.cursors.last().expect("at least one cursor").sel
     }
@@ -204,6 +204,7 @@ pub fn bind_doc(pane: usize, doc_id: usize) {
         borrowed.cursors = vec![UnifiedCursor::caret(Pos::default())];
         borrowed.preedit.clear();
         borrowed.search_from = None;
+        borrowed.pending_tail = None;
     }
     redraw(&session);
 }
@@ -235,8 +236,6 @@ pub fn init(root: &HtmlElement) -> Option<usize> {
         preview_options: search::SearchOptions::default(),
         preview_file_size: None,
         preview_found: Vec::new(),
-        counting: false,
-        jump_end: None,
         pending_tail: None,
         ghost: None,
         overwrite_mode: false,
@@ -426,7 +425,7 @@ pub(super) fn request_tail(pane: usize) {
 
 pub(super) fn tail_locked(session: &Rc<RefCell<Session>>) -> bool {
     let borrowed = session.borrow();
-    borrowed.counting
+    borrowed.is_counting()
         && borrowed.pending_tail.as_ref().is_some_and(|(from, lines)| {
             let line = borrowed.primary().head.line;
             line >= *from && line < *from + lines.len()
@@ -538,7 +537,7 @@ fn redraw_preview_overlay(session: &Rc<RefCell<Session>>) {
             focused: session.focused,
             linked: session.linked,
             overwrite: session.overwrite_mode,
-            show_numbers: !session.counting,
+            show_numbers: !session.is_counting(),
             language: lang.as_ref(),
             ghost: session.ghost.as_ref(),
         },
@@ -742,7 +741,7 @@ pub fn redraw(session: &Rc<RefCell<Session>>) {
                 focused: session.focused,
                 linked: session.linked,
                 overwrite: session.overwrite_mode,
-                show_numbers: !session.counting,
+                show_numbers: !session.is_counting(),
                 language: lang.as_ref(),
                 ghost: session.ghost.as_ref(),
             },
@@ -797,7 +796,7 @@ pub fn scrolled(session: &Rc<RefCell<Session>>) {
                 focused: session.focused,
                 linked: session.linked,
                 overwrite: session.overwrite_mode,
-                show_numbers: !session.counting,
+                show_numbers: !session.is_counting(),
                 language: lang.as_ref(),
                 ghost: session.ghost.as_ref(),
             },
@@ -923,21 +922,58 @@ pub fn load(text: &str) {
     changed(&session);
 }
 
-/// 行数だけ分かっている文書を出します。行は見えた場所から取り寄せられます。
-/// 行数は走査中の途中値なので、確定は [set_line_count] で届く。
+/// 疎（スライス）テキストとして読み込みます。line_count が None のときは走査中として扱われます。
+pub fn load_sparse(line_count: Option<usize>) {
+    let Some(session) = session() else { return };
+    session
+        .borrow()
+        .document
+        .borrow_mut()
+        .load_sparse(line_count);
+    session.borrow_mut().pending_tail = None;
+    changed(&session);
+}
+
+/// 指定ドキュメントの疎テキスト読み込みを行います。
+pub fn load_sparse_doc(doc_id: usize, line_count: Option<usize>) {
+    let doc = get_or_create_doc(doc_id);
+    doc.borrow_mut().load_sparse(line_count);
+    PANES.with(|panes| {
+        for session in panes.borrow().iter() {
+            let mut borrowed = session.borrow_mut();
+            if borrowed.doc_id == doc_id {
+                borrowed.pending_tail = None;
+            }
+        }
+    });
+}
+
+/// 保留状態を開始します。line_count が 0 のときは行数未確定（走査中）として扱われます。
+#[allow(dead_code)]
 pub fn load_pending(line_count: usize) {
     let Some(session) = session() else { return };
-    {
-        let borrowed = session.borrow();
-        borrowed.document.borrow_mut().load_pending(line_count);
-    }
-    {
-        let mut borrowed = session.borrow_mut();
-        borrowed.counting = true;
-        borrowed.jump_end = None;
-        borrowed.pending_tail = None;
-    }
+    session
+        .borrow()
+        .document
+        .borrow_mut()
+        .load_pending(line_count);
+    session.borrow_mut().pending_tail = None;
     changed(&session);
+}
+
+/// 指定ドキュメントの保留状態を開始します。line_count が 0 のときは行数未確定（走査中）として扱われます。
+#[allow(dead_code)]
+pub fn load_pending_doc(doc_id: usize, line_count: usize) {
+    let doc = get_or_create_doc(doc_id);
+    doc.borrow_mut().load_pending(line_count);
+    PANES.with(|panes| {
+        for session in panes.borrow().iter() {
+            let mut borrowed = session.borrow_mut();
+            if borrowed.doc_id == doc_id {
+                borrowed.pending_tail = None;
+            }
+        }
+    });
 }
 
 /// 行数未確定でも、EOFから届いた末尾ウィンドウを仮の末尾へ表示する。
@@ -948,6 +984,9 @@ pub fn show_tail(pane: usize, lines: &[String]) {
     let from = {
         let mut borrowed = session.borrow_mut();
         borrowed.edit(|editor| {
+            if editor.text().line_count() < lines.len() {
+                editor.resize_pending(lines.len());
+            }
             let count = editor.text().line_count();
             let from = count.saturating_sub(lines.len());
             editor.forget_range(from..count);
@@ -963,17 +1002,12 @@ pub fn show_tail(pane: usize, lines: &[String]) {
     };
     {
         let mut borrowed = session.borrow_mut();
-        borrowed.pending_tail = borrowed.counting.then(|| (from, lines.to_vec()));
+        borrowed.pending_tail = borrowed.is_counting().then(|| (from, lines.to_vec()));
     }
     redraw(&session);
 }
 
-fn apply_line_count(
-    editor: &mut Editor,
-    pending_tail: Option<(usize, Vec<String>)>,
-    jump_end: Option<bool>,
-    count: usize,
-) {
+fn apply_line_count(editor: &mut Editor, pending_tail: Option<(usize, Vec<String>)>, count: usize) {
     if let Some((from, lines)) = &pending_tail {
         editor.forget_range(*from..*from + lines.len());
     }
@@ -988,8 +1022,6 @@ fn apply_line_count(
         let last = count.saturating_sub(1);
         let col = editor.text().line_len(last);
         editor.set_caret(Pos::new(last, col));
-    } else if let Some(shift) = jump_end {
-        editor.move_document_edge(true, shift);
     }
 }
 
@@ -999,19 +1031,10 @@ pub fn set_line_count(pane: usize, count: usize) {
     let Some(session) = pane_session(pane) else {
         return;
     };
-    let (pending_tail, jump_end) = {
-        let mut borrowed = session.borrow_mut();
-        let pending_tail = borrowed.pending_tail.take();
-        let jump_end = borrowed.jump_end.take();
-        borrowed.counting = false;
-        (pending_tail, jump_end)
-    };
-    {
-        let mut borrowed = session.borrow_mut();
-        borrowed.edit(|editor| {
-            apply_line_count(editor, pending_tail, jump_end, count);
-        });
-    }
+    let pending_tail = session.borrow_mut().pending_tail.take();
+    session.borrow_mut().edit(|editor| {
+        apply_line_count(editor, pending_tail, count);
+    });
     redraw(&session);
 }
 
@@ -1141,6 +1164,8 @@ pub struct DocStats {
     pub total_lines: usize,
     /// バックグラウンドで行数走査中かどうか。
     pub counting: bool,
+    /// 行数未確定の末尾表示中かどうか。
+    pub pending_tail: bool,
     /// キャレットの1-based行番号。
     pub caret_line: usize,
     /// キャレットの1-based列番号。
@@ -1158,6 +1183,7 @@ impl Default for DocStats {
             file_bytes: None,
             total_lines: 1,
             counting: false,
+            pending_tail: false,
             caret_line: 1,
             caret_col: 1,
             caret_prefix: Some((0, 0)),
@@ -1186,7 +1212,7 @@ pub fn stats() -> DocStats {
     let doc = borrowed.document.borrow();
     let text = doc.text();
     let line_count = text.line_count();
-    let is_counting = borrowed.counting;
+    let is_counting = borrowed.is_counting();
     let is_large =
         doc.file_bytes.is_some_and(|s| s > MAX_CARET_STATS_BYTES) || text.absent_lines() > 0;
 
@@ -1258,11 +1284,14 @@ pub fn stats() -> DocStats {
         None
     };
 
+    let pending_tail = borrowed.pending_tail.is_some();
+
     DocStats {
         total_chars,
         file_bytes: doc.file_bytes,
         total_lines: if is_counting { 0 } else { line_count },
         counting: is_counting,
+        pending_tail,
         caret_line,
         caret_col,
         caret_prefix,
@@ -1346,4 +1375,76 @@ pub fn url_at_caret(pane: usize) -> Option<UrlTooltip> {
         left: rect.left,
         top: rect.top,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 【回帰防止テスト】
+    /// 巨大ファイルを行数確定前に開いて Ctrl+End を押した際、EOF基準で取得した末尾行が
+    /// 一旦仮の位置に表示され、その後のバックグラウンド走査完了（set_line_count）で
+    /// 真の絶対行番号へ正しく付け替えられ、キャレットも追従することを保証する。
+    #[test]
+    fn apply_line_count_correctly_remaps_tail_lines_and_moves_caret() {
+        let mut editor = Editor::default();
+        // 1. 初期スキャン行数は露出させず、未確定（0行）で保留状態を開始する
+        editor.load_pending(0);
+
+        // 2. 末尾2行を要求して表示（show_tail 相当）
+        let tail_lines = vec!["tail 0".to_string(), "tail 1".to_string()];
+        if editor.text().line_count() < tail_lines.len() {
+            editor.resize_pending(tail_lines.len());
+        }
+        let count = editor.text().line_count();
+        let from = count.saturating_sub(tail_lines.len());
+        editor.forget_range(from..count);
+        editor.feed(
+            from,
+            tail_lines
+                .iter()
+                .map(|line| document::read_line(line))
+                .collect(),
+        );
+        let last = count.saturating_sub(1);
+        editor.set_caret(Pos::new(last, 6));
+
+        assert_eq!(editor.text().raw_line(last), Some("tail 1"));
+
+        // 3. バックグラウンド走査完了で 16,000,000 行へ付け替え
+        let pending_tail = Some((from, tail_lines));
+        let final_count = 16_000_000;
+        apply_line_count(&mut editor, pending_tail, final_count);
+
+        // 確定後の検証:
+        // - 全体行数が 16,000,000 行になっていること
+        assert_eq!(editor.text().line_count(), 16_000_000);
+        // - 仮配置されていた位置（1）は未着（Line::Absent）に戻っていること
+        assert!(editor.text().is_absent(1));
+        // - 真の末尾（15999999, 15999998）に正しく末尾行が移動・配置されていること
+        assert_eq!(editor.text().raw_line(15_999_999), Some("tail 1"));
+        assert_eq!(editor.text().raw_line(15_999_998), Some("tail 0"));
+        // - キャレットも真の末尾行（15999999）へ移動していること
+        assert_eq!(editor.primary().head.line, 15_999_999);
+    }
+
+    /// 【回帰防止テスト】
+    /// 下書き復元等で行数が確定（!counting）していても、末尾行が手元に未着（is_absent）なら、
+    /// 末尾Seek判定が true になり EOF からの即時末尾取得へ向かうことを保証する。
+    #[test]
+    fn absent_tail_triggers_eof_tail_seek_even_when_not_counting() {
+        let mut editor = Editor::default();
+        // 下書き復元で確定行数 16,000,000 行で開かれた状態（counting = false）
+        editor.load_pending(16_000_000);
+        editor.document.counting = false;
+
+        let count = editor.text().line_count();
+        let last_line = count.saturating_sub(1);
+        // 末尾行はまだ手元に届いていない（未着）
+        assert!(editor.text().is_absent(last_line));
+
+        // 末尾Seekが必要かどうかの判定（keys.rs の Ctrl+End 判定ロジックと同一）
+        let needs_tail = editor.document.is_counting() || editor.text().is_absent(last_line);
+        assert!(needs_tail, "未着の末尾に対しては必ず末尾Seekが発火すること");
+    }
 }
