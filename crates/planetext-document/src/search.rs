@@ -344,13 +344,13 @@ pub(crate) fn scan_encoded_range(
 }
 
 /// 検索走査の 1 件。`notation` の行は一致ではなく「frontend が見るべき行」。
-#[derive(serde::Serialize)]
-pub(crate) struct ScanHit {
-    pub(crate) line: usize,
-    pub(crate) notation: bool,
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct ScanHit {
+    pub line: usize,
+    pub notation: bool,
     /// 行内の一致の文字位置。`notation` の行では意味を持たない。
-    pub(crate) start: usize,
-    pub(crate) end: usize,
+    pub start: usize,
+    pub end: usize,
 }
 
 use std::sync::Arc;

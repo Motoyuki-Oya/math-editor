@@ -12,8 +12,8 @@ mod source;
 mod test_utils;
 
 use document::Document;
-pub use search::CompiledQuery;
-use search::{ScanHit, SearchSpec};
+pub use search::{CompiledQuery, ScanHit};
+use search::SearchSpec;
 use source::{FileEncoding, LineEnding, ScanIndex};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -89,11 +89,11 @@ pub struct EditApplied {
     pub revision: u64,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct SearchPage {
-    hits: Vec<ScanHit>,
-    scanned_to: usize,
-    cancelled: bool,
+    pub hits: Vec<ScanHit>,
+    pub scanned_to: usize,
+    pub cancelled: bool,
 }
 
 /// 下書きファイルは最初の行にドキュメントのパスがあり、その後にドキュメント自体が含まれているため、復元されたドラフトではそれがどのファイルに属しているかがわかります。

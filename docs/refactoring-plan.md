@@ -422,19 +422,24 @@ Phase 3 の自己レビューで特定された「モジュール分割後のカ
     `store.rs` に残存する旧テスト群を、新モジュール(`piece_tree.rs`, `operation_log.rs`,
     `search.rs`, `persistence.rs`, `document.rs` 等)の単体テストへ分解・再配置し、
     各モジュール境界の不変条件を単体でテスト・保護できるようにする。
-17. **UI 側 `LiteralMatcher` の `Box::leak` 解消**:
+17. [x] **UI 側 `LiteralMatcher` の `Box::leak` 解消**:
     `crates/planetext-ui/src/editor/search/matcher.rs` において、`Finder<'static>` のために
-    検索語を `Box::leak` しているメモリリークを根絶し、Matcher がパターン実体と
-    ライフタイムを安全に所有する構造へ改修する。
+    検索語を `Box::leak` していたメモリリークを根絶し、`PatternVariant` がパターン実体（`Box<[u8]>`）
+    とライフタイムを安全に所有する構造へ改修完了。
 18. **補助ファイル(下書き・設定・ウィンドウ状態)の安全書き込み(一時ファイル＋原子的置換)への統一**:
     `crates/planetext-document/src/lib.rs` の `save_draft`、`SettingsWrite::write`、
     および `src-tauri/src/lib.rs` の `save_window_size` を、一時ファイル書き出し＋原子的
     リネーム(`atomic_write`)に改修する。書き込み中のクラッシュや電源断によるファイル破損・
     0バイト化を構造的に根絶する。
+19. **検索走査のセッションキャッシュ・確定件数同期・オンデマンドインデックス化**:
+    800MB等の大規模文書において、同一クエリでの2周目以降の「次へ」走査をセッション内ヒット位置キャッシュで
+    0ms（瞬時）化、ファイル末尾走査完了時の真のヒット件数へのバッジ確定同期、および走査・ロード済み
+    512KB固定長ブロックの即時Bigram索引化（Opportunistic / On-demand Indexing）を実装し、
+    EmEditor並みの高速体感検索を実現する。
 
 #### Phase 4 本編: MVC(ファイルモデルとスライスモデル)
 
-19. **文書モデル + スライスモデル導入(共有キャッシュ廃止)**:
+20. **文書モデル + スライスモデル導入(共有キャッシュ廃止)**:
     doc_id ごとに 1 つの文書モデル(内容なし。revision・送信列・スライス台帳)と
     ビューごとのスライスモデル(表示窓の写し + カーソル・編集操作)を導入し、UI側の
     共有キャッシュ(`Document`)を廃止。`sync.rs` のキューを置き換え、読み取り応答の
@@ -482,10 +487,12 @@ Phase 3 の自己レビューで特定された「モジュール分割後のカ
 
 チェック項目:
 
-- [ ] `Document` の全フィールドが private 化され、外部(`search.rs`, `persistence.rs`)から内部状態が直接露出していない
-- [ ] 検索世代管理(チケット・キャンセル)が UI から撤廃され、文書エンジン側でカプセル化されている
-- [ ] `store.rs` の旧テストが各モジュール(`piece_tree`, `operation_log`, `search`, `persistence` 等)へ再配置され、モジュール境界の不変条件が単体テストで保証されている
-- [ ] UI側の `LiteralMatcher` が `Box::leak` せずにライフタイムを安全に所有し、メモリリークがない
+- [x] `Document` の全フィールドが private 化され、外部(`search.rs`, `persistence.rs`)から内部状態が直接露出していない
+- [x] 検索世代管理(チケット・キャンセル)が UI から撤廃され、文書エンジン側でカプセル化されている
+- [x] `store.rs` の旧テストが各モジュール(`piece_tree`, `operation_log`, `search`, `persistence` 等)へ再配置され、モジュール境界の不変条件が単体テストで保証されている
+- [x] UI側の `LiteralMatcher` が `Box::leak` せずにライフタイムを安全に所有し、メモリリークがない
+- [ ] 下書き(`*.draft`)・設定(`settings.toml`)・ウィンドウ状態(`window.toml`)が一時ファイル書き出し＋原子的リネームで保護され、直接上書きされていない
+- [ ] 同一クエリでの2周目以降の検索がセッション内キャッシュにより0msで遷移し、末尾到達時の確定ヒット数バッジ同期およびオンデマンドBigram索引化が動作する
 - [ ] ファイルの真実がファイルモデル 1 つにあり、スライスは捨てて取り寄せ直せる
 - [ ] View が編集判断・編集状態を持たず、paint と入力転送だけになっている
 - [ ] View・スライスが互いを知らない(再描画は revision 通知経由)
