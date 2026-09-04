@@ -355,6 +355,13 @@ pub async fn replace_lines(
     serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
 }
 
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SpliceEdit {
+    pub from: usize,
+    pub to: usize,
+    pub lines: Vec<String>,
+}
+
 /// 元に戻す・やり直すの結果。`state` は預けたキャレットの控えそのもの。
 #[derive(Deserialize)]
 pub struct RestoredLines {
@@ -367,6 +374,8 @@ pub struct RestoredLines {
     pub clean: bool,
     #[serde(default)]
     pub modified_lines: Vec<usize>,
+    #[serde(default)]
+    pub splices: Vec<SpliceEdit>,
 }
 
 pub async fn undo_lines(handle: u64, redo: bool) -> Option<RestoredLines> {

@@ -342,6 +342,7 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
                     &restored.state,
                     restored.touched_from,
                     restored.line_count,
+                    &restored.splices,
                 );
                 editor::set_doc_modified_lines(doc_id, restored.modified_lines);
                 if restored.clean {

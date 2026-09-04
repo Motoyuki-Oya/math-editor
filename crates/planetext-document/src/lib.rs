@@ -59,6 +59,8 @@ pub struct ReopenedDocument {
     pub revision: u64,
 }
 
+pub use document::SpliceEdit;
+
 /// 元に戻す・やり直すの結果。`state` は frontend が預けた控えそのもの。
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct RestoredLines {
@@ -68,6 +70,8 @@ pub struct RestoredLines {
     pub clean: bool,
     pub revision: u64,
     pub modified_lines: Vec<usize>,
+    #[serde(default)]
+    pub splices: Vec<SpliceEdit>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -624,6 +628,7 @@ impl Application {
                     clean: doc.is_clean(),
                     revision: doc.revision(),
                     modified_lines: doc.modified_lines(),
+                    splices: restored.splices,
                 }),
             )
         })

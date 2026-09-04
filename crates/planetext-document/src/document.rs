@@ -42,12 +42,20 @@ pub(crate) struct Document {
     pub(crate) search_cache: Option<SearchHitCache>,
 }
 
-/// 元に戻す・やり直すの結果: 復元すべき控えと、行が変わった範囲の始まり。
-/// frontend は `touched_from` から先の手元の行を捨てて取り寄せ直す。
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SpliceEdit {
+    pub from: usize,
+    pub to: usize,
+    pub lines: Vec<String>,
+}
+
+/// 元に戻す・やり直すの結果: 復元すべき控えと、行が置き換わった具体的な差分（SpliceEdit）。
+/// frontend は `splices` を受け取って手元のテキストの該当行を直接更新する。
 pub(crate) struct Restored {
     pub(crate) state: String,
     pub(crate) touched_from: usize,
     pub(crate) line_count: usize,
+    pub(crate) splices: Vec<SpliceEdit>,
 }
 
 impl Document {
@@ -1220,6 +1228,7 @@ impl Document {
         let edits = tx.edits().to_vec();
         let state = tx.before.clone();
         let mut touched_from = usize::MAX;
+        let mut splices = Vec::new();
         for edit in edits.into_iter().rev() {
             touched_from = touched_from.min(edit.from_line);
             let restored_lines = self.log.read_deleted(edit.removed);
@@ -1229,6 +1238,11 @@ impl Document {
                 edit.from_line + edit.inserted_lines,
                 &restored_lines,
             )?;
+            splices.push(SpliceEdit {
+                from: edit.from_line,
+                to: edit.from_line + edit.inserted_lines,
+                lines: restored_lines.clone(),
+            });
             if let Some(index) = self.search_index.as_ref() {
                 let byte_pos = edit.from;
                 let restored_text = restored_lines.join("\n");
@@ -1244,6 +1258,7 @@ impl Document {
                 touched_from
             },
             line_count: self.count,
+            splices,
         }))
     }
 
@@ -1252,6 +1267,7 @@ impl Document {
             let edits = tx.edits().to_vec();
             let state = tx.after.clone();
             let mut touched_from = usize::MAX;
+            let mut splices = Vec::new();
             for edit in edits.into_iter() {
                 touched_from = touched_from.min(edit.from_line);
                 let reapply_lines = self.buffers.read_lines(edit.inserted);
@@ -1261,6 +1277,11 @@ impl Document {
                     edit.from_line + edit.removed_lines,
                     &reapply_lines,
                 )?;
+                splices.push(SpliceEdit {
+                    from: edit.from_line,
+                    to: edit.from_line + edit.removed_lines,
+                    lines: reapply_lines.clone(),
+                });
                 if let Some(index) = self.search_index.as_ref() {
                     let byte_pos = edit.from;
                     let removed_text = removed_lines.join("\n");
@@ -1276,12 +1297,14 @@ impl Document {
                     touched_from
                 },
                 line_count: self.count,
+                splices,
             }));
         }
         if !self.pending_redo_diffs.is_empty() {
             let target_group = self.pending_redo_diffs[0].group;
             let mut state = String::new();
             let mut touched_from = usize::MAX;
+            let mut splices = Vec::new();
             while !self.pending_redo_diffs.is_empty()
                 && self.pending_redo_diffs[0].group == target_group
             {
@@ -1289,6 +1312,11 @@ impl Document {
                 let to_line = diff.from_line + diff.removed_lines;
                 state = diff.after.clone();
                 touched_from = touched_from.min(diff.from_line);
+                splices.push(SpliceEdit {
+                    from: diff.from_line,
+                    to: to_line,
+                    lines: diff.lines.clone(),
+                });
                 self.replace_with_deleted(
                     diff.from_line,
                     to_line,
@@ -1307,6 +1335,7 @@ impl Document {
                     touched_from
                 },
                 line_count: self.count,
+                splices,
             }));
         }
         Ok(None)

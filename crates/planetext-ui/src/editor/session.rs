@@ -1489,8 +1489,14 @@ pub fn load_doc_contents(doc_id: usize, text: &str) {
 }
 
 /// 文書の本体が巻き戻ったのに合わせる: 該当ドキュメントを開いているセッションへ
-/// テキストを合わせ、カーソルを復元する。
-pub fn apply_restored(doc_id: usize, state: &str, touched_from: usize, line_count: usize) {
+/// テキスト差分を適用し、カーソルを復元する。
+pub fn apply_restored(
+    doc_id: usize,
+    state: &str,
+    touched_from: usize,
+    line_count: usize,
+    splices: &[crate::framework::SpliceEdit],
+) {
     let sessions = PANES.with(|panes| panes.borrow().clone());
     let mut text_restored = false;
 
@@ -1498,7 +1504,7 @@ pub fn apply_restored(doc_id: usize, state: &str, touched_from: usize, line_coun
         if s.borrow().doc_id == doc_id {
             s.borrow_mut().edit(|editor| {
                 if !text_restored {
-                    editor.apply_restored(state, touched_from, line_count);
+                    editor.apply_restored(state, touched_from, line_count, splices);
                     text_restored = true;
                 } else {
                     editor.restore_state(state);
@@ -1513,7 +1519,7 @@ pub fn apply_restored(doc_id: usize, state: &str, touched_from: usize, line_coun
             document: std::mem::take(&mut *doc.borrow_mut()),
             cursors: vec![],
         };
-        editor.apply_restored(state, touched_from, line_count);
+        editor.apply_restored(state, touched_from, line_count, splices);
         *doc.borrow_mut() = editor.document;
     }
 
@@ -1754,9 +1760,9 @@ mod tests {
         let restored_revision = 1;
         doc.borrow_mut().known_revision = restored_revision;
 
-        apply_restored(doc_id, "0.0-0.0", 10, 20);
+        apply_restored(doc_id, "0.0-0.0", 10, 20, &[]);
 
-        // 行 0..10 はそのまま保持され、行 10..20 は Absent になっている
+        // 行 0..10 はそのまま保持され、行 10..20 は Absent になっている（フォールバック動作）
         assert_eq!(doc.borrow().text().raw_line(0), Some("initial line 0"));
         assert_eq!(doc.borrow().text().raw_line(9), Some("initial line 9"));
         assert!(doc.borrow().text().is_absent(10));
@@ -1772,5 +1778,44 @@ mod tests {
         assert_eq!(doc.borrow().text().raw_line(10), Some("restored line 10"));
         assert_eq!(doc.borrow().text().raw_line(19), Some("restored line 19"));
         assert!(!doc.borrow().text().is_absent(10));
+    }
+
+    /// 【スプライス差分直接適用テスト（方向性A）】
+    /// 文書エンジンから届いた SpliceEdit（行置き換え差分）を適用した場合、
+    /// 手元の行が Absent（未着）にならず、再フェッチも待たずに手元で即座に元通り更新されることを検証する。
+    #[test]
+    fn undo_with_splices_updates_directly_without_blanking() {
+        use crate::framework::SpliceEdit;
+        let doc_id = 777;
+        let doc = get_or_create_doc(doc_id);
+        doc.borrow_mut().load_sparse(Some(15));
+
+        let initial_lines: Vec<_> = (0..15)
+            .map(|i| document::read_line(&format!("original line {i}")))
+            .collect();
+        doc.borrow_mut().feed(0, initial_lines);
+
+        // 編集: 行 11 を編集した状態
+        doc.borrow_mut().text.replace_external(
+            11,
+            12,
+            vec![crate::structure::text::SourceLine::Plain("edited line 11".into())],
+        );
+        assert_eq!(doc.borrow().text().raw_line(11), Some("edited line 11"));
+
+        // Undo: 文書エンジンから「行 11 を original line 11 に戻す」SpliceEdit が届く
+        let splices = vec![SpliceEdit {
+            from: 11,
+            to: 12,
+            lines: vec!["original line 11".to_string()],
+        }];
+
+        apply_restored(doc_id, "0.0-0.0", 11, 15, &splices);
+
+        // 手元の行は Absent にならず、即座に元に戻っていること
+        assert_eq!(doc.borrow().text().raw_line(11), Some("original line 11"));
+        assert!(!doc.borrow().text().is_absent(11));
+        assert_eq!(doc.borrow().text().raw_line(12), Some("original line 12"));
+        assert_eq!(doc.borrow().text().first_absent(0), None);
     }
 }

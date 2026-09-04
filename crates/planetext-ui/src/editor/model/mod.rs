@@ -434,7 +434,7 @@ pub(crate) mod tests {
         editor.set_caret(Pos::new(1, 2));
         editor.insert_text("X");
         editor.take_flush();
-        editor.apply_restored("1.2-1.2", 1, 2);
+        editor.apply_restored("1.2-1.2", 1, 2, &[]);
         assert_eq!(editor.primary().head, Pos::new(1, 2));
         assert_eq!(editor.text().first_absent(0), Some(1));
         assert_eq!(editor.take_flush().map(|flush| flush.changes), None);
@@ -450,12 +450,35 @@ pub(crate) mod tests {
         assert_eq!(flush.after, "1.11-1.11");
 
         // Undo: 編集前の 1 行目 5 列目に復元される
-        editor.apply_restored(&flush.before, 1, 2);
+        editor.apply_restored(&flush.before, 1, 2, &[]);
         assert_eq!(editor.primary().head, Pos::new(1, 5));
 
         // Redo: 編集後の 1 行目 11 列目に復元される
-        editor.apply_restored(&flush.after, 1, 2);
+        editor.apply_restored(&flush.after, 1, 2, &[]);
         assert_eq!(editor.primary().head, Pos::new(1, 11));
+    }
+
+    #[test]
+    fn test_undo_with_splices_directly_updates_lines_without_absent() {
+        use crate::framework::SpliceEdit;
+        let mut editor = editor("line0\nline1\nline2");
+        editor.set_caret(Pos::new(1, 5));
+        editor.insert_text("_edited");
+
+        // Undo 差分: line1 を元の "line1" に戻す SpliceEdit
+        let splices = vec![SpliceEdit {
+            from: 1,
+            to: 2,
+            lines: vec!["line1".to_string()],
+        }];
+
+        editor.apply_restored("1.5-1.5", 1, 3, &splices);
+
+        // キャレットが元に戻り、行は Absent にならず直接復元されていること
+        assert_eq!(editor.primary().head, Pos::new(1, 5));
+        assert_eq!(editor.text().raw_line(1), Some("line1"));
+        assert!(!editor.text().is_absent(1));
+        assert_eq!(editor.text().first_absent(0), None);
     }
 
     #[test]
