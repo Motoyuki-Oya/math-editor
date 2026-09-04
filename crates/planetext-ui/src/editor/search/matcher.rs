@@ -33,6 +33,7 @@ pub(super) struct LiteralMatcher {
 #[derive(Debug)]
 struct PatternVariant {
     finder: Finder<'static>,
+    _bytes: Box<[u8]>,
     char_count: usize,
     byte_len: usize,
 }
@@ -57,10 +58,16 @@ impl LiteralMatcher {
             for s in &variant_strings {
                 let char_count = s.chars().count();
                 let byte_len = s.len();
-                let leaked_bytes: &'static [u8] =
-                    Box::leak(s.as_bytes().to_vec().into_boxed_slice());
+                let bytes = s.as_bytes().to_vec().into_boxed_slice();
+                // SAFETY: `bytes` は Box<[u8]> としてヒープに確保されており、PatternVariant 自身が
+                // そのライフタイムを所有します。PatternVariant がムーブされてもヒープ領域のアドレスは不変です。
+                // また、構造体のフィールド破棄順序により `finder` は `_bytes` よりも先にドロップされるため、
+                // ドロップ時にダングリング参照が生じることはありません。
+                let slice_static: &'static [u8] =
+                    unsafe { std::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) };
                 variants.push(PatternVariant {
-                    finder: Finder::new(leaked_bytes),
+                    finder: Finder::new(slice_static),
+                    _bytes: bytes,
                     char_count,
                     byte_len,
                 });
