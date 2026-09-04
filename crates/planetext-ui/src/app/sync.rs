@@ -136,6 +136,7 @@ pub(super) fn flush(shell: Shell, editor_pane: usize) {
     let Some(batch) = editor::take_flush(editor_pane) else {
         return;
     };
+    editor::apply_flush_to_other_panes(editor_pane, &batch);
     let Some(tab) = shell.tab_of(editor_pane) else {
         return;
     };

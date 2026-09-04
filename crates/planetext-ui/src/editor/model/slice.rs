@@ -176,4 +176,50 @@ impl SliceModel {
             .map(|cursor| cursor.sel)
             .collect()
     }
+
+    /// 外部（他ペインや文書エンジン）での行範囲置換をこのスライスへ反映する。
+    pub fn apply_external_edit(&mut self, from: usize, to: usize, lines: &[String]) {
+        let delta = lines.len() as isize - (to as isize - from as isize);
+        let source_lines: Vec<crate::structure::text::SourceLine> = lines
+            .iter()
+            .map(|s| crate::structure::text::SourceLine::Plain(s.clone()))
+            .collect();
+        self.text.replace_external(from, to, source_lines);
+        if !lines.is_empty() {
+            self.mark_lines_modified(from, to, from + lines.len() - 1);
+        } else {
+            let removed_lines = to.saturating_sub(from);
+            let mut next_modified = std::collections::BTreeSet::new();
+            for &line in &self.modified_lines {
+                if line < from {
+                    next_modified.insert(line);
+                } else if line >= to {
+                    let shifted = (line as isize - removed_lines as isize).max(0) as usize;
+                    next_modified.insert(shifted);
+                }
+            }
+            self.modified_lines = next_modified;
+        }
+
+        if delta != 0 {
+            for cursor in &mut self.cursors {
+                if cursor.sel.anchor.line >= to {
+                    cursor.sel.anchor.line =
+                        (cursor.sel.anchor.line as isize + delta).max(0) as usize;
+                } else if cursor.sel.anchor.line >= from {
+                    cursor.sel.anchor.line = (from + lines.len().saturating_sub(1))
+                        .min(self.text.line_count().saturating_sub(1));
+                }
+                if cursor.sel.head.line >= to {
+                    cursor.sel.head.line =
+                        (cursor.sel.head.line as isize + delta).max(0) as usize;
+                } else if cursor.sel.head.line >= from {
+                    cursor.sel.head.line = (from + lines.len().saturating_sub(1))
+                        .min(self.text.line_count().saturating_sub(1));
+                }
+                cursor.sel.anchor = self.text.clamp(cursor.sel.anchor);
+                cursor.sel.head = self.text.clamp(cursor.sel.head);
+            }
+        }
+    }
 }

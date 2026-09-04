@@ -594,12 +594,10 @@ fn preview_highlights(session: &Session) -> Vec<crate::view::document::Highlight
 }
 
 pub fn changed(session: &Rc<RefCell<Session>>) {
-    let doc_id = session.borrow().doc_id;
     let pane = session.borrow().pane;
     session.borrow_mut().search_from = None;
 
-    // 同じ doc_id を表示しているすべてのセッション（View）を再描画
-    redraw_doc(doc_id, Some(pane));
+    redraw(session);
 
     let callback = ON_CHANGE.with(|slot| slot.borrow().clone());
     if let Some(callback) = callback {
@@ -1160,6 +1158,67 @@ pub struct FlushEdit {
     pub lines: Vec<String>,
 }
 
+/// 他ペインの同一ドキュメント（スライス）へ、確定した編集差分を一括適用して画面を同期します。
+pub fn apply_flush_to_other_panes(origin_pane: usize, batch: &FlushBatch) {
+    if batch.edits.is_empty() {
+        return;
+    }
+
+    let other_sessions = PANES.with(|panes| {
+        let panes = panes.borrow();
+        let origin_doc_id = panes
+            .iter()
+            .find(|s| s.borrow().pane == origin_pane)
+            .map(|s| s.borrow().doc_id);
+        match origin_doc_id {
+            Some(id) => panes
+                .iter()
+                .filter(|s| s.borrow().pane != origin_pane && s.borrow().doc_id == id)
+                .cloned()
+                .collect::<Vec<_>>(),
+            None => Vec::new(),
+        }
+    });
+
+    if other_sessions.is_empty() {
+        return;
+    }
+
+    for session in other_sessions {
+        {
+            let document = session.borrow().document.clone();
+            let mut doc = document.borrow_mut();
+            let mut session_mut = session.borrow_mut();
+            for edit in &batch.edits {
+                doc.apply_external_edit(edit.from, edit.to, &edit.lines);
+                let delta = edit.lines.len() as isize - (edit.to as isize - edit.from as isize);
+                if delta != 0 {
+                    for cursor in &mut session_mut.cursors {
+                        if cursor.sel.anchor.line >= edit.to {
+                            cursor.sel.anchor.line =
+                                (cursor.sel.anchor.line as isize + delta).max(0) as usize;
+                        } else if cursor.sel.anchor.line >= edit.from {
+                            cursor.sel.anchor.line = (edit.from + edit.lines.len().saturating_sub(1))
+                                .min(doc.text().line_count().saturating_sub(1));
+                        }
+                        if cursor.sel.head.line >= edit.to {
+                            cursor.sel.head.line =
+                                (cursor.sel.head.line as isize + delta).max(0) as usize;
+                        } else if cursor.sel.head.line >= edit.from {
+                            cursor.sel.head.line = (edit.from + edit.lines.len().saturating_sub(1))
+                                .min(doc.text().line_count().saturating_sub(1));
+                        }
+                        cursor.sel.anchor = doc.text().clamp(cursor.sel.anchor);
+                        cursor.sel.head = doc.text().clamp(cursor.sel.head);
+                    }
+                }
+            }
+        }
+        session.borrow().view.invalidate();
+        scrolled(&session);
+    }
+}
+
 /// ステータスバー等で表示するドキュメントおよびキャレット・選択範囲の統計情報。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DocStats {
@@ -1404,17 +1463,11 @@ pub fn load_doc_contents(doc_id: usize, text: &str) {
 /// テキストを合わせ、カーソルを復元する。
 pub fn apply_restored(doc_id: usize, state: &str, touched_from: usize, line_count: usize) {
     let sessions = PANES.with(|panes| panes.borrow().clone());
-    let mut text_restored = false;
 
     for s in &sessions {
         if s.borrow().doc_id == doc_id {
             s.borrow_mut().edit(|editor| {
-                if !text_restored {
-                    editor.apply_restored(state, touched_from, line_count);
-                    text_restored = true;
-                } else {
-                    editor.restore_state(state);
-                }
+                editor.apply_restored(state, touched_from, line_count);
             });
         }
     }
@@ -1557,5 +1610,56 @@ mod tests {
         // ペイン 0 の登録解除
         doc_model.unregister_slice(0);
         assert_eq!(doc_model.slices, vec![1]);
+    }
+
+    /// 【分割ビュー即時同期テスト】
+    /// 同一 doc_id を開く別ペイン（スライス）へ、apply_external_edit によって
+    /// 他ペインの編集内容が即座に反映され、変更行マークが付き、行数増減に応じてキャレットが追従シフトすることを保証する。
+    #[test]
+    fn split_view_external_edit_propagates_to_other_slice_and_shifts_caret() {
+        let doc_id = 99;
+        let mut slice_pane0 = SliceModel::new(0, doc_id);
+        let mut slice_pane1 = SliceModel::new(1, doc_id);
+
+        slice_pane0.load_sparse(Some(10));
+        slice_pane1.load_sparse(Some(10));
+
+        let lines0: Vec<_> = (0..10)
+            .map(|i| document::read_line(&format!("line {i}")))
+            .collect();
+        let lines1: Vec<_> = (0..10)
+            .map(|i| document::read_line(&format!("line {i}")))
+            .collect();
+        slice_pane0.feed(0, lines0);
+        slice_pane1.feed(0, lines1);
+
+        // ペイン 1 のキャレットを行 5 に配置
+        slice_pane1.cursors = vec![UnifiedCursor::caret(Pos::new(5, 2))];
+
+        // ペイン 0 で行 1 を編集し、さらに 2 行追加（1行置換 -> 3行: delta = +2）
+        let edited_lines = vec![
+            "line 1 edited".to_string(),
+            "new line 1b".to_string(),
+            "new line 1c".to_string(),
+        ];
+        // ペイン 1 のスライスへ外部編集として配布
+        slice_pane1.apply_external_edit(1, 2, &edited_lines);
+
+        // 検証:
+        // 1. ペイン 1 の全体行数が 10 -> 12 行になっていること
+        assert_eq!(slice_pane1.text().line_count(), 12);
+        // 2. ペイン 1 の行 1, 2, 3 の内容が反映されていること
+        assert_eq!(slice_pane1.text().raw_line(1), Some("line 1 edited"));
+        assert_eq!(slice_pane1.text().raw_line(2), Some("new line 1b"));
+        assert_eq!(slice_pane1.text().raw_line(3), Some("new line 1c"));
+        assert_eq!(slice_pane1.text().raw_line(4), Some("line 2"));
+        // 3. ペイン 1 のキャレットが行 5 から行 7（5 + 2）へ追従していること
+        assert_eq!(slice_pane1.cursors[0].sel.head.line, 7);
+        assert_eq!(slice_pane1.cursors[0].sel.head.col, 2);
+        // 4. 変更行マークが 1, 2, 3 に記録されていること
+        let modified = slice_pane1.modified_lines();
+        assert!(modified.contains(&1));
+        assert!(modified.contains(&2));
+        assert!(modified.contains(&3));
     }
 }

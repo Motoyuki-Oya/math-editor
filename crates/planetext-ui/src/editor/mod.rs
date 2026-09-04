@@ -19,7 +19,7 @@ pub use commands::{
 pub use search::SearchOptions;
 #[allow(unused_imports)]
 pub use session::{
-    add_on_redraw, apply_restored, bind_doc, clear_modified, clear_modified_doc,
+    add_on_redraw, apply_flush_to_other_panes, apply_restored, bind_doc, clear_modified, clear_modified_doc,
     clear_search_preview, clear_search_preview_pane, close_pane, feed_pane, focus_pane,
     fully_resident, get_or_create_doc_model, init, is_focused_overwrite_mode, load_pending,
     load_pending_doc, load_sparse, load_sparse_doc, preview_search_pane, redraw_all, redraw_doc,
