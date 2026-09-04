@@ -426,11 +426,12 @@ Phase 3 の自己レビューで特定された「モジュール分割後のカ
     `crates/planetext-ui/src/editor/search/matcher.rs` において、`Finder<'static>` のために
     検索語を `Box::leak` していたメモリリークを根絶し、`PatternVariant` がパターン実体（`Box<[u8]>`）
     とライフタイムを安全に所有する構造へ改修完了。
-18. **補助ファイル(下書き・設定・ウィンドウ状態)の安全書き込み(一時ファイル＋原子的置換)への統一**:
-    `crates/planetext-document/src/lib.rs` の `save_draft`、`SettingsWrite::write`、
-    および `src-tauri/src/lib.rs` の `save_window_size` を、一時ファイル書き出し＋原子的
-    リネーム(`atomic_write`)に改修する。書き込み中のクラッシュや電源断によるファイル破損・
-    0バイト化を構造的に根絶する。
+18. [x] **補助ファイル(下書き・設定・ウィンドウ・セッション状態)の安全書き込み(FileTransaction: 複数ファイル対応原子的置換＋ジャーナルクラッシュリカバリー)への統一とベンチマーク整備**:
+    `crates/planetext-document/src/transaction.rs` に `FileTransaction` を新設。
+    - 単一および複数ファイルの更新を All-or-Nothing で保証（一時ファイル `.tmp` $\rightarrow$ 元ファイル `.bak` 退避 $\rightarrow$ 置換 $\rightarrow$ 完了）。
+    - 未完了のままクラッシュした場合も、`.tx_journal` から自動ロールバックし残骸ゴミを一掃するリカバリー機構を装備。
+    - `save_draft`、`read_drafts`、`SettingsWrite::write`、`read_settings`、`save_session_state`、`save_window_size`、起動時 setup フックに全面適用。
+    - 800MB ベンチマークテスト（約6分）を `#[ignore]` 化して任意実行可能とし、日常の回帰検知用として 50MB 検索ベンチマーク（`bench_50mb_search.rs`）を整備。
 19. **検索走査の最適化（is_clean封印解除・キャッシュ・確定件数同期・オンデマンド索引化）**:
     800MB（1600万行）等の大規模文書において、EmEditor並みの高速体感検索を実現するための抜本改善を実施する：
     - **`self.is_clean()` 封印の解除と `DeltaCache` の完全稼働**: `search.rs` で未保存（dirty）時に
