@@ -252,12 +252,23 @@ impl Document {
                 .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
             writeln!(out, "{p}").map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
             let (diffs, head_offset) = self.collect_draft_diffs();
-            let active_count = head_offset.min(diffs.len());
-            let mut line_delta: isize = 0;
-            for diff in &diffs[..active_count] {
-                line_delta += diff.lines.len() as isize - diff.removed_lines as isize;
-            }
-            let base_count = (self.count as isize - line_delta).max(0) as usize;
+            // 過去の重大ミスと再発防止の記録:
+            // 800MB 等の巨大ファイル読み込み時、背景走査が完了していない段階で下書きが保存されると、
+            // self.count は「先頭 1MB の読み込みバッファ内の改行数（20,971）」という仮の数値にすぎない。
+            // それを base_count として下書きに保存してしまうと、次回起動時にその仮の数値を「確定した真の行数」
+            // と誤認して 800MB のファイルの走査を 20,971 行で打ち切る致命的な先祖返り事故を引き起こした。
+            // したがって、走査未完了（pending_source.is_some()）のときは、仮の行数は絶対に下書きに書かず、
+            // 未確定を示す 0 を書き出さなければならない。この不変条件を絶対に崩してはならない。
+            let base_count = if self.pending_source.is_some() {
+                0
+            } else {
+                let active_count = head_offset.min(diffs.len());
+                let mut line_delta: isize = 0;
+                for diff in &diffs[..active_count] {
+                    line_delta += diff.lines.len() as isize - diff.removed_lines as isize;
+                }
+                (self.count as isize - line_delta).max(0) as usize
+            };
             writeln!(out, "{}", base_count)
                 .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
             if diffs.is_empty() {

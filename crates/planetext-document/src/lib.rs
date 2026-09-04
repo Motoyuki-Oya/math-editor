@@ -421,8 +421,13 @@ impl Application {
                 .max()
                 .unwrap_or(0);
 
-            // 下書きに保存された総行数で即時確定（0秒！）。未記録でも編集行位置まで確定。
-            if saved_line_count > 0 {
+            // 過去の重大ミスと再発防止の記録:
+            // 下書きに保存された行数が 0（未確定）の場合、走査を打ち切って確定させてはならない。
+            // また、万一過去のバグで先頭チャンクの暫定行数（doc.count）がそのまま保存されていた汚染下書きであっても、
+            // それを確定値と誤認して背景走査を打ち切らないよう防護する。
+            let is_stale_provisional_count =
+                doc.pending_source.is_some() && saved_line_count == doc.count;
+            if saved_line_count > 0 && !is_stale_provisional_count {
                 doc.confirm_scan_with_total_lines(saved_line_count);
             } else if max_needed_line >= doc.count {
                 doc.confirm_scan_with_total_lines(max_needed_line);

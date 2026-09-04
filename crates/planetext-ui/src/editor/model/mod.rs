@@ -118,7 +118,14 @@ impl Document {
             line_count
         };
         self.load(Text::pending(initial));
-        self.counting = line_count == 0;
+        // 過去の重大ミスと再発防止の記録:
+        // かつて `self.counting = line_count == 0;` というコードが存在したため、
+        // 先頭 1MB の仮行数（20,971）が渡された際に counting = false（確定済み）と誤認され、
+        // 走査中なのにガターに仮行番号が描画され、ステータスバーにも仮行番号が出る致命的な先祖返り事故を起こした。
+        // load_pending はバックグラウンド走査中に呼ばれるため、走査完了通知（resize_pending / set_line_count）
+        // が届くまでは、渡された数値に関わらず 100% 確実に counting = true（走査中）でなければならない。
+        // この不変条件を絶対に崩してはならない。
+        self.counting = true;
     }
 
     pub fn resize_pending(&mut self, line_count: usize) {

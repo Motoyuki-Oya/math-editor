@@ -1,5 +1,6 @@
 use planetext_document::Application;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -752,4 +753,158 @@ fn test_blackbox_restore_with_undo_and_redo_replay() {
         app.read_lines(reopened_batch.handle, 1, 2).unwrap().lines,
         vec!["line 1 BATCH", "line 2 BATCH"]
     );
+}
+
+// ============================================================================
+// 過去の重大ミスと再発防止の記録（テスト削除・緩和の絶対禁止）:
+//
+// 【過去に犯したミス（歴史的経緯）】:
+// 800MB（約1,600万行）の巨大ファイルを開いた際、エディタは起動速度を保つために先頭 1MB だけを
+// 同期的に読んで仮オープンし、残りの走査をバックグラウンドスレッドで行う設計となっていた。
+// しかし、走査完了前に下書き保存（`save_draft`）が実行された際、先頭 1MB のバッファ内に見つかった
+// 改行数（20,971行）を「文書全体の総行数」として下書きファイルに永続化してしまった。
+// その結果、次回起動時に下書き復元（`open_draft`）がその `20971` を「保存された確定行数」と
+// 信じ切って走査を打ち切り、UI のガターに 20972 行目を描画し、ステータスバーにも [20972 | 50] と
+// 表示し、末尾ジャンプも 20972 行目に飛ぶという三重の致命的な先祖返り事故を引き起こした。
+//
+// 【このテストの目的（Why）】:
+// 1. 走査完了前（`pending_source.is_some()`）に下書き保存が走っても、仮の行数は絶対に下書きに書かず、
+//    未確定を示す `0` が書き出されることを機械的に保証する。
+// 2. 走査完了後に下書き保存が走った際は、真の総行数が正確に書き出されることを保証する。
+// 3. 行数 `0`（未確定）の下書きを復元した際、走査を打ち切ることなく背景走査が継続されることを保証する。
+//
+// 【警告】:
+// このテストのアサーションを緩和したり、テストを削除・コメントアウトして「テストを通す」ことは
+// 重大な回帰バグの再発を招くため絶対に禁止する。
+// ============================================================================
+
+#[test]
+fn test_save_draft_during_scan_never_persists_provisional_line_count() {
+    let ctx = TestContext::new("planetext_bb_provisional");
+    let app = Application::default();
+
+    // 1. 1MB を超えるテストファイル（10,240行）を作成
+    let total_lines = 1024 * 10;
+    let file_path = ctx.dir.join("large-draft-test.txt");
+    {
+        let file = std::fs::File::create(&file_path).unwrap();
+        let mut writer = std::io::BufWriter::new(file);
+        for line in 0..total_lines {
+            writeln!(writer, "line-{line:06}-{}", "x".repeat(150)).unwrap();
+        }
+        writer.flush().unwrap();
+    }
+
+    // 2. ファイルを開く（背景走査スレッドが動き出す）
+    let doc = app
+        .open_document(file_path.to_str().unwrap().to_string())
+        .unwrap();
+
+    // 3. 走査完了を待たずに、即座に下書きを保存する
+    let draft_id = "test-invariants-1".to_string();
+    app.save_draft(
+        ctx.config_dir(),
+        doc.handle,
+        draft_id.clone(),
+        Some(file_path.to_str().unwrap().to_string()),
+    )
+    .unwrap();
+
+    // 4. 下書きファイルの中身を直接検証する
+    let draft_file_path = ctx.config_dir().unwrap().join("drafts").join(format!(
+        "{}.draft",
+        draft_id
+            .chars()
+            .filter(char::is_ascii_digit)
+            .collect::<String>()
+    ));
+    let draft_content = std::fs::read_to_string(&draft_file_path).unwrap();
+    let lines: Vec<&str> = draft_content.lines().collect();
+
+    assert_eq!(lines[0], "// PLANETEXT_DRAFT_REF_V2");
+    assert_eq!(lines[1], file_path.to_str().unwrap());
+
+    // 【重要不変条件】: 走査未完了時の下書きの行数行（lines[2]）は、仮の行数ではなく厳密に "0" でなければならない！
+    let saved_count: usize = lines[2].parse().unwrap();
+    assert_eq!(
+        saved_count, 0,
+        "走査中に下書き保存された行数は仮の数値ではなく 0（未確定）でなければならない"
+    );
+
+    let expected_total_lines = total_lines + 1;
+
+    // 5. 走査完了を待機する
+    let job = app.finish_document(doc.handle).unwrap();
+    let confirmed_lines = loop {
+        if let Some(count) = job.poll().unwrap() {
+            break count;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(confirmed_lines, expected_total_lines);
+
+    // 6. 走査完了後に下書きを再度保存する
+    app.save_draft(
+        ctx.config_dir(),
+        doc.handle,
+        draft_id.clone(),
+        Some(file_path.to_str().unwrap().to_string()),
+    )
+    .unwrap();
+
+    // 7. 走査完了後の下書きファイルには、真の総行数が記録されていることを検証する
+    let updated_draft_content = std::fs::read_to_string(&draft_file_path).unwrap();
+    let updated_lines: Vec<&str> = updated_draft_content.lines().collect();
+    let updated_saved_count: usize = updated_lines[2].parse().unwrap();
+    assert_eq!(
+        updated_saved_count, expected_total_lines,
+        "走査完了後の下書きには真の総行数が記録されなければならない"
+    );
+}
+
+#[test]
+fn test_open_draft_with_zero_line_count_continues_background_scan() {
+    let ctx = TestContext::new("planetext_bb_zero_scan");
+    let app = Application::default();
+
+    let total_lines = 1024 * 10;
+    let file_path = ctx.dir.join("large-draft-restore-test.txt");
+    {
+        let file = std::fs::File::create(&file_path).unwrap();
+        let mut writer = std::io::BufWriter::new(file);
+        for line in 0..total_lines {
+            writeln!(writer, "line-{line:06}-{}", "x".repeat(150)).unwrap();
+        }
+        writer.flush().unwrap();
+    }
+    let expected_total_lines = total_lines + 1;
+
+    // 行数 0（未確定）の下書きファイルを手動作成
+    let draft_dir = ctx.config_dir().unwrap().join("drafts");
+    std::fs::create_dir_all(&draft_dir).unwrap();
+    let draft_path = draft_dir.join("200.draft");
+    let draft_body = format!(
+        "// PLANETEXT_DRAFT_REF_V2\n{}\n0\nCLEAN\n",
+        file_path.to_str().unwrap()
+    );
+    std::fs::write(&draft_path, draft_body).unwrap();
+
+    // 下書きを復元する
+    let restored = app.open_draft(ctx.config_dir(), "200".to_string()).unwrap();
+
+    // 走査未完了なので、即時返却される行数は 0（未確定）であること
+    assert_eq!(
+        restored.line_count, 0,
+        "走査未完了時は line_count が 0 であること"
+    );
+
+    // 背景走査が完了すると、真の総行数が確定すること
+    let job = app.finish_document(restored.handle).unwrap();
+    let confirmed_lines = loop {
+        if let Some(count) = job.poll().unwrap() {
+            break count;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(confirmed_lines, expected_total_lines);
 }

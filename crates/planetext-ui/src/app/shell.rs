@@ -381,6 +381,8 @@ impl Shell {
                         .borrow_mut()
                         .resize_pending(count);
                 }
+                // 走査が完了して行数が確定したため、下書きを確定した真の総行数で更新保存する。
+                sync::draft(tab);
                 self.refresh();
                 return true;
             }
