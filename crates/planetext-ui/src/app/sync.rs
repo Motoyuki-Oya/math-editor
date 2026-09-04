@@ -39,6 +39,7 @@ enum Task {
         query: String,
         options: editor::SearchOptions,
         file_size: Option<usize>,
+        forward: bool,
     },
 }
 
@@ -198,11 +199,12 @@ pub(super) fn find(
             query,
             options,
             file_size,
+            forward: true,
         },
     );
 }
 
-/// 前を検索。手元に届いている行にあればその場で即座にジャンプ、そうでなければ全体から。
+/// 前を検索。手元に届いている行にあればその場で即座にジャンプ、そうでなければ本体の走査で。
 pub(super) fn find_previous(
     shell: Shell,
     pane: usize,
@@ -218,13 +220,31 @@ pub(super) fn find_previous(
         }
         return;
     }
-    if editor::find_previous(&query, options, file_size) {
-        if let Some(pane_obj) = shell.pane_for_editor(pane) {
-            let total = pane_obj.search_status.get_untracked().1;
-            let num = editor::current_match_number(&query, options, total.unwrap_or(0));
-            pane_obj.search_status.set((num, total));
+    if editor::fully_resident() {
+        if editor::find_previous(&query, options, file_size) {
+            if let Some(pane_obj) = shell.pane_for_editor(pane) {
+                let total = pane_obj.search_status.get_untracked().1;
+                let num = editor::current_match_number(&query, options, total.unwrap_or(0));
+                pane_obj.search_status.set((num, total));
+            }
         }
+        return;
     }
+    let Some(tab) = shell.tab_of(pane) else {
+        return;
+    };
+    drop_pending_find(tab);
+    shell.status.set("検索しています…".into());
+    enqueue(
+        tab,
+        Task::Find {
+            pane,
+            query,
+            options,
+            file_size,
+            forward: false,
+        },
+    );
 }
 
 fn drop_pending_find(tab: Tab) {
@@ -356,8 +376,9 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
             query,
             options,
             file_size,
+            forward,
         } => {
-            let result = find_far(shell, tab, pane, handle, &query, options, file_size).await;
+            let result = find_far(shell, tab, pane, handle, &query, options, file_size, forward).await;
             match result {
                 Ok(Some(true)) => shell.status.set("見つかりました".into()),
                 Ok(Some(false)) => shell.status.set("見つかりませんでした".into()),
@@ -369,8 +390,7 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
     true
 }
 
-/// 文書の本体を走査して次の一致へ跳ぶ。空のページはnative内で読み進め、
-/// 記法を含む候補だけ必要に応じて手元で確認する。
+/// 文書の本体を走査して次／前の一致へ跳ぶ。
 /// `None` は新しい検索や編集によるキャンセル。
 async fn find_far(
     shell: Shell,
@@ -380,68 +400,54 @@ async fn find_far(
     query: &str,
     options: editor::SearchOptions,
     file_size: Option<usize>,
+    forward: bool,
 ) -> Result<Option<bool>, String> {
     use crate::format::document;
-    use crate::structure::text::Pos;
     let Some((after, line_count)) = editor::far_search_start() else {
         return Ok(Some(false));
     };
     let start_line = after.0.line;
-    // 一巡り: 出発点の行から末尾まで、その後は先頭から出発点の行まで。
-    let passes: [(usize, usize, Option<&editor::search::Key>); 2] = [
-        (start_line, line_count, Some(&after)),
-        (0, (start_line + 1).min(line_count), None),
-    ];
-    for (mut from, end, filter) in passes {
-        let mut after_col = filter.map(|after| after.0.col);
-        while from < end {
-            let page = framework::search_document(
-                handle,
-                query,
-                options.regex,
-                options.case_sensitive,
-                document::NOTATION_MARK,
-                from,
-                end,
-                after_col,
-            )
-            .await?;
-            if page.cancelled {
-                return Ok(None);
-            }
-            for hit in &page.hits {
-                if hit.notation {
-                    let lines = framework::read_lines(handle, hit.line, 1).await?;
-                    shell.feed(tab, hit.line, &lines);
-                    if editor::find_far_in_line(pane, hit.line, query, options, file_size, filter) {
-                        if let Some(pane_obj) = shell.pane_for_editor(pane) {
-                            if let Some(cur) = page.current_index {
-                                pane_obj.search_status.set((cur, page.total_matches));
-                            }
-                        }
-                        return Ok(Some(true));
-                    }
-                } else {
-                    let key = (Pos::new(hit.line, hit.start), None);
-                    if filter.is_none_or(|after| &key >= after)
-                        && editor::apply_far_match(pane, hit.line, hit.start, hit.end)
-                    {
-                        if let Some(pane_obj) = shell.pane_for_editor(pane) {
-                            if let Some(cur) = page.current_index {
-                                pane_obj.search_status.set((cur, page.total_matches));
-                            }
-                        }
-                        return Ok(Some(true));
+    let after_col = Some(after.0.col);
+
+    let page = framework::search_document(
+        handle,
+        query,
+        options.regex,
+        options.case_sensitive,
+        document::NOTATION_MARK,
+        start_line,
+        line_count,
+        after_col,
+        forward,
+    )
+    .await?;
+
+    if page.cancelled {
+        return Ok(None);
+    }
+
+    for hit in &page.hits {
+        let lines = framework::read_lines(handle, hit.line, 1).await?;
+        shell.feed(tab, hit.line, &lines);
+        if hit.notation {
+            if editor::find_far_in_line(pane, hit.line, query, options, file_size, None) {
+                if let Some(pane_obj) = shell.pane_for_editor(pane) {
+                    if let Some(cur) = page.current_index {
+                        pane_obj.search_status.set((cur, page.total_matches));
                     }
                 }
+                return Ok(Some(true));
             }
-            if page.scanned_to <= from {
-                break;
+        } else if editor::apply_far_match(pane, hit.line, hit.start, hit.end) {
+            if let Some(pane_obj) = shell.pane_for_editor(pane) {
+                if let Some(cur) = page.current_index {
+                    pane_obj.search_status.set((cur, page.total_matches));
+                }
             }
-            from = page.scanned_to;
-            after_col = None;
+            return Ok(Some(true));
         }
     }
+
     Ok(Some(false))
 }
 

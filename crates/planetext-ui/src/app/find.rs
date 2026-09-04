@@ -158,15 +158,12 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
                                 let options = options();
                                 let forward = !ev.shift_key();
                                 step_match(forward);
-                                spawn_local(async move {
-                                    let size = file_size_for(pane).await;
-                                    if forward {
-                                        super::sync::find(shell, pane.editor_pane(), query, options, size);
-                                    } else {
-                                        super::sync::find_previous(shell, pane.editor_pane(), query, options, size);
-                                    }
-                                    record_pos();
-                                });
+                                if forward {
+                                    super::sync::find(shell, pane.editor_pane(), query, options, None);
+                                } else {
+                                    super::sync::find_previous(shell, pane.editor_pane(), query, options, None);
+                                }
+                                record_pos();
                             }
                         }
                     />
@@ -234,11 +231,8 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
                             let query = query.get_untracked();
                             let options = options();
                             step_match(false);
-                            spawn_local(async move {
-                                let size = file_size_for(pane).await;
-                                super::sync::find_previous(shell, pane.editor_pane(), query, options, size);
-                                record_pos();
-                            });
+                            super::sync::find_previous(shell, pane.editor_pane(), query, options, None);
+                            record_pos();
                         }
                     >
                         "↑"
@@ -251,11 +245,8 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
                             let query = query.get_untracked();
                             let options = options();
                             step_match(true);
-                            spawn_local(async move {
-                                let size = file_size_for(pane).await;
-                                super::sync::find(shell, pane.editor_pane(), query, options, size);
-                                record_pos();
-                            });
+                            super::sync::find(shell, pane.editor_pane(), query, options, None);
+                            record_pos();
                         }
                     >
                         "↓"

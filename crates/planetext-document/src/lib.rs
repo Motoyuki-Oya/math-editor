@@ -141,6 +141,7 @@ pub struct SearchJob {
     from: usize,
     end: usize,
     after_col: Option<usize>,
+    forward: bool,
     generation: Arc<AtomicU64>,
     ticket: u64,
 }
@@ -153,6 +154,7 @@ impl SearchJob {
                 from: self.from,
                 end: self.end,
                 after_col: self.after_col,
+                forward: self.forward,
             },
             &|| self.generation.load(Ordering::Relaxed) != self.ticket,
         )?;
@@ -649,6 +651,7 @@ impl Application {
         from: usize,
         end: usize,
         after_col: Option<usize>,
+        forward: bool,
     ) -> Result<SearchJob, String> {
         let generation = self
             .state
@@ -669,6 +672,7 @@ impl Application {
             from,
             end,
             after_col,
+            forward,
             generation,
             ticket,
         })
@@ -1790,7 +1794,7 @@ mod tests {
 
         // 1. 編集によって先行検索が自動キャンセルされること
         let job_before_edit = application
-            .prepare_search(doc.handle, "target".into(), false, true, '$', 0, 3, None)
+            .prepare_search(doc.handle, "target".into(), false, true, '$', 0, 3, None, true)
             .unwrap();
         application
             .replace_lines(
@@ -1808,7 +1812,7 @@ mod tests {
 
         // 2. Undo によって先行検索が自動キャンセルされること
         let job_before_undo = application
-            .prepare_search(doc.handle, "target".into(), false, true, '$', 0, 3, None)
+            .prepare_search(doc.handle, "target".into(), false, true, '$', 0, 3, None, true)
             .unwrap();
         application.undo_lines(doc.handle, false).unwrap();
         let res2 = job_before_undo.run().unwrap();
@@ -1816,10 +1820,10 @@ mod tests {
 
         // 3. 新規検索によって先行検索が自動キャンセルされること
         let job_first = application
-            .prepare_search(doc.handle, "target".into(), false, true, '$', 0, 3, None)
+            .prepare_search(doc.handle, "target".into(), false, true, '$', 0, 3, None, true)
             .unwrap();
         let job_second = application
-            .prepare_search(doc.handle, "target".into(), false, true, '$', 0, 3, None)
+            .prepare_search(doc.handle, "target".into(), false, true, '$', 0, 3, None, true)
             .unwrap();
         let res_first = job_first.run().unwrap();
         assert!(

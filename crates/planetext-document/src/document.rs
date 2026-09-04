@@ -27,7 +27,7 @@ pub(crate) struct PendingSource {
 }
 
 pub(crate) struct Document {
-    source: Option<Source>,
+    pub(crate) source: Option<Source>,
     pieces: PieceTree,
     buffers: EditBuffers,
     /// すべてのピースの行数の合計。

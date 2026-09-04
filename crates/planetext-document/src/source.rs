@@ -445,6 +445,121 @@ impl Source {
         Ok(mmap)
     }
 
+    /// ファイルサイズにかかわらず、mmap 生バイト列に対する直接 SIMD 走査を行い、
+    /// 一致箇所のみ O(log N) マーク二分探索で行・列番号を算出する超高速走査。
+    pub(crate) fn fast_mmap_search(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+        marker: char,
+        limit: usize,
+    ) -> Result<Vec<crate::search::ScanHit>, String> {
+        let mmap = self.mmap()?;
+        let content_offset = self.content_offset as usize;
+        if content_offset >= mmap.len() {
+            return Ok(Vec::new());
+        }
+        let haystack = &mmap[content_offset..];
+        let encoding = self.encoding;
+        let delimiter = self.delimiter();
+        let encoded_query = encoding.encode_str(query);
+        let encoded_marker = if marker != '\0' {
+            encoding.encode_str(&marker.to_string())
+        } else {
+            Vec::new()
+        };
+        let unit = encoding.unit_bytes();
+        let query_chars = query.chars().count();
+
+        // 1. 生バイト一致位置の抽出
+        let raw_positions = if case_sensitive {
+            memchr::memmem::find_iter(haystack, &encoded_query).collect::<Vec<_>>()
+        } else if query.is_ascii() && encoded_query.len() == query.len() {
+            crate::search::literal_positions(haystack, &encoded_query, false)
+        } else {
+            return Err("fallback".to_string());
+        };
+
+        let aligned_positions: Vec<usize> = if unit > 1 {
+            raw_positions.into_iter().filter(|&p| p.is_multiple_of(unit)).collect()
+        } else {
+            raw_positions
+        };
+
+        if aligned_positions.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut hits = Vec::with_capacity(aligned_positions.len().min(limit));
+        for at in aligned_positions {
+            if hits.len() >= limit {
+                break;
+            }
+            let abs_byte = content_offset + at;
+            let (mark_idx, mark_byte) = self.index.mark_before_offset(abs_byte as u64);
+            let mark_byte = mark_byte as usize;
+            let slice_to_count = &mmap[mark_byte..abs_byte];
+
+            let line_in_mark = if delimiter.len() == 1 {
+                memchr::memchr_iter(delimiter[0], slice_to_count).count()
+            } else {
+                memchr::memmem::find_iter(slice_to_count, &delimiter).count()
+            };
+            let line = mark_idx * STRIDE + line_in_mark;
+
+            // 行頭バイト位置
+            let line_start_byte = if line_in_mark == 0 {
+                mark_byte
+            } else if delimiter.len() == 1 {
+                let last_delim = memchr::memrchr(delimiter[0], slice_to_count).unwrap_or(0);
+                mark_byte + last_delim + delimiter.len()
+            } else {
+                let mut last = 0;
+                for pos in memchr::memmem::find_iter(slice_to_count, &delimiter) {
+                    last = pos;
+                }
+                mark_byte + last + delimiter.len()
+            };
+
+            // 行頭から一致位置までの列（文字数）
+            let col_bytes = abs_byte.saturating_sub(line_start_byte);
+            let col_slice = &mmap[line_start_byte..line_start_byte + col_bytes];
+            let col = encoding.decode_line(col_slice).chars().count();
+
+            // 行末バイト位置
+            let rest_slice = &mmap[abs_byte..];
+            let line_end_byte = if delimiter.len() == 1 {
+                memchr::memchr(delimiter[0], rest_slice)
+                    .map(|pos| abs_byte + pos)
+                    .unwrap_or(mmap.len())
+            } else {
+                memchr::memmem::find_iter(rest_slice, &delimiter)
+                    .next()
+                    .map(|pos| abs_byte + pos)
+                    .unwrap_or(mmap.len())
+            };
+            let whole_line_slice = &mmap[line_start_byte..line_end_byte];
+            let has_marker = if !encoded_marker.is_empty() {
+                if encoded_marker.len() == 1 {
+                    memchr::memchr(encoded_marker[0], whole_line_slice).is_some()
+                } else {
+                    memchr::memmem::find_iter(whole_line_slice, &encoded_marker).next().is_some()
+                }
+            } else {
+                false
+            };
+
+            hits.push(crate::search::ScanHit {
+                line,
+                notation: has_marker,
+                start: col,
+                end: col + query_chars,
+            });
+        }
+
+        Ok(hits)
+    }
+
     pub(crate) fn delimiter(&self) -> Vec<u8> {
         let delimiter = match self.line_ending {
             LineEnding::Cr => "\r",
@@ -1555,6 +1670,7 @@ mod tests {
                     from: 0,
                     end: doc.line_count(),
                     after_col: None,
+                    forward: true,
                 },
                 &|| false,
             )

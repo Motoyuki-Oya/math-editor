@@ -67,6 +67,7 @@ fn bench_search_800mb() {
             current_from,
             total_lines,
             None,
+            true,
         ).expect("prepare_search failed");
 
         let page = job.run().expect("job.run failed");
@@ -105,6 +106,7 @@ fn bench_search_800mb() {
         15_000_000,
         total_lines,
         None,
+        true,
     ).expect("prepare_search failed");
     let page_direct = job_direct.run().expect("run failed");
     let direct_duration = t_direct_start.elapsed();
@@ -133,6 +135,7 @@ fn bench_search_800mb() {
             current_from_ci,
             total_lines,
             None,
+            true,
         ).expect("prepare_search failed");
 
         let page = job.run().expect("job.run failed");

@@ -480,6 +480,7 @@ pub async fn search_document(
     from: usize,
     end: usize,
     after_col: Option<usize>,
+    forward: bool,
 ) -> Result<SearchPage, String> {
     #[derive(Serialize)]
     struct Args<'a> {
@@ -491,6 +492,7 @@ pub async fn search_document(
         from: usize,
         end: usize,
         after_col: Option<usize>,
+        forward: bool,
     }
     let value = call(
         "search_document",
@@ -503,6 +505,7 @@ pub async fn search_document(
             from,
             end,
             after_col,
+            forward,
         },
     )
     .await?;

@@ -278,6 +278,7 @@ async fn search_document(
     from: usize,
     end: usize,
     after_col: Option<usize>,
+    forward: bool,
 ) -> Result<SearchPage, String> {
     let job = application.prepare_search(
         handle,
@@ -288,6 +289,7 @@ async fn search_document(
         from,
         end,
         after_col,
+        forward,
     )?;
     tauri::async_runtime::spawn_blocking(move || job.run())
         .await

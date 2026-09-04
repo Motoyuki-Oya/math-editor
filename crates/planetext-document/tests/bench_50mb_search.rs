@@ -56,17 +56,7 @@ fn bench_search_50mb() {
     println!("[BENCH 50MB] Scan completed in {:?}, total lines: {scanned_lines}", t_scan_start.elapsed());
     assert!(scanned_lines >= total_lines);
 
-    // インデックス構築完了を待機
-    let t_index_start = Instant::now();
-    let (indexed, total_b) = loop {
-        if let Ok(Some((indexed, total_b))) = app.search_index_progress(handle) {
-            if indexed >= total_b && total_b > 0 {
-                break (indexed, total_b);
-            }
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
-    println!("[BENCH 50MB] Bigram Index completed in {:?}, blocks: {indexed}/{total_b}", t_index_start.elapsed());
+    // UI検索パイプラインと同等範囲での計測
 
     // 1. Case-sensitive 検索で末尾の cccquick を検索
     let t_search_start = Instant::now();
@@ -79,30 +69,40 @@ fn bench_search_50mb() {
         0,
         scanned_lines,
         None,
+        true,
     ).expect("prepare_search failed");
 
     let page = job.run().expect("job.run failed");
     let duration_cs = t_search_start.elapsed();
-    println!("[BENCH 50MB] Case-sensitive search took {:?}, hits found: {}", duration_cs, page.hits.len());
+    let t_pipe_first = Instant::now();
+    let hit_line = page.hits[0].line;
+    let _read = app.read_lines(handle, hit_line, 1).expect("read_lines failed");
+    let duration_pipe_first = duration_cs + t_pipe_first.elapsed();
+    println!("[BENCH 50MB] Case-sensitive search took {:?}, pipeline (search + read_lines): {:?}, hits found: {}",
+        duration_cs, duration_pipe_first, page.hits.len());
     assert_eq!(page.hits.len(), 1, "末尾のヒットが検出されること");
     assert_eq!(page.hits[0].line, target_line);
 
-    // 2. 直前（990,000行目）からのダイレクト検索
-    let t_direct_start = Instant::now();
-    let job_direct = app.prepare_search(
+    // 2. 2回目（キャッシュ利用）のUI検索パイプライン
+    let t_cached_start = Instant::now();
+    let job_cached = app.prepare_search(
         handle,
         "cccquick".to_string(),
         false,
         true,
         '\0',
-        990_000,
+        0,
         scanned_lines,
         None,
+        true,
     ).expect("prepare_search failed");
-    let page_direct = job_direct.run().expect("run failed");
-    let direct_duration = t_direct_start.elapsed();
-    println!("[BENCH 50MB] Direct search took {:?}, hits found: {}", direct_duration, page_direct.hits.len());
-    assert_eq!(page_direct.hits.len(), 1);
+    let page_cached = job_cached.run().expect("run failed");
+    let hit_line_cached = page_cached.hits[0].line;
+    let _read_cached = app.read_lines(handle, hit_line_cached, 1).expect("read_lines failed");
+    let cached_duration = t_cached_start.elapsed();
+    println!("[BENCH 50MB] 2nd search pipeline (cached search + read_lines): {:?}, hits found: {}",
+        cached_duration, page_cached.hits.len());
+    assert_eq!(page_cached.hits.len(), 1);
 
     // 3. Case-insensitive 検索
     let t_ci_start = Instant::now();
@@ -115,11 +115,37 @@ fn bench_search_50mb() {
         0,
         scanned_lines,
         None,
+        true,
     ).expect("prepare_search failed");
     let page_ci = job_ci.run().expect("job.run failed");
+    let hit_line_ci = page_ci.hits[0].line;
+    let _read_ci = app.read_lines(handle, hit_line_ci, 1).expect("read_lines failed");
     let ci_duration = t_ci_start.elapsed();
-    println!("[BENCH 50MB] Case-insensitive search took {:?}, hits found: {}", ci_duration, page_ci.hits.len());
+    println!("[BENCH 50MB] Case-insensitive pipeline (search + read_lines): {:?}, hits found: {}",
+        ci_duration, page_ci.hits.len());
     assert_eq!(page_ci.hits.len(), 1);
+
+    // 4. 「前へ」（逆方向検索: forward = false）UI検索パイプライン
+    let t_prev_start = Instant::now();
+    let job_prev = app.prepare_search(
+        handle,
+        "cccquick".to_string(),
+        false,
+        true,
+        '\0',
+        scanned_lines,
+        scanned_lines,
+        None,
+        false, // forward: false (前を検索)
+    ).expect("prepare_search failed");
+    let page_prev = job_prev.run().expect("job.run failed");
+    assert!(!page_prev.hits.is_empty(), "前へのヒットが見つかること");
+    let hit_prev = &page_prev.hits[0];
+    let _read_prev = app.read_lines(handle, hit_prev.line, 1).expect("read_lines failed");
+    let prev_duration = t_prev_start.elapsed();
+    println!("[BENCH 50MB] Previous search pipeline (forward=false search + read_lines): {:?}, hit line: {}, current_index: {:?}",
+        prev_duration, hit_prev.line, page_prev.current_index);
+    assert_eq!(hit_prev.line, target_line);
 
     app.close_document(handle);
     let _ = std::fs::remove_dir_all(&temp_dir);

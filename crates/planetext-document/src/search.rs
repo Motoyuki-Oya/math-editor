@@ -412,6 +412,7 @@ pub(crate) struct SearchSpec<'a> {
     pub(crate) from: usize,
     pub(crate) end: usize,
     pub(crate) after_col: Option<usize>,
+    pub(crate) forward: bool,
 }
 
 impl Document {
@@ -430,6 +431,7 @@ impl Document {
         let from = spec.from;
         let end = spec.end;
         let after_col = spec.after_col;
+        let forward = spec.forward;
         let cur_rev = self.revision();
         let pattern_str = pattern.as_str();
 
@@ -444,45 +446,75 @@ impl Document {
         };
 
         if !is_cached {
+            if cancelled() {
+                return Ok(SearchCandidates {
+                    hits: Vec::new(),
+                    scanned_to: 0,
+                    cancelled: true,
+                    total_matches: None,
+                    current_index: None,
+                });
+            }
             let doc_lines = self.line_count();
             let mut all_hits = Vec::new();
-            let mut at = 0;
-            let mut page_lines = 50_000;
-            const MAX_PAGE_LINES: usize = 1_000_000;
             let is_clean = self.is_clean();
-            let mod_lines = if !is_clean {
-                self.modified_lines()
+
+            // クリーンな通常ファイル（Piece::Source がベース）なら、ファイルサイズ不問で fast_mmap_search を最優先実行！
+            let fast_done = if is_clean {
+                if let (Some(ref source), Some(query)) = (self.source.as_ref(), literal) {
+                    if let Ok(fast_hits) = source.fast_mmap_search(query, case_sensitive, marker, usize::MAX) {
+                        all_hits = fast_hits;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
             } else {
-                Vec::new()
+                false
             };
 
-            while at < doc_lines {
-                if cancelled() {
-                    return Ok(SearchCandidates {
-                        hits: Vec::new(),
-                        scanned_to: at,
-                        cancelled: true,
-                        total_matches: None,
-                        current_index: None,
-                    });
-                }
+            if !fast_done {
+                let mut at = 0;
+                let mut page_lines = 50_000;
+                const MAX_PAGE_LINES: usize = 1_000_000;
+                let mod_lines = if !is_clean {
+                    self.modified_lines()
+                } else {
+                    Vec::new()
+                };
 
-                let page_end = (at + page_lines).min(doc_lines);
-                let skip_scan = if case_sensitive {
-                    if let (Some(index), Some(query)) = (self.search_index().cloned(), literal) {
-                        if let (Ok(start_byte), Ok(end_byte)) = (
-                            self.byte_offset_of_line(at),
-                            self.byte_offset_of_line(page_end),
-                        ) {
-                            let start_block = start_byte / crate::search_index::INDEX_BLOCK_BYTES;
-                            let end_block = end_byte / crate::search_index::INDEX_BLOCK_BYTES;
-                            let is_clean_range = if is_clean {
-                                true
-                            } else {
-                                !mod_lines.iter().any(|&line| line >= at && line < page_end)
-                            };
-                            if is_clean_range {
-                                (start_block..=end_block).all(|b| !index.may_contain_query(b, query))
+                while at < doc_lines {
+                    if cancelled() {
+                        return Ok(SearchCandidates {
+                            hits: Vec::new(),
+                            scanned_to: at,
+                            cancelled: true,
+                            total_matches: None,
+                            current_index: None,
+                        });
+                    }
+
+                    let page_end = (at + page_lines).min(doc_lines);
+                    let skip_scan = if case_sensitive {
+                        if let (Some(index), Some(query)) = (self.search_index().cloned(), literal) {
+                            if let (Ok(start_byte), Ok(end_byte)) = (
+                                self.byte_offset_of_line(at),
+                                self.byte_offset_of_line(page_end),
+                            ) {
+                                let start_block = start_byte / crate::search_index::INDEX_BLOCK_BYTES;
+                                let end_block = end_byte / crate::search_index::INDEX_BLOCK_BYTES;
+                                let is_clean_range = if is_clean {
+                                    true
+                                } else {
+                                    !mod_lines.iter().any(|&line| line >= at && line < page_end)
+                                };
+                                if is_clean_range {
+                                    (start_block..=end_block).all(|b| !index.may_contain_query(b, query))
+                                } else {
+                                    false
+                                }
                             } else {
                                 false
                             }
@@ -491,25 +523,23 @@ impl Document {
                         }
                     } else {
                         false
-                    }
-                } else {
-                    false
-                };
+                    };
 
-                if skip_scan {
+                    if skip_scan {
+                        at = page_end;
+                        page_lines = (page_lines * 4).min(MAX_PAGE_LINES);
+                        continue;
+                    }
+
+                    let (hits, _) = if let Some(query) = literal {
+                        self.scan_literal(query, case_sensitive, marker, at, page_end - at, usize::MAX)?
+                    } else {
+                        self.scan(pattern, marker, at, page_end - at, usize::MAX)?
+                    };
+                    all_hits.extend(hits);
                     at = page_end;
                     page_lines = (page_lines * 4).min(MAX_PAGE_LINES);
-                    continue;
                 }
-
-                let (hits, _) = if let Some(query) = literal {
-                    self.scan_literal(query, case_sensitive, marker, at, page_end - at, usize::MAX)?
-                } else {
-                    self.scan(pattern, marker, at, page_end - at, usize::MAX)?
-                };
-                all_hits.extend(hits);
-                at = page_end;
-                page_lines = (page_lines * 4).min(MAX_PAGE_LINES);
             }
 
             self.search_cache = Some(SearchHitCache {
@@ -528,23 +558,53 @@ impl Document {
         let mut matching_hits = Vec::new();
         let mut first_match_idx = None;
 
-        for (idx, hit) in cache.hits.iter().enumerate() {
-            if hit.line < from || hit.line >= end {
-                continue;
-            }
-            if hit.line == from {
-                if let Some(col) = after_col {
-                    if !hit.notation && hit.start < col {
-                        continue;
+        if forward {
+            // 順方向（次へ）: (from, after_col) 以降の直近ヒットを探す
+            for (idx, hit) in cache.hits.iter().enumerate() {
+                if hit.line < from {
+                    continue;
+                }
+                if hit.line == from {
+                    if let Some(col) = after_col {
+                        if !hit.notation && hit.start < col {
+                            continue;
+                        }
                     }
                 }
+                if first_match_idx.is_none() {
+                    first_match_idx = Some(idx + 1); // 1-indexed
+                }
+                matching_hits.push(hit.clone());
+                if matching_hits.len() >= 64 {
+                    break;
+                }
             }
-            if first_match_idx.is_none() {
+            if matching_hits.is_empty() && !cache.hits.is_empty() {
+                // 末尾を越えたら先頭へラップアラウンド
+                first_match_idx = Some(1);
+                matching_hits.push(cache.hits[0].clone());
+            }
+        } else {
+            // 逆方向（前へ）: (from, after_col) 以前の直近ヒットを探す
+            for (idx, hit) in cache.hits.iter().enumerate().rev() {
+                if hit.line > from {
+                    continue;
+                }
+                if hit.line == from {
+                    if let Some(col) = after_col {
+                        if !hit.notation && hit.start >= col {
+                            continue;
+                        }
+                    }
+                }
                 first_match_idx = Some(idx + 1); // 1-indexed
-            }
-            matching_hits.push(hit.clone());
-            if matching_hits.len() >= 64 {
+                matching_hits.push(hit.clone());
                 break;
+            }
+            if matching_hits.is_empty() && !cache.hits.is_empty() {
+                // 先頭を越えたら末尾へラップアラウンド
+                first_match_idx = Some(cache.hits.len());
+                matching_hits.push(cache.hits.last().unwrap().clone());
             }
         }
 
@@ -842,6 +902,7 @@ mod tests {
                     from: 0,
                     end: 2,
                     after_col: None,
+                    forward: true,
                 },
                 &|| false,
             )
@@ -864,6 +925,7 @@ mod tests {
                     from: 0,
                     end: 2,
                     after_col: None,
+                    forward: true,
                 },
                 &|| true,
             )
@@ -886,6 +948,7 @@ mod tests {
                     from: 0,
                     end: 2,
                     after_col: Some(8),
+                    forward: true,
                 },
                 &|| false,
             )
@@ -1240,6 +1303,7 @@ mod tests {
             from: 0,
             end: doc.line_count(),
             after_col: None,
+            forward: true,
         };
         let candidates = doc.search_candidates(spec, &|| false).unwrap();
         assert!(!candidates.cancelled);
@@ -1268,6 +1332,7 @@ mod tests {
                     from: 0,
                     end: 2,
                     after_col: Some(130),
+                    forward: true,
                 },
                 &|| false,
             )
