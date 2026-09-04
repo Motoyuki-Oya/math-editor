@@ -435,7 +435,7 @@ Phase 3 の自己レビューで特定された「モジュール分割後のカ
 
 #### Phase 4 本編: MVC(ファイルモデルとスライスモデル)
 
-20. **1 Document Model : N View (Session) の確立と正統MVCへの一本化**:
+20. [x] **1 Document Model : N View (Session) の確立と正統MVCへの一本化**:
     `doc_id` ごとに 1 つの `Document`（行データ `Text`、未送信履歴 `recorder`、変更行 `modified_lines`、`known_revision`）
     を UI 側の単一モデルとし、複数ペイン（`Session`）は `Rc<RefCell<Document>>` を共有する正統な 1 Model : N View を確立。
     ペインごとにテキストを重複保持する誤ったスライス分裂や対症療法（`cached_slice`, `clone_as_slice`, `feed_pane` 跨ぎ同期）を全廃。
