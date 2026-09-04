@@ -799,6 +799,10 @@ fn test_save_draft_during_scan_never_persists_provisional_line_count() {
     let doc = app
         .open_document(file_path.to_str().unwrap().to_string())
         .unwrap();
+    assert_eq!(
+        doc.line_count, None,
+        "走査未完了の open_document は line_count が None であること"
+    );
 
     // 3. 走査完了を待たずに、即座に下書きを保存する
     let draft_id = "test-invariants-1".to_string();
@@ -892,10 +896,10 @@ fn test_open_draft_with_zero_line_count_continues_background_scan() {
     // 下書きを復元する
     let restored = app.open_draft(ctx.config_dir(), "200".to_string()).unwrap();
 
-    // 走査未完了なので、即時返却される行数は 0（未確定）であること
+    // 走査未完了なので、即時返却される行数は None（未確定）であること
     assert_eq!(
-        restored.line_count, 0,
-        "走査未完了時は line_count が 0 であること"
+        restored.line_count, None,
+        "走査未完了時は line_count が None であること"
     );
 
     // 背景走査が完了すると、真の総行数が確定すること
@@ -907,4 +911,47 @@ fn test_open_draft_with_zero_line_count_continues_background_scan() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     };
     assert_eq!(confirmed_lines, expected_total_lines);
+}
+
+#[test]
+fn test_open_draft_with_confirmed_line_count_returns_some_and_needs_no_scan_wait() {
+    let ctx = TestContext::new("planetext_bb_confirmed_draft");
+    let app = Application::default();
+
+    let total_lines = 1024 * 10;
+    let file_path = ctx.dir.join("confirmed-draft-test.txt");
+    {
+        let file = std::fs::File::create(&file_path).unwrap();
+        let mut writer = std::io::BufWriter::new(file);
+        for line in 0..total_lines {
+            writeln!(writer, "line-{line:06}-{}", "x".repeat(150)).unwrap();
+        }
+        writer.flush().unwrap();
+    }
+    let expected_total_lines = total_lines + 1;
+
+    // 確定行数が記録された下書きファイルを作成
+    let draft_dir = ctx.config_dir().unwrap().join("drafts");
+    std::fs::create_dir_all(&draft_dir).unwrap();
+    let draft_path = draft_dir.join("300.draft");
+    let draft_body = format!(
+        "// PLANETEXT_DRAFT_REF_V2\n{}\n{}\nCLEAN\n",
+        file_path.to_str().unwrap(),
+        expected_total_lines
+    );
+    std::fs::write(&draft_path, draft_body).unwrap();
+
+    // 下書きを復元する
+    let restored = app.open_draft(ctx.config_dir(), "300".to_string()).unwrap();
+
+    // 【重要不変条件】: 下書きに行数情報がある場合、走査を待たずに即座に Some(expected_total_lines) が返ること！
+    assert_eq!(
+        restored.line_count,
+        Some(expected_total_lines),
+        "下書きに行数がある場合は 0 秒で Some(確定行数) が返らなければならない"
+    );
+
+    // 走査完了（finish_document）を待たずとも、先頭や末尾の行が正しく読み出せること
+    let head_read = app.read_lines(restored.handle, 0, 5).unwrap();
+    assert_eq!(head_read.lines.len(), 5);
 }

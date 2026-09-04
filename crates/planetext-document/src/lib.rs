@@ -40,7 +40,7 @@ struct ApplicationState {
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct OpenedDocument {
     pub handle: u64,
-    pub line_count: usize,
+    pub line_count: Option<usize>,
     pub bytes: usize,
     pub encoding: String,
     pub line_ending: String,
@@ -50,7 +50,7 @@ pub struct OpenedDocument {
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct ReopenedDocument {
-    pub line_count: usize,
+    pub line_count: Option<usize>,
     pub encoding: String,
     pub line_ending: String,
     pub revision: u64,
@@ -248,12 +248,8 @@ impl Application {
         let encoding = doc.encoding().label().to_string();
         let line_ending = doc.line_ending().label().to_string();
         let revision = doc.revision();
-        // 走査未完了の間は行数は未確定（0）として返す。初期スキャンチャンク行数は漏らさない。
-        let line_count = if doc.pending_source.is_some() {
-            0
-        } else {
-            doc.line_count()
-        };
+        // 走査未完了の間は行数は未確定（None）として返す。確定済みなら Some(count)。
+        let line_count = doc.confirmed_line_count();
         let opened = OpenedDocument {
             handle: {
                 let mut next = self.state.next_document.lock().unwrap();
@@ -304,7 +300,11 @@ impl Application {
             self.with_doc(handle, |doc| {
                 let scan = doc.reopen_with_encoding(enc)?;
                 let bg_index = doc.take_background_index();
-                let line_count = if scan.is_some() { 0 } else { doc.line_count() };
+                let line_count = if scan.is_some() {
+                    None
+                } else {
+                    Some(doc.line_count())
+                };
                 Ok((
                     line_count,
                     doc.encoding().label().to_string(),
@@ -965,7 +965,7 @@ mod tests {
             .create_document_from_draft(vec!["draft one".into(), "draft two".into()])
             .unwrap();
 
-        assert_eq!(doc.line_count, 2);
+        assert_eq!(doc.line_count, Some(2));
         assert_eq!(
             application.read_lines(doc.handle, 0, usize::MAX).unwrap(),
             vec!["draft one", "draft two"]
@@ -981,7 +981,7 @@ mod tests {
         let application = Application::default();
         let doc = application.create_document();
 
-        assert_eq!(doc.line_count, 1);
+        assert_eq!(doc.line_count, Some(1));
         assert_eq!(
             application.read_lines(doc.handle, 0, usize::MAX).unwrap(),
             vec![""]
@@ -1728,7 +1728,7 @@ mod tests {
         println!(
             "[BENCH 800MB] Open CLEAN draft (0-sec line count confirmation): {clean_open_time:?}"
         );
-        assert_eq!(reopened_clean.line_count, total_lines);
+        assert_eq!(reopened_clean.line_count, Some(total_lines));
 
         println!("[BENCH 800MB] Verification SUCCESS: Head, Mid, End edits and Clean draft restored accurately!");
 

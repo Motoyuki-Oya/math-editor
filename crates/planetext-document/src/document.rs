@@ -460,6 +460,15 @@ impl Document {
         self.count = self.pieces.line_count();
     }
 
+    /// 確定した総行数を返す。走査未完了（pending_source が残っている）の場合は None を返す。
+    pub(crate) fn confirmed_line_count(&self) -> Option<usize> {
+        if self.pending_source.is_some() {
+            None
+        } else {
+            Some(self.count)
+        }
+    }
+
     /// バックグラウンド走査が完了しているか確認し、完了していれば即座に行数を確定する。
     pub(crate) fn confirm_scan_if_done(&mut self) {
         let scan_done = self

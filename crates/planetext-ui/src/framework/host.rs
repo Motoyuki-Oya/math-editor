@@ -133,7 +133,7 @@ impl GuiFramework for HostFramework {
 #[derive(Deserialize, Debug, Clone)]
 pub struct OpenedDocument {
     pub handle: u64,
-    pub line_count: usize,
+    pub line_count: Option<usize>,
     pub bytes: usize,
     #[serde(default = "default_encoding")]
     pub encoding: String,
@@ -156,7 +156,7 @@ fn default_line_ending() -> String {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct ReopenedDocument {
-    pub line_count: usize,
+    pub line_count: Option<usize>,
     pub encoding: String,
     pub line_ending: String,
     #[serde(default)]

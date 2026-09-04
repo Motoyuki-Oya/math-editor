@@ -1032,7 +1032,7 @@ impl Shell {
                     tab.line_ending.set(doc.line_ending);
                     // 行は見えた場所から取り寄せられる。最初の描き直しが
                     // 見えている窓を要求する。
-                    editor::load_pending(doc.line_count);
+                    editor::load_sparse(doc.line_count);
                     let doc_id = tab.id.get_untracked();
                     editor::set_doc_path(doc_id, Some(path.clone()));
                     editor::set_doc_file_size(doc_id, Some(doc.bytes));
@@ -1042,16 +1042,18 @@ impl Shell {
                     shell.status.set("開きました".into());
                     shell.mark_clean();
                     shell.save_session();
-                    // 行数はバックグラウンドで走査中。確定したら手元へ合わせる。
-                    let handle = doc.handle;
-                    spawn_local(async move {
-                        match framework::finish_document(handle).await {
-                            Ok(count) => {
-                                shell.document_scanned(handle, count);
+                    // 行数が未確定の場合のみ、バックグラウンド走査完了を待機する。
+                    if doc.line_count.is_none() {
+                        let handle = doc.handle;
+                        spawn_local(async move {
+                            match framework::finish_document(handle).await {
+                                Ok(count) => {
+                                    shell.document_scanned(handle, count);
+                                }
+                                Err(error) => shell.status.set(error),
                             }
-                            Err(error) => shell.status.set(error),
-                        }
-                    });
+                        });
+                    }
                 }
                 Err(error) => shell.status.set(error),
             }
@@ -1071,7 +1073,7 @@ impl Shell {
                 Ok(reopened) => {
                     tab.encoding.set(reopened.encoding.clone());
                     tab.line_ending.set(reopened.line_ending);
-                    editor::load_pending(reopened.line_count);
+                    editor::load_sparse(reopened.line_count);
                     shell.mark_clean_tab(tab);
                     shell
                         .status
@@ -1262,7 +1264,6 @@ impl Shell {
                                 let draft_id = t_state.id.to_string();
                                 let tab_copy = tab;
                                 let shell_copy = *self;
-                                let draft_contents = draft.contents.clone();
                                 let modified_lines = t_state.modified_lines.clone();
                                 spawn_local(async move {
                                     match framework::open_draft(&draft_id).await {
@@ -1277,21 +1278,8 @@ impl Shell {
                                                 tab_copy.encoding.set(doc.encoding);
                                                 tab_copy.line_ending.set(doc.line_ending);
                                                 editor::set_doc_file_size(doc_id, Some(doc.bytes));
+                                                editor::load_sparse_doc(doc_id, doc.line_count);
                                                 let doc_ref = editor::get_or_create_doc(doc_id);
-                                                if !draft_contents.is_empty()
-                                                    && doc.bytes <= 10 * 1024 * 1024
-                                                {
-                                                    doc_ref.borrow_mut().load(
-                                                        crate::format::document::read(
-                                                            &draft_contents,
-                                                        ),
-                                                    );
-                                                } else {
-                                                    editor::load_pending_doc(
-                                                        doc_id,
-                                                        doc.line_count,
-                                                    );
-                                                }
                                                 if !modified_lines.is_empty() {
                                                     doc_ref
                                                         .borrow_mut()
@@ -1299,14 +1287,19 @@ impl Shell {
                                                 }
                                                 editor::redraw_doc(doc_id, None);
                                                 shell_copy.save_session();
-                                                let handle = doc.handle;
-                                                spawn_local(async move {
-                                                    if let Ok(count) =
-                                                        framework::finish_document(handle).await
-                                                    {
-                                                        shell_copy.document_scanned(handle, count);
-                                                    }
-                                                });
+                                                // 行数が未確定の場合のみ、バックグラウンド走査完了を待機する。
+                                                // 下書き復元ですでに行数が確定している（Some）場合は走査待ち不要。
+                                                if doc.line_count.is_none() {
+                                                    let handle = doc.handle;
+                                                    spawn_local(async move {
+                                                        if let Ok(count) =
+                                                            framework::finish_document(handle).await
+                                                        {
+                                                            shell_copy
+                                                                .document_scanned(handle, count);
+                                                        }
+                                                    });
+                                                }
                                             }
                                         }
                                         Err(error) => shell_copy.status.set(error),
@@ -1355,17 +1348,18 @@ impl Shell {
                                         tab_copy.bytes.set(doc.bytes);
                                         tab_copy.encoding.set(doc.encoding);
                                         tab_copy.line_ending.set(doc.line_ending);
-                                        editor::set_doc_file_size(doc_id, Some(doc.bytes));
-                                        editor::load_pending_doc(doc_id, doc.line_count);
+                                        editor::load_sparse_doc(doc_id, doc.line_count);
                                         editor::redraw_doc(doc_id, None);
-                                        let handle = doc.handle;
-                                        spawn_local(async move {
-                                            if let Ok(count) =
-                                                framework::finish_document(handle).await
-                                            {
-                                                shell_copy.document_scanned(handle, count);
-                                            }
-                                        });
+                                        if doc.line_count.is_none() {
+                                            let handle = doc.handle;
+                                            spawn_local(async move {
+                                                if let Ok(count) =
+                                                    framework::finish_document(handle).await
+                                                {
+                                                    shell_copy.document_scanned(handle, count);
+                                                }
+                                            });
+                                        }
                                     }
                                 }
                             });
@@ -1447,7 +1441,6 @@ impl Shell {
                 let doc_id = draft.id;
                 let tab_copy = tab;
                 let shell_copy = *self;
-                let draft_contents = draft.contents.clone();
                 spawn_local(async move {
                     match framework::open_draft(&draft_id).await {
                         Ok(doc) => {
@@ -1461,22 +1454,18 @@ impl Shell {
                                 tab_copy.encoding.set(doc.encoding);
                                 tab_copy.line_ending.set(doc.line_ending);
                                 editor::set_doc_file_size(doc_id, Some(doc.bytes));
-                                let doc_ref = editor::get_or_create_doc(doc_id);
-                                if !draft_contents.is_empty() && doc.bytes <= 10 * 1024 * 1024 {
-                                    doc_ref
-                                        .borrow_mut()
-                                        .load(crate::format::document::read(&draft_contents));
-                                } else {
-                                    editor::load_pending_doc(doc_id, doc.line_count);
-                                }
+                                editor::load_sparse_doc(doc_id, doc.line_count);
                                 editor::redraw_doc(doc_id, None);
                                 shell_copy.save_session();
-                                let handle = doc.handle;
-                                spawn_local(async move {
-                                    if let Ok(count) = framework::finish_document(handle).await {
-                                        shell_copy.document_scanned(handle, count);
-                                    }
-                                });
+                                if doc.line_count.is_none() {
+                                    let handle = doc.handle;
+                                    spawn_local(async move {
+                                        if let Ok(count) = framework::finish_document(handle).await
+                                        {
+                                            shell_copy.document_scanned(handle, count);
+                                        }
+                                    });
+                                }
                             }
                         }
                         Err(error) => shell_copy.status.set(error),

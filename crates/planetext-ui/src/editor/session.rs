@@ -922,7 +922,34 @@ pub fn load(text: &str) {
     changed(&session);
 }
 
+/// 疎（スライス）テキストとして読み込みます。line_count が None のときは走査中として扱われます。
+pub fn load_sparse(line_count: Option<usize>) {
+    let Some(session) = session() else { return };
+    session
+        .borrow()
+        .document
+        .borrow_mut()
+        .load_sparse(line_count);
+    session.borrow_mut().pending_tail = None;
+    changed(&session);
+}
+
+/// 指定ドキュメントの疎テキスト読み込みを行います。
+pub fn load_sparse_doc(doc_id: usize, line_count: Option<usize>) {
+    let doc = get_or_create_doc(doc_id);
+    doc.borrow_mut().load_sparse(line_count);
+    PANES.with(|panes| {
+        for session in panes.borrow().iter() {
+            let mut borrowed = session.borrow_mut();
+            if borrowed.doc_id == doc_id {
+                borrowed.pending_tail = None;
+            }
+        }
+    });
+}
+
 /// 保留状態を開始します。line_count が 0 のときは行数未確定（走査中）として扱われます。
+#[allow(dead_code)]
 pub fn load_pending(line_count: usize) {
     let Some(session) = session() else { return };
     session
@@ -935,6 +962,7 @@ pub fn load_pending(line_count: usize) {
 }
 
 /// 指定ドキュメントの保留状態を開始します。line_count が 0 のときは行数未確定（走査中）として扱われます。
+#[allow(dead_code)]
 pub fn load_pending_doc(doc_id: usize, line_count: usize) {
     let doc = get_or_create_doc(doc_id);
     doc.borrow_mut().load_pending(line_count);

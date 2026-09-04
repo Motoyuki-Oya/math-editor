@@ -257,17 +257,17 @@ impl Document {
             // self.count は「先頭 1MB の読み込みバッファ内の改行数（20,971）」という仮の数値にすぎない。
             // それを base_count として下書きに保存してしまうと、次回起動時にその仮の数値を「確定した真の行数」
             // と誤認して 800MB のファイルの走査を 20,971 行で打ち切る致命的な先祖返り事故を引き起こした。
-            // したがって、走査未完了（pending_source.is_some()）のときは、仮の行数は絶対に下書きに書かず、
+            // したがって、走査未完了（confirmed_line_count() が None）のときは、仮の行数は絶対に下書きに書かず、
             // 未確定を示す 0 を書き出さなければならない。この不変条件を絶対に崩してはならない。
-            let base_count = if self.pending_source.is_some() {
-                0
-            } else {
+            let base_count = if let Some(confirmed) = self.confirmed_line_count() {
                 let active_count = head_offset.min(diffs.len());
                 let mut line_delta: isize = 0;
                 for diff in &diffs[..active_count] {
                     line_delta += diff.lines.len() as isize - diff.removed_lines as isize;
                 }
-                (self.count as isize - line_delta).max(0) as usize
+                (confirmed as isize - line_delta).max(0) as usize
+            } else {
+                0
             };
             writeln!(out, "{}", base_count)
                 .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;

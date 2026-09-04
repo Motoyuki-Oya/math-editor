@@ -108,24 +108,31 @@ impl Document {
         self.counting = false;
     }
 
-    pub fn load_pending(&mut self, line_count: usize) {
-        // 走査中（line_count == 0）のときは、4K/8K縦画面や極小フォント等の最大解像度でも
-        // 画面が途切れない妥当な初期枠（1,000行）を確保する。走査完了時に真の絶対行数へ置換される。
+    /// 疎（スライス）テキストとして読み込む。
+    /// line_count が Some(count) の場合は行数確定済み（下書き復元等）として counting = false で開く。
+    /// line_count が None の場合は走査中（未確定）として 1,000 行枠を仮確保し counting = true で開く。
+    pub fn load_sparse(&mut self, line_count: Option<usize>) {
         const INITIAL_PENDING_LINES: usize = 1_000;
-        let initial = if line_count == 0 {
-            INITIAL_PENDING_LINES
+        match line_count {
+            Some(count) => {
+                self.load(Text::pending(count.max(1)));
+                self.counting = false;
+            }
+            None => {
+                self.load(Text::pending(INITIAL_PENDING_LINES));
+                self.counting = true;
+            }
+        }
+    }
+
+    pub fn load_pending(&mut self, line_count: usize) {
+        if line_count == 0 {
+            self.load_sparse(None);
         } else {
-            line_count
-        };
-        self.load(Text::pending(initial));
-        // 過去の重大ミスと再発防止の記録:
-        // かつて `self.counting = line_count == 0;` というコードが存在したため、
-        // 先頭 1MB の仮行数（20,971）が渡された際に counting = false（確定済み）と誤認され、
-        // 走査中なのにガターに仮行番号が描画され、ステータスバーにも仮行番号が出る致命的な先祖返り事故を起こした。
-        // load_pending はバックグラウンド走査中に呼ばれるため、走査完了通知（resize_pending / set_line_count）
-        // が届くまでは、渡された数値に関わらず 100% 確実に counting = true（走査中）でなければならない。
-        // この不変条件を絶対に崩してはならない。
-        self.counting = true;
+            self.load_sparse(Some(line_count));
+            // 単体テスト等で明示的に走査中をシミュレートする場合の互換性
+            self.counting = true;
+        }
     }
 
     pub fn resize_pending(&mut self, line_count: usize) {
@@ -242,6 +249,13 @@ impl Editor {
         self.load(text);
         self.record(Step::Other);
         self.document.text.mark_all_changed();
+    }
+
+    /// 疎（スライス）テキストとして読み込む。
+    #[allow(dead_code)]
+    pub fn load_sparse(&mut self, line_count: Option<usize>) {
+        self.document.load_sparse(line_count);
+        self.cursors = vec![UnifiedCursor::caret(Pos::default())];
     }
 
     /// 行数だけ分かっている文書を表示し、行は見えた場所から届く。
