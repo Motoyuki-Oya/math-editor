@@ -238,6 +238,42 @@ GPUI 独自表示でも単語選択が動くよう、単語分割を小さな界
 `input.rs` / `mouse.rs` の DOM イベント受け口は WebView presentation として
 妥当なので対象にしない。
 
+### `crates/planetext-document/src/document.rs` のカプセル化違反(`pub(crate)` 露出)
+
+`Document` の主要フィールド(`pieces`, `buffers`, `count`, `log`, `pending_source`,
+`search_index` 等)がすべて `pub(crate)` であり、`search.rs` や `persistence.rs` が
+内部状態を直接覗き見て操作している。メソッド経由のアクセスに統一し、`Document` が
+自らの不変条件(`count == pieces.line_count()` 等)を自律的に保証する構造へ改修する。
+
+### 検索世代(チケット)管理の UI 漏洩とサイズ定数の二重定義
+
+UI 側(`sync.rs`)が `NEXT_TICKET` や `cancel_running_search` を抱え、検索世代の発番や
+キャンセル管理を UI が担ってしまっている。また、UI 側が `CHUNK_LINES = 20_000` や
+`TAIL_LINES = 200` などのサイズを勝手に仮定して要求している。検索の世代・キャンセルは
+文書エンジン／検索層でカプセル化し、スライスモデルは「表示窓(viewport + 余白)」の
+要求に徹する形へ改修する。
+
+### `crates/planetext-document/src/store.rs` の旧テスト残骸
+
+プロダクションコードは各新モジュールへ分解されたが、2,070行の旧テスト群が `store.rs` に
+丸ごと残っている。各新モジュール(`piece_tree.rs`, `operation_log.rs`, `search.rs`,
+`persistence.rs`, `document.rs` 等)の単体テストへ分割・再配置し、モジュール境界の
+不変条件を単体でテスト・保護できるようにする。
+
+### UI 側 `LiteralMatcher` の `Box::leak`
+
+`crates/planetext-ui/src/editor/search/matcher.rs` において、`Finder<'static>` のために
+検索語を `Box::leak` している。Matcher 自身がパターン実体とライフタイムを安全に
+所有し、破棄時に全メモリを解放する形へ置き換える。
+
+### 補助ファイル(下書き・設定・ウィンドウ状態)の直接上書きと原子的置換の欠如
+
+`session.json` は一時ファイル(`.tmp`)経由で安全に書き換えられているが、下書き(`*.draft`)、
+設定(`settings.toml`)、ウィンドウ状態(`window.toml`)は直接上書き(`File::create` / `fs::write`)
+されている。特に下書きはクラッシュ時の復元用データであり、書き込み中の中断で壊れた
+下書きが残るリスクが最も高い。Windows における `rename` 制約(既存ファイル時のエラー)
+も含め、安全な一時ファイル書き込み＋原子的リネーム(`atomic_write`)に統一する。
+
 ## 入力規則の統一(最上位と構造内部)
 
 ToBe は `docs/architecture.md` の「入力規則は深さで変えない」を参照。
@@ -369,11 +405,49 @@ Phase 4 のモデル/View分離、Phase 5 のコンポーネント境界へ次�
 
 ### Phase 4: MVC(操作ログの消費者)
 
-14. 文書モデル + スライスモデル導入(共有キャッシュ廃止)、revision 通知で更新、
-    `sync.rs` のキューを置き換える。読み取り応答の revision 検証を入れる。
-15. View の paint 専用化、グローバル状態の所有者移動、`shell.rs` の必要範囲
-    分割、単語分割の界面化。
-16. 連動グループ + 入力グループ ID の Undo。
+#### Phase 4 事前準備: カプセル化と構造境界の是正(Phase 3 残課題)
+
+Phase 3 の自己レビューで特定された「モジュール分割後のカプセル化不全」「UIへの検索世代漏洩」「旧テストの放置」「メモリリーク」を是正し、Phase 4 のモデル分離の強固な土台を整える。
+
+14. **`Document` 内部フィールドの完全プライベート化と不変条件カプセル化**:
+    `crates/planetext-document/src/document.rs` の全フィールド(`pieces`, `buffers`,
+    `count`, `log`, `pending_source`, `search_index` 等)の `pub(crate)` を private に
+    閉じ、メソッド経由でのみアクセスさせる。`search.rs` や `persistence.rs` からの
+    直接フィールドアクセスを廃止し、`Document` が自らの不変条件(`count == pieces.line_count()` 等)
+    を自律的に保証する構造へ改修する。
+15. **検索世代(チケット)管理の UI からの引き算・コア側カプセル化**:
+    `sync.rs` の `NEXT_TICKET` や `cancel_running_search` を UI 側から撤廃し、文書エンジン／
+    検索層(`ApplicationState` / `search.rs`)内で完結させる。
+16. **`store.rs` 旧テスト群(2,070行)のモジュール別再配置**:
+    `store.rs` に残存する旧テスト群を、新モジュール(`piece_tree.rs`, `operation_log.rs`,
+    `search.rs`, `persistence.rs`, `document.rs` 等)の単体テストへ分解・再配置し、
+    各モジュール境界の不変条件を単体でテスト・保護できるようにする。
+17. **UI 側 `LiteralMatcher` の `Box::leak` 解消**:
+    `crates/planetext-ui/src/editor/search/matcher.rs` において、`Finder<'static>` のために
+    検索語を `Box::leak` しているメモリリークを根絶し、Matcher がパターン実体と
+    ライフタイムを安全に所有する構造へ改修する。
+18. **補助ファイル(下書き・設定・ウィンドウ状態)の安全書き込み(一時ファイル＋原子的置換)への統一**:
+    `crates/planetext-document/src/lib.rs` の `save_draft`、`SettingsWrite::write`、
+    および `src-tauri/src/lib.rs` の `save_window_size` を、一時ファイル書き出し＋原子的
+    リネーム(`atomic_write`)に改修する。書き込み中のクラッシュや電源断によるファイル破損・
+    0バイト化を構造的に根絶する。
+
+#### Phase 4 本編: MVC(ファイルモデルとスライスモデル)
+
+19. **文書モデル + スライスモデル導入(共有キャッシュ廃止)**:
+    doc_id ごとに 1 つの文書モデル(内容なし。revision・送信列・スライス台帳)と
+    ビューごとのスライスモデル(表示窓の写し + カーソル・編集操作)を導入し、UI側の
+    共有キャッシュ(`Document`)を廃止。`sync.rs` のキューを置き換え、読み取り応答の
+    revision 検証を入れる。UIとコア間のサイズ定数二重定義(`CHUNK_LINES`, `TAIL_LINES`)
+    を排除し、スライスは表示窓の要求に徹する。
+20. **View の paint 専用化と責務分割**:
+    View を paint と入力転送のみに純粋化。グローバル状態(`thread_local!`)の所有者を
+    ファイルモデル・スライス・アプリケーションへ移動。`shell.rs` のタブ・ペイン管理、
+    ファイル手続き、IPC 呼び出し、画面組み立ての責務混在を必要範囲で分割。
+    `ApplicationState`(`lib.rs`)の単一 Mutex による全責務集中を整理。単語分割の界面化。
+21. **連動グループ + 入力グループ ID の Undo**:
+    連動グループ(参加スライスの台帳)の導入、同一入力グループの複数カーソル編集の直列化、
+    連動中の 1 回の Undo で全メンバーを戻す仕組み。
 
 設計制約(エディタコンポーネント切り出しの土台):
 
@@ -408,6 +482,10 @@ Phase 4 のモデル/View分離、Phase 5 のコンポーネント境界へ次�
 
 チェック項目:
 
+- [ ] `Document` の全フィールドが private 化され、外部(`search.rs`, `persistence.rs`)から内部状態が直接露出していない
+- [ ] 検索世代管理(チケット・キャンセル)が UI から撤廃され、文書エンジン側でカプセル化されている
+- [ ] `store.rs` の旧テストが各モジュール(`piece_tree`, `operation_log`, `search`, `persistence` 等)へ再配置され、モジュール境界の不変条件が単体テストで保証されている
+- [ ] UI側の `LiteralMatcher` が `Box::leak` せずにライフタイムを安全に所有し、メモリリークがない
 - [ ] ファイルの真実がファイルモデル 1 つにあり、スライスは捨てて取り寄せ直せる
 - [ ] View が編集判断・編集状態を持たず、paint と入力転送だけになっている
 - [ ] View・スライスが互いを知らない(再描画は revision 通知経由)
@@ -418,11 +496,14 @@ Phase 4 のモデル/View分離、Phase 5 のコンポーネント境界へ次�
       届かない
 - [ ] 読み取り応答が revision 検証され、古い応答で窓がずれない
 - [ ] モデル層からブラウザー API の直接呼び出しが消えている
+- [ ] スライスがコア側の内部チャンクサイズや走査スレッド状態を推測・直接依存せず、表示窓(viewport + margin)の要求に徹している
+- [ ] 下書き(`*.draft`)・設定(`settings.toml`)・ウィンドウ状態(`window.toml`)が一時ファイル書き出し＋原子的リネームで保護され、直接上書きされていない
 
 ### Phase 5: エディタコンポーネント切り出し(Phase 4 の検収を兼ねる)
 
 対象は「数式やルビなどの構造をテキストと同様に編集する機能」だけとする。
 `<textarea>` の置き換え部品であり、それ以上のものではない。
+（Phase 3 で先送りされた「メモリ予算超過時に編集実体を下書きへ自動退避(スピル)する機構」および「クラッシュ復旧の起動時ジャーナル再試行」の安全機構もここで完備する。）
 
 - 中身: structure、format、editor::model(カーソル・編集・トリガー)、
   行レンダリング、入力配線、スライス 1 つ + 素直に全行を描く View
