@@ -7,13 +7,14 @@
 use super::Editor;
 use crate::structure::text::LineChange;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Step {
     /// 入力された文字。その前のステップと結合します。
     Typing,
     Other,
 }
 
+#[derive(Clone, Debug)]
 pub(crate) struct Recorder {
     /// 現在のグループ。新しいステップで増える。
     pub(crate) group: u64,

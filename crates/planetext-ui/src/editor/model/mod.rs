@@ -27,8 +27,10 @@ pub struct DocumentModel {
     pub doc_id: usize,
     pub known_revision: u64,
     pub file_bytes: Option<usize>,
+    pub line_count: Option<usize>,
     pub counting: bool,
     pub slices: Vec<usize>,
+    pub cached_slice: Option<SliceModel>,
 }
 
 impl DocumentModel {
@@ -37,8 +39,10 @@ impl DocumentModel {
             doc_id,
             known_revision: 0,
             file_bytes: None,
+            line_count: None,
             counting: false,
             slices: Vec::new(),
+            cached_slice: None,
         }
     }
 

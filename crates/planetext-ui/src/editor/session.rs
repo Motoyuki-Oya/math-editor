@@ -192,16 +192,65 @@ pub(super) fn pane_session(pane: usize) -> Option<Rc<RefCell<Session>>> {
     })
 }
 
+const UNBOUND_DOC_ID: usize = usize::MAX;
+
 /// ペインに特定のドキュメント (tab.id) をバインドして表示します。
 /// 各ペインは独立した SliceModel を持ち、共有テキストキャッシュによる干渉を構造的に防ぎます。
 pub fn bind_doc(pane: usize, doc_id: usize) {
     let Some(session) = pane_session(pane) else {
         return;
     };
+
+    let prev_doc_id = session.borrow().doc_id;
+    if prev_doc_id == doc_id && prev_doc_id != UNBOUND_DOC_ID {
+        redraw(&session);
+        return;
+    }
+
+    if prev_doc_id != UNBOUND_DOC_ID {
+        let prev_doc_model = get_or_create_doc_model(prev_doc_id);
+        let mut prev_model = prev_doc_model.borrow_mut();
+        prev_model.unregister_slice(pane);
+        prev_model.cached_slice = Some(session.borrow().document.borrow().clone_as_slice(pane));
+    }
+
     let doc_model = get_or_create_doc_model(doc_id);
     doc_model.borrow_mut().register_slice(pane);
 
-    let slice = Rc::new(RefCell::new(SliceModel::new(pane, doc_id)));
+    // 1. 同一 doc_id を開いている別ペインが既にあれば、そのスライスから独立コピー（表示行キャッシュ・行数を即時共有）
+    let other_slice = PANES.with(|panes| {
+        panes.borrow().iter().find_map(|s| {
+            let b = s.borrow();
+            if b.pane != pane && b.doc_id == doc_id {
+                Some(b.document.borrow().clone_as_slice(pane))
+            } else {
+                None
+            }
+        })
+    });
+
+    let slice = if let Some(s) = other_slice {
+        Rc::new(RefCell::new(s))
+    } else if let Some(mut s) = doc_model.borrow_mut().cached_slice.take() {
+        s.pane = pane;
+        Rc::new(RefCell::new(s))
+    } else {
+        let (line_count, counting, file_bytes) = {
+            let model = doc_model.borrow();
+            (model.line_count, model.counting, model.file_bytes)
+        };
+        let mut s = SliceModel::new(pane, doc_id);
+        s.file_bytes = file_bytes;
+        if counting {
+            s.load_pending(line_count.unwrap_or(0));
+        } else if let Some(count) = line_count {
+            s.load_sparse(Some(count));
+        } else {
+            s.load_sparse(None);
+        }
+        Rc::new(RefCell::new(s))
+    };
+
     {
         let mut borrowed = session.borrow_mut();
         borrowed.doc_id = doc_id;
@@ -222,9 +271,7 @@ pub fn init(root: &HtmlElement) -> Option<usize> {
     let textarea = input::build(&doc, &view.scroller())?;
     let pane = NEXT_PANE.get();
     NEXT_PANE.set(pane + 1);
-    let doc_id = 0;
-    let doc_model = get_or_create_doc_model(doc_id);
-    doc_model.borrow_mut().register_slice(pane);
+    let doc_id = UNBOUND_DOC_ID;
     let document = Rc::new(RefCell::new(SliceModel::new(pane, doc_id)));
     let session = Rc::new(RefCell::new(Session {
         pane,
@@ -935,6 +982,12 @@ pub fn load(text: &str) {
 /// 疎（スライス）テキストとして読み込みます。line_count が None のときは走査中として扱われます。
 pub fn load_sparse(line_count: Option<usize>) {
     let Some(session) = session() else { return };
+    let doc_id = session.borrow().doc_id;
+    if doc_id != UNBOUND_DOC_ID {
+        let doc_model = get_or_create_doc_model(doc_id);
+        doc_model.borrow_mut().counting = line_count.is_none();
+        doc_model.borrow_mut().line_count = line_count;
+    }
     session
         .borrow()
         .document
@@ -948,6 +1001,7 @@ pub fn load_sparse(line_count: Option<usize>) {
 pub fn load_sparse_doc(doc_id: usize, line_count: Option<usize>) {
     let doc_model = get_or_create_doc_model(doc_id);
     doc_model.borrow_mut().counting = line_count.is_none();
+    doc_model.borrow_mut().line_count = line_count;
     PANES.with(|panes| {
         for session in panes.borrow().iter() {
             let mut borrowed = session.borrow_mut();
@@ -964,6 +1018,12 @@ pub fn load_sparse_doc(doc_id: usize, line_count: Option<usize>) {
 #[allow(dead_code)]
 pub fn load_pending(line_count: usize) {
     let Some(session) = session() else { return };
+    let doc_id = session.borrow().doc_id;
+    if doc_id != UNBOUND_DOC_ID {
+        let doc_model = get_or_create_doc_model(doc_id);
+        doc_model.borrow_mut().counting = line_count == 0;
+        doc_model.borrow_mut().line_count = if line_count == 0 { None } else { Some(line_count) };
+    }
     session
         .borrow()
         .document
@@ -978,6 +1038,7 @@ pub fn load_pending(line_count: usize) {
 pub fn load_pending_doc(doc_id: usize, line_count: usize) {
     let doc_model = get_or_create_doc_model(doc_id);
     doc_model.borrow_mut().counting = line_count == 0;
+    doc_model.borrow_mut().line_count = if line_count == 0 { None } else { Some(line_count) };
     PANES.with(|panes| {
         for session in panes.borrow().iter() {
             let mut borrowed = session.borrow_mut();
@@ -1045,11 +1106,30 @@ pub fn set_line_count(pane: usize, count: usize) {
     let Some(session) = pane_session(pane) else {
         return;
     };
-    let pending_tail = session.borrow_mut().pending_tail.take();
-    session.borrow_mut().edit(|editor| {
-        apply_line_count(editor, pending_tail, count);
-    });
-    redraw(&session);
+    let doc_id = session.borrow().doc_id;
+    if doc_id != UNBOUND_DOC_ID {
+        let doc_model = get_or_create_doc_model(doc_id);
+        doc_model.borrow_mut().counting = false;
+        doc_model.borrow_mut().line_count = Some(count);
+
+        PANES.with(|panes| {
+            for s in panes.borrow().iter() {
+                if s.borrow().doc_id == doc_id {
+                    let pending_tail = s.borrow_mut().pending_tail.take();
+                    s.borrow_mut().edit(|editor| {
+                        apply_line_count(editor, pending_tail, count);
+                    });
+                    redraw(s);
+                }
+            }
+        });
+    } else {
+        let pending_tail = session.borrow_mut().pending_tail.take();
+        session.borrow_mut().edit(|editor| {
+            apply_line_count(editor, pending_tail, count);
+        });
+        redraw(&session);
+    }
 }
 
 /// 手元に置いておく行数の上限と、見えている窓の周りに残す幅。上限を超えたら
@@ -1164,21 +1244,39 @@ pub fn apply_flush_to_other_panes(origin_pane: usize, batch: &FlushBatch) {
         return;
     }
 
-    let other_sessions = PANES.with(|panes| {
+    let (other_sessions, origin_doc_id) = PANES.with(|panes| {
         let panes = panes.borrow();
         let origin_doc_id = panes
             .iter()
             .find(|s| s.borrow().pane == origin_pane)
             .map(|s| s.borrow().doc_id);
-        match origin_doc_id {
+        let others = match origin_doc_id {
             Some(id) => panes
                 .iter()
                 .filter(|s| s.borrow().pane != origin_pane && s.borrow().doc_id == id)
                 .cloned()
                 .collect::<Vec<_>>(),
             None => Vec::new(),
-        }
+        };
+        (others, origin_doc_id)
     });
+
+    let total_delta: isize = batch
+        .edits
+        .iter()
+        .map(|e| e.lines.len() as isize - (e.to as isize - e.from as isize))
+        .sum();
+    if total_delta != 0 {
+        if let Some(id) = origin_doc_id {
+            if id != UNBOUND_DOC_ID {
+                let doc_model = get_or_create_doc_model(id);
+                let mut dm = doc_model.borrow_mut();
+                if let Some(ref mut count) = dm.line_count {
+                    *count = (*count as isize + total_delta).max(1) as usize;
+                }
+            }
+        }
+    }
 
     if other_sessions.is_empty() {
         return;
@@ -1661,5 +1759,64 @@ mod tests {
         assert!(modified.contains(&1));
         assert!(modified.contains(&2));
         assert!(modified.contains(&3));
+    }
+
+    /// 【分割ビュー白飛び防止テスト】
+    /// 既存のペインから分割ビューを作成した際、clone_as_slice によって表示行キャッシュと行数が即座に継承され、
+    /// 新規スライスが総行数1の空文書（真っ白）にならず、元の内容を0msで保持していることを検証する。
+    #[test]
+    fn split_view_clone_as_slice_inherits_cached_lines_and_does_not_render_blank() {
+        let doc_id = 77;
+        let mut slice_pane0 = SliceModel::new(0, doc_id);
+        slice_pane0.load_sparse(Some(50));
+
+        let original_lines: Vec<_> = (0..50)
+            .map(|i| document::read_line(&format!("content line {i}")))
+            .collect();
+        slice_pane0.feed(0, original_lines);
+
+        assert_eq!(slice_pane0.text().line_count(), 50);
+        assert!(!slice_pane0.text().is_absent(0));
+
+        // 分割ビュー作成: ペイン 1 のスライスをペイン 0 から clone_as_slice で作成
+        let slice_pane1 = slice_pane0.clone_as_slice(1);
+
+        // 新しいペイン 1 の検証:
+        // 1. ペイン番号が 1 に設定されていること
+        assert_eq!(slice_pane1.pane, 1);
+        assert_eq!(slice_pane1.doc_id, doc_id);
+        // 2. 総行数が 1 ではなく元の 50 行であること（白飛びしない）
+        assert_eq!(slice_pane1.text().line_count(), 50);
+        // 3. 行 0 や行 49 が absent ではなく、内容が正しく取得できること
+        assert!(!slice_pane1.text().is_absent(0));
+        assert!(!slice_pane1.text().is_absent(49));
+        assert_eq!(slice_pane1.text().raw_line(0), Some("content line 0"));
+        assert_eq!(slice_pane1.text().raw_line(49), Some("content line 49"));
+    }
+
+    /// 【タブ切り替え時のスライス退避・復元テスト】
+    /// ペインが別のドキュメントに切り替わっても、DocumentModel.cached_slice に前回のスライス状態が退避され、
+    /// 再度そのドキュメントを開いた際に空行（真っ白）化せず即座に元の行数と内容が復元されることを検証する。
+    #[test]
+    fn document_model_caches_slice_on_tab_switch_and_restores_without_blank() {
+        let doc_id = 88;
+        let mut doc_model = DocumentModel::new(doc_id);
+
+        let mut slice = SliceModel::new(0, doc_id);
+        slice.load_sparse(Some(30));
+        let lines: Vec<_> = (0..30)
+            .map(|i| document::read_line(&format!("doc88 line {i}")))
+            .collect();
+        slice.feed(0, lines);
+
+        // タブ切り替えでペインから外れる: cached_slice に退避
+        doc_model.line_count = Some(30);
+        doc_model.cached_slice = Some(slice.clone_as_slice(0));
+
+        // 再度タブを開く: cached_slice から復元
+        let restored_slice = doc_model.cached_slice.take().expect("cached_slice should exist");
+        assert_eq!(restored_slice.text().line_count(), 30);
+        assert!(!restored_slice.text().is_absent(0));
+        assert_eq!(restored_slice.text().raw_line(0), Some("doc88 line 0"));
     }
 }

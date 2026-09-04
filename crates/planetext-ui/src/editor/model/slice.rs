@@ -8,7 +8,7 @@ use super::cursor::UnifiedCursor;
 use super::history::Recorder;
 use crate::structure::text::{Pos, Sel, Text};
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub struct SliceModel {
     #[allow(dead_code)]
     pub pane: usize,
@@ -34,6 +34,23 @@ impl SliceModel {
             modified_lines: BTreeSet::new(),
             file_bytes: None,
             counting: false,
+        }
+    }
+
+    /// 別ペイン（分割ビュー等）向けに独立したスライスモデルとして複製する。
+    /// 表示行の写し（Text）を継承しつつ、未送信控えやキャレットは独立した初期状態で開始する。
+    pub fn clone_as_slice(&self, new_pane: usize) -> Self {
+        let mut text = self.text.clone();
+        text.take_changes();
+        Self {
+            pane: new_pane,
+            doc_id: self.doc_id,
+            text,
+            cursors: vec![UnifiedCursor::caret(Pos::default())],
+            recorder: Recorder::default(),
+            modified_lines: self.modified_lines.clone(),
+            file_bytes: self.file_bytes,
+            counting: self.counting,
         }
     }
 
