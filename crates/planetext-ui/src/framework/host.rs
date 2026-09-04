@@ -505,6 +505,7 @@ pub async fn search_document(
     serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
 }
 
+#[allow(dead_code)]
 pub async fn cancel_search(handle: u64) {
     #[derive(Serialize)]
     struct Args {

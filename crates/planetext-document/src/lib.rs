@@ -557,6 +557,7 @@ impl Application {
         before: String,
         after: String,
     ) -> Result<EditApplied, String> {
+        self.cancel_search(handle);
         self.with_doc(handle, |doc| {
             let line_count = doc.replace(from, to, lines, group, &before, &after)?;
             Ok(EditApplied {
@@ -578,6 +579,7 @@ impl Application {
         before: String,
         after: String,
     ) -> Result<EditApplied, String> {
+        self.cancel_search(handle);
         self.with_doc(handle, |doc| {
             let line_count =
                 doc.replace_with_base(base_revision, from, to, lines, group, &before, &after)?;
@@ -593,6 +595,7 @@ impl Application {
         if !self.state.docs.lock().unwrap().contains_key(&handle) {
             return Ok(None);
         }
+        self.cancel_search(handle);
         self.with_doc(handle, |doc| {
             Ok(
                 (if redo { doc.redo() } else { doc.undo() })?.map(|restored| RestoredLines {
@@ -608,13 +611,13 @@ impl Application {
     }
 
     pub fn save_document(&self, handle: u64, path: String) -> Result<(), String> {
+        self.cancel_search(handle);
         self.with_doc(handle, |doc| doc.save(&path))
     }
 
     pub fn close_document(&self, handle: u64) {
-        if let Some(generation) = self.state.searches.lock().unwrap().remove(&handle) {
-            generation.fetch_add(1, Ordering::Relaxed);
-        }
+        self.cancel_search(handle);
+        self.state.searches.lock().unwrap().remove(&handle);
         self.state.docs.lock().unwrap().remove(&handle);
     }
 
@@ -1735,5 +1738,68 @@ mod tests {
         application.clear_drafts(Some(temp_dir.clone()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         let _ = std::fs::remove_file(&file_path);
+    }
+
+    #[test]
+    fn search_job_automatically_cancelled_by_edit_undo_and_new_search() {
+        let application = Application::default();
+        let doc = application.create_document();
+        application
+            .replace_lines(
+                doc.handle,
+                0,
+                0,
+                vec![
+                    "line 1 target".into(),
+                    "line 2 target".into(),
+                    "line 3 target".into(),
+                ],
+                1,
+                "".into(),
+                "".into(),
+            )
+            .unwrap();
+
+        // 1. 編集によって先行検索が自動キャンセルされること
+        let job_before_edit = application
+            .prepare_search(doc.handle, "target".into(), false, true, '$', 0, 3, None)
+            .unwrap();
+        application
+            .replace_lines(
+                doc.handle,
+                0,
+                1,
+                vec!["line 1 modified".into()],
+                2,
+                "".into(),
+                "".into(),
+            )
+            .unwrap();
+        let res1 = job_before_edit.run().unwrap();
+        assert!(res1.cancelled, "編集後の先行検索は自動キャンセルされること");
+
+        // 2. Undo によって先行検索が自動キャンセルされること
+        let job_before_undo = application
+            .prepare_search(doc.handle, "target".into(), false, true, '$', 0, 3, None)
+            .unwrap();
+        application.undo_lines(doc.handle, false).unwrap();
+        let res2 = job_before_undo.run().unwrap();
+        assert!(res2.cancelled, "Undo後の先行検索は自動キャンセルされること");
+
+        // 3. 新規検索によって先行検索が自動キャンセルされること
+        let job_first = application
+            .prepare_search(doc.handle, "target".into(), false, true, '$', 0, 3, None)
+            .unwrap();
+        let job_second = application
+            .prepare_search(doc.handle, "target".into(), false, true, '$', 0, 3, None)
+            .unwrap();
+        let res_first = job_first.run().unwrap();
+        assert!(
+            res_first.cancelled,
+            "旧検索は新検索の開始により自動キャンセルされること"
+        );
+        let res_second = job_second.run().unwrap();
+        assert!(!res_second.cancelled, "最新の検索は正常完了すること");
+        assert_eq!(res_second.hits.len(), 3);
     }
 }

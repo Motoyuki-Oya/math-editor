@@ -39,7 +39,6 @@ enum Task {
         query: String,
         options: editor::SearchOptions,
         file_size: Option<usize>,
-        ticket: u64,
     },
 }
 
@@ -53,9 +52,6 @@ thread_local! {
     static FETCH_RANGES: RefCell<HashMap<usize, Range<usize>>> = RefCell::new(HashMap::new());
     /// 取り寄せが走っているタブ。
     static FETCH_BUSY: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
-    /// 検索が走っているタブと最新チケット。世代管理により置換検索の誤解除を防ぐ。
-    static SEARCH_TICKETS: RefCell<HashMap<usize, u64>> = RefCell::new(HashMap::new());
-    static NEXT_TICKET: Cell<u64> = const { Cell::new(0) };
 }
 
 pub(super) fn install(shell: Shell) {
@@ -148,18 +144,15 @@ pub(super) fn flush(shell: Shell, editor_pane: usize) {
     let Some(tab) = shell.tab_of(editor_pane) else {
         return;
     };
-    cancel_running_search(tab);
     enqueue(tab, Task::Edits(batch));
 }
 
 pub(super) fn undo(shell: Shell, redo: bool) {
     let tab = shell.tab_untracked();
-    cancel_running_search(tab);
     enqueue(tab, Task::Undo { redo });
 }
 
 pub(super) fn save(tab: Tab, path: String) {
-    cancel_running_search(tab);
     enqueue(tab, Task::Save { path });
 }
 
@@ -168,7 +161,6 @@ pub(super) fn draft(tab: Tab) {
 }
 
 /// 次を検索。手元に届いている行にあればその場で即座にジャンプ、そうでなければ本体の走査で。
-/// すでに検索が走っている間は重複実行をブロックし、負荷を抑制する。
 pub(super) fn find(
     shell: Shell,
     pane: usize,
@@ -186,13 +178,7 @@ pub(super) fn find(
     let Some(tab) = shell.tab_of(pane) else {
         return;
     };
-    let id = tab.id.get_untracked();
-    let ticket = NEXT_TICKET.get().wrapping_add(1);
-    NEXT_TICKET.set(ticket);
-    if SEARCH_TICKETS.with(|t| t.borrow().contains_key(&id)) {
-        cancel_running_search(tab);
-    }
-    SEARCH_TICKETS.with(|t| t.borrow_mut().insert(id, ticket));
+    drop_pending_find(tab);
     shell.status.set("検索しています…".into());
     enqueue(
         tab,
@@ -201,7 +187,6 @@ pub(super) fn find(
             query,
             options,
             file_size,
-            ticket,
         },
     );
 }
@@ -220,7 +205,7 @@ pub(super) fn find_previous(
     editor::find_previous(&query, options, file_size);
 }
 
-fn cancel_running_search(tab: Tab) {
+fn drop_pending_find(tab: Tab) {
     let id = tab.id.get_untracked();
     QUEUES.with(|queues| {
         let mut queues = queues.borrow_mut();
@@ -228,9 +213,6 @@ fn cancel_running_search(tab: Tab) {
             queue.retain(|(_, task)| !matches!(task, Task::Find { .. }));
         }
     });
-    if let Some(handle) = tab.doc.get_untracked() {
-        spawn_local(async move { framework::cancel_search(handle).await });
-    }
 }
 
 fn enqueue(tab: Tab, task: Task) {
@@ -352,16 +334,8 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
             query,
             options,
             file_size,
-            ticket,
         } => {
             let result = find_far(shell, tab, pane, handle, &query, options, file_size).await;
-            let id = tab.id.get_untracked();
-            SEARCH_TICKETS.with(|t| {
-                let mut map = t.borrow_mut();
-                if map.get(&id) == Some(&ticket) {
-                    map.remove(&id);
-                }
-            });
             match result {
                 Ok(Some(true)) => shell.status.set("見つかりました".into()),
                 Ok(Some(false)) => shell.status.set("見つかりませんでした".into()),
