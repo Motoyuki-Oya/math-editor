@@ -15,7 +15,7 @@ use crate::edit_buffers::{EditBuffers, EditRange};
 use crate::operation_log::{BulkOperation, Edit, OperationLog};
 use crate::persistence::DraftDiff;
 use crate::piece_tree::{Piece, PieceTree};
-use crate::search::ScanHit;
+use crate::search::{convert_raw_hits, scan_encoded_range, ScanHit};
 use crate::search_index::{BackgroundIndex, SearchIndex};
 use crate::source::{BackgroundScan, FileEncoding, LineEnding, ScanIndex, Source};
 
@@ -27,18 +27,18 @@ pub(crate) struct PendingSource {
 }
 
 pub(crate) struct Document {
-    pub(crate) source: Option<Source>,
-    pub(crate) pieces: PieceTree,
-    pub(crate) buffers: EditBuffers,
+    source: Option<Source>,
+    pieces: PieceTree,
+    buffers: EditBuffers,
     /// すべてのピースの行数の合計。
-    pub(crate) count: usize,
-    pub(crate) log: OperationLog,
-    pub(crate) encoding: FileEncoding,
-    pub(crate) line_ending: LineEnding,
-    pub(crate) pending_source: Option<PendingSource>,
-    pub(crate) search_index: Option<SearchIndex>,
-    pub(crate) background_index: Option<BackgroundIndex>,
-    pub(crate) pending_redo_diffs: Vec<DraftDiff>,
+    count: usize,
+    log: OperationLog,
+    encoding: FileEncoding,
+    line_ending: LineEnding,
+    pending_source: Option<PendingSource>,
+    search_index: Option<SearchIndex>,
+    background_index: Option<BackgroundIndex>,
+    pending_redo_diffs: Vec<DraftDiff>,
 }
 
 /// 元に戻す・やり直すの結果: 復元すべき控えと、行が変わった範囲の始まり。
@@ -52,6 +52,72 @@ pub(crate) struct Restored {
 impl Document {
     pub(crate) fn take_background_index(&mut self) -> Option<BackgroundIndex> {
         self.background_index.take()
+    }
+
+    pub(crate) fn is_scanning(&self) -> bool {
+        self.pending_source.is_some()
+    }
+
+    pub(crate) fn set_pending_redo_diffs(&mut self, diffs: Vec<DraftDiff>) {
+        self.pending_redo_diffs = diffs;
+    }
+
+    pub(crate) fn has_active_bulk(&self) -> bool {
+        self.log.has_active_bulk()
+    }
+
+    pub(crate) fn is_same_source_path(&self, path: &str) -> bool {
+        self.source
+            .as_ref()
+            .is_some_and(|source| source.path == Path::new(path))
+    }
+
+    pub(crate) fn take_source(&mut self) -> Option<Source> {
+        self.source.take()
+    }
+
+    pub(crate) fn restore_source(&mut self, source: Option<Source>) {
+        self.source = source;
+    }
+
+    pub(crate) fn reinitialize_after_save(&mut self, new_source: Source, is_small_file: bool) {
+        let lines = self.count;
+        let content_offset = new_source.content_offset as usize;
+        let bytes = new_source.bytes as usize;
+        self.source = Some(new_source);
+        self.pieces = PieceTree::new(vec![Piece::Source {
+            from: content_offset,
+            len: bytes.saturating_sub(content_offset),
+            newlines: lines.saturating_sub(1),
+            starts_newline: false,
+            ends_newline: false,
+        }]);
+        if !is_small_file {
+            self.log.clear();
+            self.buffers = EditBuffers::default();
+        } else {
+            self.log.mark_saved();
+        }
+        self.search_index = None;
+    }
+
+    pub(crate) fn search_index(&self) -> Option<&SearchIndex> {
+        self.search_index.as_ref()
+    }
+
+    pub(crate) fn estimated_line_count(&self) -> usize {
+        if let (Some(pending), Some(source)) = (self.pending_source, &self.source) {
+            let pending_from = pending.from as u64;
+            if pending_from > source.content_offset && source.bytes > source.content_offset {
+                let scanned_bytes = (pending_from - source.content_offset) as u128;
+                let total_bytes = (source.bytes - source.content_offset) as u128;
+                ((self.count as u128 * total_bytes) / scanned_bytes.max(1)) as usize
+            } else {
+                self.count
+            }
+        } else {
+            self.count
+        }
     }
 
     fn source_pieces(source: &Source, count: usize) -> (Vec<Piece>, Option<PendingSource>) {
@@ -1280,6 +1346,260 @@ impl Document {
             .unwrap_or(0);
         self.buffers.len() + self.log.memory_usage() + index_mem
     }
+
+    /// トランザクションを等価な splice へ変換する。このまま active に残すと、
+    /// 変換後の行へ同じ規則が再適用され（foo→foofoo の二重化）、Undo も
+    /// 効かなくなる。変換後は通常の編集として Undo/Redo・下書き化できる。
+    pub(crate) fn materialize_bulk_transactions(&mut self) -> Result<(), String> {
+        use crate::operation_log::OperationKind;
+        let targets: Vec<usize> = self.log.transactions[..self.log.head]
+            .iter()
+            .enumerate()
+            .filter_map(|(i, tx)| matches!(tx.kind, OperationKind::Bulk(_)).then_some(i))
+            .collect();
+        for &index in targets.iter().rev() {
+            let (base_revision, group, revision, bulk, before_text, after_text) = {
+                let tx = &self.log.transactions[index];
+                match &tx.kind {
+                    OperationKind::Bulk(bulk) => (
+                        tx.base_revision,
+                        tx.group,
+                        tx.revision,
+                        bulk.clone(),
+                        tx.before.clone(),
+                        tx.after.clone(),
+                    ),
+                    OperationKind::Splice(_) => continue,
+                }
+            };
+            let mut edits = Vec::new();
+            match &bulk {
+                crate::operation_log::BulkOperation::AllLines {
+                    from_line, to_line, ..
+                }
+                | crate::operation_log::BulkOperation::ReplaceAll {
+                    from_line, to_line, ..
+                } => {
+                    // 範囲内の各行を 1 編集として記録する。内容の変化有無で絞ると、
+                    // たまたま元と同じ結果になった行が欠けて Undo で復元できない
+                    // ため、位置ベースで全行を固める。後ろの行から置き換え、
+                    // まだ置き換えていない行の座標を変えない。
+                    for line_idx in (*from_line..*to_line).rev() {
+                        if line_idx >= self.count {
+                            break;
+                        }
+                        let original = self.read_raw(line_idx, 1)?;
+                        let current = self.read(line_idx, 1)?;
+                        edits.push(self.splice_with_deleted(
+                            line_idx,
+                            line_idx + 1,
+                            current,
+                            original,
+                        )?);
+                    }
+                }
+            }
+            let tx = crate::operation_log::Transaction {
+                group,
+                base_revision,
+                revision,
+                kind: OperationKind::Splice(edits),
+                before: before_text,
+                after: after_text,
+            };
+            self.log.transactions[index] = tx;
+        }
+        Ok(())
+    }
+
+    /// 未保存のトランザクションから、発生した時系列順に操作ログ（差分）を抽出する。
+    /// Undo された（Redo 可能な）トランザクションも含めて保持し、復元後に Redo できるようにする。
+    pub(crate) fn collect_draft_diffs(&mut self) -> (Vec<DraftDiff>, usize) {
+        let (txs, head_tx_offset) = self.log.all_unsaved_transactions();
+        let mut diffs = Vec::new();
+        let mut active_diffs_count = 0;
+        for (tx_idx, tx) in txs.iter().enumerate() {
+            let group = (tx_idx as u64) + 1;
+            for edit in tx.edits() {
+                let mut lines = Vec::with_capacity(edit.inserted_lines);
+                self.buffers.for_each_line(
+                    edit.inserted,
+                    0,
+                    edit.inserted_lines,
+                    &mut |_, line| {
+                        lines.push(line.to_string());
+                        true
+                    },
+                );
+                let deleted_lines = self.log.read_deleted(edit.removed);
+                let fallback_pos = format!("{}.0-{}.0", edit.from_line, edit.from_line);
+                let before = if tx.before.is_empty() {
+                    fallback_pos.clone()
+                } else {
+                    tx.before.clone()
+                };
+                let after = if tx.after.is_empty() {
+                    fallback_pos
+                } else {
+                    tx.after.clone()
+                };
+                diffs.push(DraftDiff {
+                    group,
+                    from_line: edit.from_line,
+                    removed_lines: edit.removed_lines,
+                    lines,
+                    deleted_lines,
+                    before,
+                    after,
+                });
+                if tx_idx < head_tx_offset {
+                    active_diffs_count += 1;
+                }
+            }
+        }
+        for pending in &self.pending_redo_diffs {
+            diffs.push(pending.clone());
+        }
+        (diffs, active_diffs_count)
+    }
+
+    /// 通常の大小区別あり文字列検索。ディスクのピースはバイト範囲をまとめて
+    /// memmem で探し、編集で入った行も同じ結果形式へ合わせる。
+    pub(crate) fn scan_literal(
+        &mut self,
+        query: &str,
+        case_sensitive: bool,
+        marker: char,
+        from: usize,
+        count: usize,
+        limit: usize,
+    ) -> Result<(Vec<ScanHit>, usize), String> {
+        let to = from.saturating_add(count).min(self.count);
+        if from >= to || limit == 0 {
+            return Ok((Vec::new(), from));
+        }
+        let query_characters = query.chars().count();
+        let mut hits = Vec::new();
+        let mut scanned_to = from;
+        let mut error = None;
+        self.pieces
+            .for_each_line_range(from, to, &mut |piece_line, piece, skip, take| {
+                if hits.len() >= limit || error.is_some() {
+                    return false;
+                }
+                let result: Result<(Vec<ScanHit>, usize), String> = match piece {
+                    Piece::Source { from, len, .. } => {
+                        let Some(source) = self.source.as_mut() else {
+                            error = Some(
+                                "文書ストアのディスク参照が失われました。開き直してください"
+                                    .to_string(),
+                            );
+                            return false;
+                        };
+                        (|| {
+                            let (range_from, range_to) =
+                                source.byte_range_for_lines(from, len, skip, take)?;
+                            let encoding = source.encoding;
+                            let delimiter = source.delimiter();
+                            let encoded_query = encoding.encode_str(query);
+                            let encoded_marker = encoding.encode_str(&marker.to_string());
+                            let (raw, scanned) = scan_encoded_range(
+                                range_to - range_from,
+                                take,
+                                encoding,
+                                &delimiter,
+                                &encoded_query,
+                                &encoded_marker,
+                                case_sensitive,
+                                limit - hits.len(),
+                                |offset, size| source.read_byte_range(range_from + offset, size),
+                            )?;
+                            let converted = convert_raw_hits(
+                                raw,
+                                encoding,
+                                piece_line + skip,
+                                query_characters,
+                                |offset, size| source.read_byte_range(range_from + offset, size),
+                            )?;
+                            Ok((converted, scanned))
+                        })()
+                    }
+                    Piece::Edit {
+                        from,
+                        len,
+                        newlines,
+                        starts_newline,
+                        ends_newline,
+                        encoding,
+                        line_ending,
+                        ..
+                    } => {
+                        let leading = usize::from(starts_newline)
+                            * crate::edit_buffers::EditBuffers::line_separator_len(
+                                encoding,
+                                line_ending,
+                            );
+                        let range = EditRange {
+                            from: from + leading,
+                            len: len - leading,
+                            lines: newlines + usize::from(!ends_newline)
+                                - usize::from(starts_newline),
+                            encoding,
+                            line_ending,
+                        };
+                        let bytes = self.buffers.bytes(range);
+                        let range_start = self.buffers.byte_offset_after_lines(range, skip);
+                        let range_end = self
+                            .buffers
+                            .byte_offset_after_lines(range, skip.saturating_add(take));
+                        let selected = &bytes[range_start..range_end];
+                        let delimiter = encoding.encode_str(match line_ending {
+                            crate::source::LineEnding::Cr => "\r",
+                            _ => "\n",
+                        });
+                        let encoded_query = encoding.encode_str(query);
+                        let encoded_marker = encoding.encode_str(&marker.to_string());
+                        scan_encoded_range(
+                            selected.len(),
+                            take,
+                            encoding,
+                            &delimiter,
+                            &encoded_query,
+                            &encoded_marker,
+                            case_sensitive,
+                            limit - hits.len(),
+                            |offset, size| Ok(selected[offset..offset + size].to_vec()),
+                        )
+                        .and_then(|(raw, scanned)| {
+                            let converted = convert_raw_hits(
+                                raw,
+                                encoding,
+                                piece_line + skip,
+                                query_characters,
+                                |offset, size| Ok(selected[offset..offset + size].to_vec()),
+                            )?;
+                            Ok((converted, scanned))
+                        })
+                    }
+                };
+                match result {
+                    Ok((mut piece_hits, scanned)) => {
+                        hits.append(&mut piece_hits);
+                        scanned_to = piece_line + skip + scanned;
+                        hits.len() < limit
+                    }
+                    Err(message) => {
+                        error = Some(message);
+                        false
+                    }
+                }
+            });
+        if let Some(error) = error {
+            Err(error)
+        } else {
+            Ok((hits, scanned_to))
+        }
+    }
 }
 
 fn char_byte_len(c: char, encoding: FileEncoding) -> usize {
@@ -1295,3 +1615,95 @@ fn char_byte_len(c: char, encoding: FileEncoding) -> usize {
         _ => encoding.encode_str(&c.to_string()).len(),
     }
 }
+
+#[cfg(test)]
+impl Document {
+    pub(crate) fn source_content_offset_for_test(&self) -> Option<u64> {
+        self.source.as_ref().map(|s| s.content_offset)
+    }
+
+    pub(crate) fn pieces_line_count_for_test(&self) -> usize {
+        self.pieces.line_count()
+    }
+
+    pub(crate) fn pieces_newline_count_for_test(&self) -> usize {
+        self.pieces.newline_count
+    }
+
+    pub(crate) fn pieces_byte_len_for_test(&self) -> usize {
+        self.pieces.byte_len
+    }
+
+    pub(crate) fn pieces_byte_offset_for_test(&self, line: usize) -> usize {
+        self.pieces.byte_offset(line)
+    }
+
+    pub(crate) fn buffers_len_for_test(&self) -> usize {
+        self.buffers.len()
+    }
+
+    pub(crate) fn log_transactions_len_for_test(&self) -> usize {
+        self.log.transactions.len()
+    }
+
+    pub(crate) fn log_head_for_test(&self) -> usize {
+        self.log.head
+    }
+
+    pub(crate) fn log_validate_base_for_test(&self, base_rev: u64) -> Result<(), String> {
+        self.log.validate_base(base_rev)
+    }
+
+    pub(crate) fn log_first_tx_removed_lines_for_test(&self) -> usize {
+        self.log.transactions[0].edits()[0].removed.lines
+    }
+
+    pub(crate) fn simulate_pending_source_for_test(
+        &mut self,
+        initial_bytes: usize,
+        initial_lines: usize,
+        total_bytes: usize,
+    ) {
+        self.pieces = PieceTree::new(vec![
+            Piece::Source {
+                from: 0,
+                len: initial_bytes,
+                newlines: initial_lines - 1,
+                starts_newline: false,
+                ends_newline: true,
+            },
+            Piece::Source {
+                from: initial_bytes,
+                len: total_bytes - initial_bytes,
+                newlines: 0,
+                starts_newline: true,
+                ends_newline: false,
+            },
+        ]);
+        self.count = initial_lines;
+        self.pending_source = Some(PendingSource {
+            from: initial_bytes,
+            len: total_bytes - initial_bytes,
+            prefix_newlines: initial_lines - 1,
+        });
+    }
+
+    pub(crate) fn source_sparse_mark_for_test(&self, index: usize) -> Option<u64> {
+        self.source
+            .as_ref()
+            .map(|s| s.index.state.lock().unwrap().marks[index])
+    }
+
+    pub(crate) fn source_bytes_for_test(&self) -> Option<u64> {
+        self.source.as_ref().map(|s| s.bytes)
+    }
+
+    pub(crate) fn simulate_scan_done_for_test(&mut self, lines: usize) {
+        if let Some(source) = &self.source {
+            let mut state = source.index.state.lock().unwrap();
+            state.done = true;
+            state.lines = lines;
+        }
+    }
+}
+

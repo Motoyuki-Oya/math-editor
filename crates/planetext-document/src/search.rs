@@ -1,6 +1,4 @@
 use crate::document::Document;
-use crate::edit_buffers::EditRange;
-use crate::piece_tree::Piece;
 use crate::source::{FileEncoding, CHUNK};
 
 /// 通常文字列の一致バイト位置。ASCIIの大小無視は先頭バイト候補だけを調べ、
@@ -58,11 +56,11 @@ pub(crate) fn literal_positions(
 }
 
 #[derive(Clone, Copy)]
-struct RawScanHit {
-    line: usize,
-    notation: bool,
-    line_start: usize,
-    start: usize,
+pub(crate) struct RawScanHit {
+    pub(crate) line: usize,
+    pub(crate) notation: bool,
+    pub(crate) line_start: usize,
+    pub(crate) start: usize,
 }
 
 fn character_columns(
@@ -101,7 +99,7 @@ fn character_columns(
     Ok(columns)
 }
 
-fn convert_raw_hits(
+pub(crate) fn convert_raw_hits(
     raw: Vec<RawScanHit>,
     encoding: FileEncoding,
     line_base: usize,
@@ -162,7 +160,7 @@ fn aligned_positions(
 /// PieceTree のピース境界は行境界なので、検索語は境界を越えない（従来の
 /// 行単位検索と同じ）。同じ行のバイトが複数ピースへ分割される構造は作られない。
 #[allow(clippy::too_many_arguments)]
-fn scan_encoded_range(
+pub(crate) fn scan_encoded_range(
     len: usize,
     lines: usize,
     encoding: FileEncoding,
@@ -422,7 +420,7 @@ impl Document {
         let from = spec.from;
         let end = spec.end;
         let after_col = spec.after_col;
-        let end = end.min(self.count);
+        let end = end.min(self.line_count());
         let mut at = from.min(end);
         while at < end {
             if cancelled() {
@@ -434,8 +432,8 @@ impl Document {
             }
 
             let page_end = (at + page_lines).min(end);
-            let skip_scan = if case_sensitive && self.log.is_clean() {
-                if let (Some(index), Some(query)) = (self.search_index.clone(), literal) {
+            let skip_scan = if case_sensitive && self.is_clean() {
+                if let (Some(index), Some(query)) = (self.search_index().cloned(), literal) {
                     if let (Ok(start_byte), Ok(end_byte)) = (
                         self.byte_offset_of_line(at),
                         self.byte_offset_of_line(page_end),
@@ -491,143 +489,6 @@ impl Document {
         })
     }
 
-    /// 通常の大小区別あり文字列検索。ディスクのピースはバイト範囲をまとめて
-    /// memmem で探し、編集で入った行も同じ結果形式へ合わせる。
-    pub(crate) fn scan_literal(
-        &mut self,
-        query: &str,
-        case_sensitive: bool,
-        marker: char,
-        from: usize,
-        count: usize,
-        limit: usize,
-    ) -> Result<(Vec<ScanHit>, usize), String> {
-        let to = from.saturating_add(count).min(self.count);
-        if from >= to || limit == 0 {
-            return Ok((Vec::new(), from));
-        }
-        let query_characters = query.chars().count();
-        let mut hits = Vec::new();
-        let mut scanned_to = from;
-        let mut error = None;
-        self.pieces
-            .for_each_line_range(from, to, &mut |piece_line, piece, skip, take| {
-                if hits.len() >= limit || error.is_some() {
-                    return false;
-                }
-                let result: Result<(Vec<ScanHit>, usize), String> = match piece {
-                    Piece::Source { from, len, .. } => {
-                        let Some(source) = self.source.as_mut() else {
-                            error = Some(
-                                "文書ストアのディスク参照が失われました。開き直してください"
-                                    .to_string(),
-                            );
-                            return false;
-                        };
-                        (|| {
-                            let (range_from, range_to) =
-                                source.byte_range_for_lines(from, len, skip, take)?;
-                            let encoding = source.encoding;
-                            let delimiter = source.delimiter();
-                            let encoded_query = encoding.encode_str(query);
-                            let encoded_marker = encoding.encode_str(&marker.to_string());
-                            let (raw, scanned) = scan_encoded_range(
-                                range_to - range_from,
-                                take,
-                                encoding,
-                                &delimiter,
-                                &encoded_query,
-                                &encoded_marker,
-                                case_sensitive,
-                                limit - hits.len(),
-                                |offset, size| source.read_byte_range(range_from + offset, size),
-                            )?;
-                            let converted = convert_raw_hits(
-                                raw,
-                                encoding,
-                                piece_line + skip,
-                                query_characters,
-                                |offset, size| source.read_byte_range(range_from + offset, size),
-                            )?;
-                            Ok((converted, scanned))
-                        })()
-                    }
-                    Piece::Edit {
-                        from,
-                        len,
-                        newlines,
-                        starts_newline,
-                        ends_newline,
-                        encoding,
-                        line_ending,
-                    } => {
-                        let leading = usize::from(starts_newline)
-                            * crate::edit_buffers::EditBuffers::line_separator_len(
-                                encoding,
-                                line_ending,
-                            );
-                        let range = EditRange {
-                            from: from + leading,
-                            len: len - leading,
-                            lines: newlines + usize::from(!ends_newline)
-                                - usize::from(starts_newline),
-                            encoding,
-                            line_ending,
-                        };
-                        let bytes = self.buffers.bytes(range);
-                        let range_start = self.buffers.byte_offset_after_lines(range, skip);
-                        let range_end = self
-                            .buffers
-                            .byte_offset_after_lines(range, skip.saturating_add(take));
-                        let selected = &bytes[range_start..range_end];
-                        let delimiter = encoding.encode_str(match line_ending {
-                            crate::source::LineEnding::Cr => "\r",
-                            _ => "\n",
-                        });
-                        let encoded_query = encoding.encode_str(query);
-                        let encoded_marker = encoding.encode_str(&marker.to_string());
-                        scan_encoded_range(
-                            selected.len(),
-                            take,
-                            encoding,
-                            &delimiter,
-                            &encoded_query,
-                            &encoded_marker,
-                            case_sensitive,
-                            limit - hits.len(),
-                            |offset, size| Ok(selected[offset..offset + size].to_vec()),
-                        )
-                        .and_then(|(raw, scanned)| {
-                            let converted = convert_raw_hits(
-                                raw,
-                                encoding,
-                                piece_line + skip,
-                                query_characters,
-                                |offset, size| Ok(selected[offset..offset + size].to_vec()),
-                            )?;
-                            Ok((converted, scanned))
-                        })
-                    }
-                };
-                match result {
-                    Ok((mut piece_hits, scanned)) => {
-                        hits.append(&mut piece_hits);
-                        scanned_to = piece_line + skip + scanned;
-                        hits.len() < limit
-                    }
-                    Err(message) => {
-                        error = Some(message);
-                        false
-                    }
-                }
-            });
-        if let Some(error) = error {
-            Err(error)
-        } else {
-            Ok((hits, scanned_to))
-        }
-    }
-
     /// 検索の走査で見つかったもの: 素の行の一致か、読み替え（記法の解釈）を
     /// 要する行。行の順に並ぶ。
     pub(crate) fn scan(
@@ -639,7 +500,7 @@ impl Document {
         limit: usize,
     ) -> Result<(Vec<ScanHit>, usize), String> {
         let mut hits = Vec::new();
-        let mut scanned_to = from.saturating_add(count).min(self.count);
+        let mut scanned_to = from.saturating_add(count).min(self.line_count());
         self.each_line(from, count, &mut |i, line| {
             if line.contains(needle) {
                 // 記法を含む行の一致はこちらでは判定できない。frontend が
@@ -674,7 +535,7 @@ impl Document {
 
     pub(crate) fn estimate_matches(&mut self, pattern: &regex::Regex) -> Result<usize, String> {
         self.confirm_scan_if_done();
-        if let Some(index) = &self.search_index {
+        if let Some(index) = self.search_index() {
             let query = pattern.as_str();
             let is_literal = !query.contains([
                 '\\', '.', '+', '*', '?', '(', ')', '|', '[', ']', '{', '}', '^', '$',
@@ -686,28 +547,16 @@ impl Document {
             }
         }
 
-        let effective_count =
-            if let (Some(pending), Some(source)) = (self.pending_source, &self.source) {
-                let pending_from = pending.from as u64;
-                if pending_from > source.content_offset && source.bytes > source.content_offset {
-                    let scanned_bytes = (pending_from - source.content_offset) as u128;
-                    let total_bytes = (source.bytes - source.content_offset) as u128;
-                    ((self.count as u128 * total_bytes) / scanned_bytes.max(1)) as usize
-                } else {
-                    self.count
-                }
-            } else {
-                self.count
-            };
+        let effective_count = self.estimated_line_count();
 
         const WINDOWS: usize = 64;
         const LINES_PER_WINDOW: usize = 2_000;
-        let step = self.count.div_ceil(WINDOWS).max(1);
+        let step = self.line_count().div_ceil(WINDOWS).max(1);
         let take = LINES_PER_WINDOW.min(step);
         let mut hits = 0;
         let mut sampled = 0;
-        for from in (0..self.count).step_by(step) {
-            let count = take.min(self.count - from);
+        for from in (0..self.line_count()).step_by(step) {
+            let count = take.min(self.line_count() - from);
             self.each_line(from, count, &mut |_, line| {
                 hits += pattern.find_iter(line).count();
                 sampled += 1;
@@ -731,7 +580,7 @@ impl Document {
         to: usize,
         needle: char,
     ) -> Result<Vec<usize>, String> {
-        let to = to.min(self.count.saturating_sub(1));
+        let to = to.min(self.line_count().saturating_sub(1));
         let mut found = Vec::new();
         self.each_line(from, to.saturating_sub(from) + 1, &mut |i, line| {
             if line.contains(needle) {

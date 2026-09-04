@@ -426,10 +426,10 @@ impl Application {
             // また、万一過去のバグで先頭チャンクの暫定行数（doc.count）がそのまま保存されていた汚染下書きであっても、
             // それを確定値と誤認して背景走査を打ち切らないよう防護する。
             let is_stale_provisional_count =
-                doc.pending_source.is_some() && saved_line_count == doc.count;
+                doc.is_scanning() && saved_line_count == doc.line_count();
             if saved_line_count > 0 && !is_stale_provisional_count {
                 doc.confirm_scan_with_total_lines(saved_line_count);
-            } else if max_needed_line >= doc.count {
+            } else if max_needed_line >= doc.line_count() {
                 doc.confirm_scan_with_total_lines(max_needed_line);
             }
 
@@ -447,7 +447,7 @@ impl Application {
                     redo_diffs.push(diff);
                 }
             }
-            doc.pending_redo_diffs = redo_diffs;
+            doc.set_pending_redo_diffs(redo_diffs);
 
             if let Some(scan) = scan {
                 // 下書き復元は 0 秒即時リターンを保証するため、走査は常にバックグラウンドで回す。
@@ -493,7 +493,7 @@ impl Application {
                 .map(|d| d.from_line + d.removed_lines)
                 .max()
                 .unwrap_or(0);
-            if max_needed_line >= doc.count {
+            if max_needed_line >= doc.line_count() {
                 doc.confirm_scan_with_total_lines(max_needed_line);
             }
 

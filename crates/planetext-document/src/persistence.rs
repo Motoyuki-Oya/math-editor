@@ -4,16 +4,16 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::document::Document;
-use crate::piece_tree::Piece;
 use crate::source::{FileEncoding, ScanIndex, ScanState, Source, CHUNK, STRIDE};
 
 impl Document {
     /// 文書の行を書き手へ流す。全文を 1 つの文字列に集めない。
     pub(crate) fn write_to<W: Write>(&mut self, out: &mut W) -> Result<(), String> {
         let mut broken = None;
-        let encoding = self.encoding;
+        let encoding = self.encoding();
+        let line_ending = self.line_ending();
         let line_ending_bytes = encoding.encode_str(
-            std::str::from_utf8(self.line_ending.as_bytes()).expect("line endings are ASCII"),
+            std::str::from_utf8(line_ending.as_bytes()).expect("line endings are ASCII"),
         );
         let bom: &[u8] = match encoding {
             FileEncoding::Utf8Bom => b"\xEF\xBB\xBF",
@@ -24,7 +24,7 @@ impl Document {
         if let Err(e) = out.write_all(bom) {
             return Err(format!("書き込めませんでした: {e}"));
         }
-        self.each_line(0, self.count, &mut |i, line| {
+        self.each_line(0, self.line_count(), &mut |i, line| {
             let write = |out: &mut W| -> std::io::Result<()> {
                 if i > 0 {
                     out.write_all(&line_ending_bytes)?;
@@ -54,13 +54,15 @@ impl Document {
         // bulk（すべて置換等）は遅延評価のため、保存で書き出す前に等価な splice
         // へ固める。これにより Undo の復元内容（元行）が読み取り時の bulk 再適用に
         // 汚染されず、下書きへも通常の差分として残せる。失敗したら保存自体を中止する。
-        if self.log.has_active_bulk() {
+        if self.has_active_bulk() {
             self.materialize_bulk_transactions()?;
         }
         let tmp = format!("{path}.saving");
         let fail = |e: String| format!("{path} を保存できませんでした: {e}");
+        let encoding = self.encoding();
+        let line_ending = self.line_ending();
         // 書きながら次の索引を作る。保存が終わった姿はこの索引そのもの。
-        let bom: &[u8] = match self.encoding {
+        let bom: &[u8] = match encoding {
             FileEncoding::Utf8Bom => b"\xEF\xBB\xBF",
             FileEncoding::Utf16Le => b"\xFF\xFE",
             FileEncoding::Utf16Be => b"\xFE\xFF",
@@ -75,11 +77,10 @@ impl Document {
             let mut out = BufWriter::with_capacity(CHUNK, file);
             out.write_all(bom).map_err(|e| fail(e.to_string()))?;
             written += initial_offset;
-            let count = self.count;
+            let count = self.line_count();
             let mut broken = None;
-            let encoding = self.encoding;
             let line_ending_bytes = encoding.encode_str(
-                std::str::from_utf8(self.line_ending.as_bytes()).expect("line endings are ASCII"),
+                std::str::from_utf8(line_ending.as_bytes()).expect("line endings are ASCII"),
             );
             self.each_line(0, count, &mut |i, line| {
                 let mut write = |out: &mut BufWriter<File>| -> std::io::Result<()> {
@@ -114,30 +115,28 @@ impl Document {
         // 自分が読んでいる元ファイルへ重ねる場合だけ、rename の直前に手を放す。
         // rename が失敗したら必ず戻す。Disk piece を残したまま Source だけ失うと、
         // その後の読みがパニックし、文書マップの Mutex まで poison される。
-        let replacing_source = self
-            .source
-            .as_ref()
-            .is_some_and(|source| source.path == Path::new(path));
-        let old_source = replacing_source.then(|| self.source.take()).flatten();
+        let replacing_source = self.is_same_source_path(path);
+        let old_source = replacing_source.then(|| self.take_source()).flatten();
         if let Err(error) = std::fs::rename(&tmp, path) {
-            self.source = old_source;
+            self.restore_source(old_source);
             std::fs::remove_file(&tmp).ok();
             return Err(fail(error.to_string()));
         }
         let file = match File::open(path) {
             Ok(file) => file,
             Err(error) => {
-                self.source = old_source;
+                self.restore_source(old_source);
                 return Err(fail(error.to_string()));
             }
         };
         let modified = file.metadata().ok().and_then(|meta| meta.modified().ok());
-        self.source = Some(Source {
+        let count = self.line_count();
+        let new_source = Source {
             path: Path::new(path).to_path_buf(),
             file,
             index: Arc::new(ScanIndex::new(ScanState {
                 marks,
-                lines: self.count,
+                lines: count,
                 done: true,
                 broken: None,
             })),
@@ -146,93 +145,13 @@ impl Document {
             pending_from: None,
             ends_with_newline,
             modified,
-            encoding: self.encoding,
-            line_ending: self.line_ending,
-        });
-        self.pieces = crate::piece_tree::PieceTree::new(vec![Piece::Source {
-            from: initial_offset as usize,
-            len: written as usize - initial_offset as usize,
-            newlines: self.count.saturating_sub(1),
-            starts_newline: false,
-            ends_newline: false,
-        }]);
-        // 小さいファイルは保存後も Undo 履歴を保持し、
-        // 巨大ファイル（10MB超）は新しいベースへ切り替えて操作ログと編集実体を破棄しメモリを解放する。
-        if written > 10 * 1024 * 1024 {
-            self.log.clear();
-            self.buffers = crate::edit_buffers::EditBuffers::default();
-        } else {
+            encoding,
+            line_ending,
+        };
+        let is_small_file = written <= 10 * 1024 * 1024;
+        self.reinitialize_after_save(new_source, is_small_file);
+        if is_small_file {
             self.materialize_bulk_transactions()?;
-            self.log.mark_saved();
-        }
-        // 保存で新しいバイト列へ差し替わったため、旧バイト列の索引は破棄する。
-        // 共有状態を持つバックグラウンド索引は、Arc の所有者がここだけになると自発的に終わる。
-        self.search_index = None;
-        Ok(())
-    }
-
-    /// 保存で bulk の結果が新しい Source へ書き込まれたため、active な bulk
-    /// トランザクションを等価な splice へ変換する。このまま active に残すと、
-    /// 変換後の行へ同じ規則が再適用され（foo→foofoo の二重化）、Undo も
-    /// 効かなくなる。変換後は通常の編集として Undo/Redo・下書き化できる。
-    pub(crate) fn materialize_bulk_transactions(&mut self) -> Result<(), String> {
-        use crate::operation_log::OperationKind;
-        let targets: Vec<usize> = self.log.transactions[..self.log.head]
-            .iter()
-            .enumerate()
-            .filter_map(|(i, tx)| matches!(tx.kind, OperationKind::Bulk(_)).then_some(i))
-            .collect();
-        for &index in targets.iter().rev() {
-            let (base_revision, group, revision, bulk, before_text, after_text) = {
-                let tx = &self.log.transactions[index];
-                match &tx.kind {
-                    OperationKind::Bulk(bulk) => (
-                        tx.base_revision,
-                        tx.group,
-                        tx.revision,
-                        bulk.clone(),
-                        tx.before.clone(),
-                        tx.after.clone(),
-                    ),
-                    OperationKind::Splice(_) => continue,
-                }
-            };
-            let mut edits = Vec::new();
-            match &bulk {
-                crate::operation_log::BulkOperation::AllLines {
-                    from_line, to_line, ..
-                }
-                | crate::operation_log::BulkOperation::ReplaceAll {
-                    from_line, to_line, ..
-                } => {
-                    // 範囲内の各行を 1 編集として記録する。内容の変化有無で絞ると、
-                    // たまたま元と同じ結果になった行が欠けて Undo で復元できない
-                    // ため、位置ベースで全行を固める。後ろの行から置き換え、
-                    // まだ置き換えていない行の座標を変えない。
-                    for line_idx in (*from_line..*to_line).rev() {
-                        if line_idx >= self.count {
-                            break;
-                        }
-                        let original = self.read_raw(line_idx, 1)?;
-                        let current = self.read(line_idx, 1)?;
-                        edits.push(self.splice_with_deleted(
-                            line_idx,
-                            line_idx + 1,
-                            current,
-                            original,
-                        )?);
-                    }
-                }
-            }
-            let tx = crate::operation_log::Transaction {
-                group,
-                base_revision,
-                revision,
-                kind: OperationKind::Splice(edits),
-                before: before_text,
-                after: after_text,
-            };
-            self.log.transactions[index] = tx;
         }
         Ok(())
     }
@@ -244,7 +163,7 @@ impl Document {
         out: &mut W,
         path: Option<&str>,
     ) -> Result<(), String> {
-        if self.log.has_active_bulk() {
+        if self.has_active_bulk() {
             self.materialize_bulk_transactions()?;
         }
         if let Some(p) = path {
@@ -288,57 +207,6 @@ impl Document {
             writeln!(out).map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
             self.write_to(out)
         }
-    }
-
-    /// 未保存のトランザクションから、発生した時系列順に操作ログ（差分）を抽出する。
-    /// Undo された（Redo 可能な）トランザクションも含めて保持し、復元後に Redo できるようにする。
-    pub(crate) fn collect_draft_diffs(&mut self) -> (Vec<DraftDiff>, usize) {
-        let (txs, head_tx_offset) = self.log.all_unsaved_transactions();
-        let mut diffs = Vec::new();
-        let mut active_diffs_count = 0;
-        for (tx_idx, tx) in txs.iter().enumerate() {
-            let group = (tx_idx as u64) + 1;
-            for edit in tx.edits() {
-                let mut lines = Vec::with_capacity(edit.inserted_lines);
-                self.buffers.for_each_line(
-                    edit.inserted,
-                    0,
-                    edit.inserted_lines,
-                    &mut |_, line| {
-                        lines.push(line.to_string());
-                        true
-                    },
-                );
-                let deleted_lines = self.log.read_deleted(edit.removed);
-                let fallback_pos = format!("{}.0-{}.0", edit.from_line, edit.from_line);
-                let before = if tx.before.is_empty() {
-                    fallback_pos.clone()
-                } else {
-                    tx.before.clone()
-                };
-                let after = if tx.after.is_empty() {
-                    fallback_pos
-                } else {
-                    tx.after.clone()
-                };
-                diffs.push(DraftDiff {
-                    group,
-                    from_line: edit.from_line,
-                    removed_lines: edit.removed_lines,
-                    lines,
-                    deleted_lines,
-                    before,
-                    after,
-                });
-                if tx_idx < head_tx_offset {
-                    active_diffs_count += 1;
-                }
-            }
-        }
-        for pending in &self.pending_redo_diffs {
-            diffs.push(pending.clone());
-        }
-        (diffs, active_diffs_count)
     }
 
     /// 元ファイルから開いた文書に対して、未保存の操作ログを時系列順に再生し、

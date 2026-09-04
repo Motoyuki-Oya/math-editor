@@ -96,7 +96,7 @@ mod tests {
                 Document::open_with_encoding(path.to_str().unwrap(), specified).unwrap();
 
             assert!(scan.is_none());
-            assert_eq!(doc.source.as_ref().unwrap().content_offset, offset);
+            assert_eq!(doc.source_content_offset_for_test(), Some(offset));
             assert_eq!(doc.line_count(), 1);
             assert_eq!(doc.read(0, 1).unwrap(), vec![""]);
             assert_eq!(doc.read_tail(1).unwrap(), vec![""]);
@@ -120,7 +120,7 @@ mod tests {
                 Document::open_with_encoding(path.to_str().unwrap(), Some(FileEncoding::Utf8Bom))
                     .unwrap();
 
-            assert_eq!(doc.source.as_ref().unwrap().content_offset, 0);
+            assert_eq!(doc.source_content_offset_for_test(), Some(0));
             assert_eq!(
                 all(&mut doc),
                 String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>()
@@ -229,8 +229,8 @@ mod tests {
         doc.confirm_scan();
 
         assert_eq!(doc.line_count(), source_lines + 2);
-        assert_eq!(doc.pieces.line_count(), source_lines + 2);
-        assert_eq!(doc.pieces.newline_count, source_lines + 1);
+        assert_eq!(doc.pieces_line_count_for_test(), source_lines + 2);
+        assert_eq!(doc.pieces_newline_count_for_test(), source_lines + 1);
         assert_eq!(
             doc.bytes(),
             source_bytes.len() - "0123456789 source line".len() + "edited one\nedited two".len()
@@ -248,7 +248,7 @@ mod tests {
         let undone = doc.undo().unwrap().unwrap();
         assert_eq!(undone.state, "before");
         assert_eq!(doc.line_count(), source_lines + 1);
-        assert_eq!(doc.pieces.newline_count, source_lines);
+        assert_eq!(doc.pieces_newline_count_for_test(), source_lines);
         assert_eq!(doc.bytes(), source_bytes.len());
         assert_eq!(doc.read(0, 3).unwrap(), vec!["0123456789 source line"; 3]);
         std::fs::remove_file(path).ok();
@@ -266,8 +266,7 @@ mod tests {
             Document::open_with_encoding(&path, Some(FileEncoding::Utf8)).unwrap();
 
         assert!(scan.is_none());
-        let source = doc.source.as_ref().unwrap();
-        assert_eq!(source.index.state.lock().unwrap().marks[1], source.bytes);
+        assert_eq!(doc.source_sparse_mark_for_test(1), doc.source_bytes_for_test());
         assert_eq!(doc.line_count(), STRIDE + 1);
         assert_eq!(doc.read(STRIDE, 1).unwrap(), vec![""]);
         std::fs::remove_file(path).ok();
@@ -315,7 +314,7 @@ mod tests {
         let (mut doc, path) = disk_doc("no-op", &["a", "b"]);
         doc.replace(1, 1, Vec::new(), 1, "before", "after").unwrap();
 
-        assert!(doc.log.transactions[0].edits()[0].removed.lines == 0);
+        assert_eq!(doc.log_first_tx_removed_lines_for_test(), 0);
         assert_eq!(all(&mut doc), vec!["a", "b"]);
         let undone = doc.undo().unwrap().unwrap();
         assert_eq!(undone.state, "before");
@@ -503,11 +502,6 @@ mod tests {
     /// また、走査が完了した後は自動的に confirm_scan_if_done が走り、確定件数が返ることを保証する。
     #[test]
     fn estimate_matches_extrapolates_pending_source_and_confirms_when_done() {
-        use crate::document::PendingSource;
-        use crate::edit_buffers::EditBuffers;
-        use crate::operation_log::OperationLog;
-        use crate::piece_tree::{Piece, PieceTree};
-
         let lines: Vec<String> = (0..100_000)
             .map(|i| format!("line {i} with keyword target"))
             .collect();
@@ -516,63 +510,28 @@ mod tests {
         let pattern = regex::Regex::new("target").unwrap();
 
         let initial_lines = 1_000;
-        let initial_bytes = doc.pieces.byte_offset(initial_lines);
-        let total_bytes = doc.pieces.byte_offset(100_000);
+        let initial_bytes = doc.pieces_byte_offset_for_test(initial_lines);
+        let total_bytes = doc.pieces_byte_offset_for_test(100_000);
 
-        let mut simulated_doc = Document {
-            pieces: PieceTree::new(vec![
-                Piece::Source {
-                    from: 0,
-                    len: initial_bytes,
-                    newlines: initial_lines - 1,
-                    starts_newline: false,
-                    ends_newline: true,
-                },
-                Piece::Source {
-                    from: initial_bytes,
-                    len: total_bytes - initial_bytes,
-                    newlines: 0,
-                    starts_newline: true,
-                    ends_newline: false,
-                },
-            ]),
-            buffers: EditBuffers::default(),
-            count: initial_lines,
-            encoding: doc.encoding,
-            line_ending: doc.line_ending,
-            source: doc.source.take(),
-            log: OperationLog::default(),
-            pending_source: Some(PendingSource {
-                from: initial_bytes,
-                len: total_bytes - initial_bytes,
-                prefix_newlines: initial_lines - 1,
-            }),
-            search_index: None,
-            background_index: None,
-            pending_redo_diffs: Vec::new(),
-        };
+        doc.simulate_pending_source_for_test(initial_bytes, initial_lines, total_bytes);
 
         // 未確定状態（count = 1,000）でも、ファイル全体規模（約100,000件）に外挿されること
-        let estimated = simulated_doc.estimate_matches(&pattern).unwrap();
+        let estimated = doc.estimate_matches(&pattern).unwrap();
         assert!(
             (90_000..=110_000).contains(&estimated),
             "未確定走査中でもファイル全体規模に外挿されること: expected ~100000, got {estimated}"
         );
 
         // 走査完了をシミュレート
-        if let Some(source) = &simulated_doc.source {
-            let mut state = source.index.state.lock().unwrap();
-            state.done = true;
-            state.lines = 100_000;
-        }
+        doc.simulate_scan_done_for_test(100_000);
 
         // 走査完了後は confirm_scan_if_done が自動で走り、count が 100,000 に確定すること
-        let final_estimated = simulated_doc.estimate_matches(&pattern).unwrap();
+        let final_estimated = doc.estimate_matches(&pattern).unwrap();
         assert!(
             (final_estimated as isize - 100_000).abs() <= 10,
             "走査完了後の推定件数は約100,000件であること: got {final_estimated}"
         );
-        assert_eq!(simulated_doc.count, 100_000);
+        assert_eq!(doc.line_count(), 100_000);
 
         std::fs::remove_file(path).ok();
     }
@@ -913,7 +872,7 @@ mod tests {
         doc.save(&path).unwrap();
         assert!(doc.is_clean(), "保存後は clean になること");
         assert!(
-            !doc.log.transactions.is_empty(),
+            doc.log_transactions_len_for_test() > 0,
             "小さいファイルは保存後も Undo 履歴が保持されること"
         );
         std::fs::remove_file(path).ok();
@@ -931,29 +890,30 @@ mod tests {
 
         doc.replace(1, 2, vec!["edited large line".into()], 1, "", "")
             .unwrap();
-        assert!(!doc.log.transactions.is_empty());
+        assert!(doc.log_transactions_len_for_test() > 0);
 
         doc.save(&path).unwrap();
         assert!(doc.is_clean(), "保存後は clean になること");
-        assert!(
-            doc.log.transactions.is_empty(),
+        assert_eq!(
+            doc.log_transactions_len_for_test(),
+            0,
             "巨大ファイルは保存後に操作ログが破棄されてメモリが解放されること"
         );
-        assert_eq!(doc.buffers.len(), 0, "編集バッファも解放されること");
+        assert_eq!(doc.buffers_len_for_test(), 0, "編集バッファも解放されること");
         std::fs::remove_file(path).ok();
     }
 
     fn assert_document_state(doc: &mut Document, expected: &[String]) {
         assert_eq!(all(doc), expected);
         assert_eq!(doc.line_count(), expected.len());
-        assert_eq!(doc.pieces.line_count(), expected.len());
-        assert_eq!(doc.pieces.newline_count, expected.len().saturating_sub(1));
+        assert_eq!(doc.pieces_line_count_for_test(), expected.len());
+        assert_eq!(doc.pieces_newline_count_for_test(), expected.len().saturating_sub(1));
         let separator = std::str::from_utf8(doc.line_ending().as_bytes()).unwrap();
         assert_eq!(
             doc.bytes(),
             encoded_text(&expected.join(separator), doc.encoding()).len()
         );
-        assert_eq!(doc.pieces.byte_len, doc.bytes());
+        assert_eq!(doc.pieces_byte_len_for_test(), doc.bytes());
     }
 
     fn assert_encoded_document_state(doc: &mut Document, expected: &[&str]) {
@@ -962,10 +922,10 @@ mod tests {
         let text = expected.join(separator);
         assert_eq!(all(doc), expected_lines);
         assert_eq!(doc.line_count(), expected.len());
-        assert_eq!(doc.pieces.line_count(), expected.len());
-        assert_eq!(doc.pieces.newline_count, expected.len().saturating_sub(1));
+        assert_eq!(doc.pieces_line_count_for_test(), expected.len());
+        assert_eq!(doc.pieces_newline_count_for_test(), expected.len().saturating_sub(1));
         assert_eq!(doc.bytes(), encoded_text(&text, doc.encoding()).len());
-        assert_eq!(doc.pieces.byte_len, doc.bytes());
+        assert_eq!(doc.pieces_byte_len_for_test(), doc.bytes());
     }
 
     #[test]
@@ -1291,14 +1251,14 @@ mod tests {
             "after",
         )
         .unwrap();
-        let undo_len = doc.log.head;
+        let undo_len = doc.log_head_for_test();
 
         assert!(doc
             .replace(0, 5, Vec::new(), 2, "before delete", "after delete")
             .is_err());
         assert_eq!(doc.line_count(), 5);
         assert_eq!(doc.read(4, 1).unwrap().len(), 1);
-        assert_eq!(doc.log.head, undo_len);
+        assert_eq!(doc.log_head_for_test(), undo_len);
     }
 
     /// 巨大な行を含むファイルで MAX_READ_BYTES ガードが正しく働き、
@@ -1397,7 +1357,7 @@ mod tests {
             }
 
             assert_eq!(doc.encoding(), encoding);
-            assert_eq!(doc.source.as_ref().unwrap().content_offset, 2);
+            assert_eq!(doc.source_content_offset_for_test(), Some(2));
             assert_eq!(all(&mut doc), vec![first, "中央", "last"]);
             doc.replace(
                 1,
@@ -1832,11 +1792,11 @@ mod tests {
         // 書き換えない（保存済み checkpoint が破壊されない）。
         assert_eq!(rev1, rev2, "マージで公開 revision を上書きしない");
         assert!(
-            doc.log.validate_base(rev1).is_ok(),
+            doc.log_validate_base_for_test(rev1).is_ok(),
             "公開済み revision は残る"
         );
         assert!(
-            doc.log.validate_base(saved_rev).is_ok(),
+            doc.log_validate_base_for_test(saved_rev).is_ok(),
             "saved checkpoint は残る"
         );
         assert!(!doc.is_clean(), "内容が変わっているので dirty のまま");
