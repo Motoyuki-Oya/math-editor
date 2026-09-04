@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use planetext_document::Application;
 
 #[test]
+#[ignore] // 800MB（約6分のインデックス構築）の大規模検証のため任意実行（cargo test --test bench_800mb_search -- --ignored --nocapture）
 fn bench_search_800mb() {
     let path = "C:\\workspace\\test-800mb.txt";
     if !Path::new(path).exists() {
@@ -29,6 +30,22 @@ fn bench_search_800mb() {
     };
     let scan_duration = t_scan_start.elapsed();
     println!("Scan completed in {:?}, total lines: {total_lines}", scan_duration);
+
+    // インデックス構築完了を待機して時間を計測
+    println!("Waiting for background Bigram index to finish...");
+    let t_index_start = Instant::now();
+    let (indexed, total_b) = loop {
+        if let Ok(Some((indexed, total_b))) = app.search_index_progress(handle) {
+            if indexed >= total_b && total_b > 0 {
+                break (indexed, total_b);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let index_duration = t_index_start.elapsed();
+    let total_index_time = t_open_start.elapsed();
+    println!("Bigram Index completed in {:?} (from open: {:?}), blocks: {indexed}/{total_b}",
+        index_duration, total_index_time);
 
     // 1. case_sensitive = true で 15,999,998 行目のヒットに到達するまでの検索計測
     println!("\n--- Case Sensitive Search: loop until line 15,999,998 ---");

@@ -8,8 +8,11 @@ mod piece_tree;
 mod search;
 mod search_index;
 mod source;
+mod transaction;
 #[cfg(test)]
 mod test_utils;
+
+pub use transaction::FileTransaction;
 
 use document::Document;
 pub use search::{CompiledQuery, ScanHit};
@@ -225,8 +228,13 @@ impl SettingsWrite {
     }
 
     pub fn write(self) -> Result<(), String> {
-        std::fs::write(&self.path, self.contents)
-            .map_err(|e| format!("設定を保存できませんでした: {e}"))
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| "親ディレクトリがありません".to_string())?;
+        let mut tx = FileTransaction::begin(parent)?;
+        tx.add_file_bytes(&self.path, self.contents.as_bytes())?;
+        tx.commit()
     }
 }
 
@@ -674,6 +682,10 @@ impl Application {
         self.with_doc(handle, |doc| doc.estimate_matches(&query.pattern))
     }
 
+    pub fn search_index_progress(&self, handle: u64) -> Result<Option<(usize, usize)>, String> {
+        self.with_doc(handle, |doc| Ok(doc.search_index_progress()))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn replace_all(
         &self,
@@ -746,6 +758,9 @@ impl Application {
     }
 
     pub fn read_settings(&self, config_dir: Option<PathBuf>) -> String {
+        if let Some(ref dir) = config_dir {
+            let _ = FileTransaction::recover(dir);
+        }
         settings_path(config_dir)
             .and_then(|path| std::fs::read_to_string(path).ok())
             .unwrap_or_default()
@@ -763,6 +778,7 @@ impl Application {
     }
 
     /// 文書の本体から下書きを書きます。最初の行はドキュメントのパス、続きが本文。
+    /// 一時ファイル＋ジャーナル＋原子的置換によりクラッシュ時にも安全性を保証する。
     pub fn save_draft(
         &self,
         config_dir: Option<PathBuf>,
@@ -774,10 +790,12 @@ impl Application {
             return Err("下書きの保存先がありません".to_string());
         };
         self.with_doc(handle, |doc| {
-            let file = std::fs::File::create(dir.join(draft_name(&id)))
-                .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
-            let mut out = std::io::BufWriter::new(file);
-            doc.write_draft(&mut out, path.as_deref())
+            let target = dir.join(draft_name(&id));
+            let mut tx = FileTransaction::begin(&dir)?;
+            tx.add_file(&target, |out| {
+                doc.write_draft(out, path.as_deref())
+            })?;
+            tx.commit()
         })
     }
 
@@ -806,6 +824,7 @@ impl Application {
         let Some(dir) = drafts_dir(config_dir) else {
             return Vec::new();
         };
+        let _ = FileTransaction::recover(&dir);
         let Ok(entries) = std::fs::read_dir(dir) else {
             return Vec::new();
         };

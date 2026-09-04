@@ -8,8 +8,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use planetext_document::{
-    global_shortcut_settings, Application, Draft, GlobalShortcutSettings, GuiAction, GuiEvent,
-    OpenedDocument, ReopenedDocument, RestoredLines, SearchPage, TrayAction,
+    global_shortcut_settings, Application, Draft, FileTransaction, GlobalShortcutSettings,
+    GuiAction, GuiEvent, OpenedDocument, ReopenedDocument, RestoredLines, SearchPage, TrayAction,
 };
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -97,10 +97,9 @@ fn save_session_state(app: tauri::AppHandle, state_json: String) -> Result<(), S
     let dir = app_config_dir(&app).ok_or_else(|| "設定ディレクトリがありません".to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let target = dir.join("session.json");
-    let tmp = dir.join("session.json.tmp");
-    std::fs::write(&tmp, state_json).map_err(|e| e.to_string())?;
-    let _ = std::fs::remove_file(&target);
-    std::fs::rename(tmp, target).map_err(|e| e.to_string())
+    let mut tx = FileTransaction::begin(&dir)?;
+    tx.add_file_bytes(&target, state_json.as_bytes())?;
+    tx.commit()
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -555,10 +554,17 @@ fn save_window_size(window: &tauri::Window) {
     let Some(path) = window_size_path(window.app_handle()) else {
         return;
     };
+    let Some(dir) = path.parent() else {
+        return;
+    };
     if let Ok(size) = window.inner_size() {
         if size.width > 0 && size.height > 0 {
             let contents = format!("width = {}\nheight = {}\n", size.width, size.height);
-            std::fs::write(path, contents).ok();
+            if let Ok(mut tx) = FileTransaction::begin(dir) {
+                if tx.add_file_bytes(&path, contents.as_bytes()).is_ok() {
+                    let _ = tx.commit();
+                }
+            }
         }
     }
 }
@@ -700,6 +706,13 @@ pub fn run() {
         })
         .setup(|app| {
             debug_log("[SETUP] Starting setup hook...");
+            if let Some(dir) = app_config_dir(app.handle()) {
+                let _ = FileTransaction::recover(&dir);
+                let drafts = dir.join("drafts");
+                if drafts.exists() {
+                    let _ = FileTransaction::recover(&drafts);
+                }
+            }
             restore_window_size(app.handle());
             if let Err(e) = menu::install(app.handle()) {
                 debug_log(&format!("[SETUP ERROR] menu::install failed: {e}"));

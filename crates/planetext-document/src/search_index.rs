@@ -170,6 +170,11 @@ impl SearchIndex {
         }
     }
 
+    pub(crate) fn progress(&self) -> (usize, usize) {
+        let state = self.state.read().unwrap();
+        (state.block_indices.len(), state.total_blocks)
+    }
+
     pub(crate) fn extract_block_bigrams(
         bytes: &[u8],
         read_start: usize,

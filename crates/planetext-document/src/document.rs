@@ -105,6 +105,10 @@ impl Document {
         self.search_index.as_ref()
     }
 
+    pub(crate) fn search_index_progress(&self) -> Option<(usize, usize)> {
+        self.search_index.as_ref().map(|idx| idx.progress())
+    }
+
     pub(crate) fn estimated_line_count(&self) -> usize {
         if let (Some(pending), Some(source)) = (self.pending_source, &self.source) {
             let pending_from = pending.from as u64;
