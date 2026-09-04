@@ -14,9 +14,6 @@ use crate::settings::Settings;
 
 thread_local! {
     static SHELL: std::cell::Cell<Option<Shell>> = const { std::cell::Cell::new(None) };
-    /// 最後に実行された項目: いつ、どのロードで、どのロードによって実行されたか。
-    static LAST: std::cell::RefCell<(f64, String, bool)> =
-        const { std::cell::RefCell::new((f64::MIN, String::new(), false)) };
 }
 
 /// メニュー バーから選択された内容のリッスンを開始し、現在何がオンであるかをメニューに伝えます。
@@ -31,17 +28,14 @@ pub(super) fn install(shell: Shell) {
 /// 項目がどの道路から到着したか。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum From {
-    /// メニュー バーまたはそのアクセラレータから選択されます。
+    /// メニュー バーから選択されます（マウスクリック等）。
     Menu,
     /// ウィンドウ内で押されたキー。
     Key,
 }
 
 /// 項目の 1 つを実行します。
-pub(super) fn choose(shell: Shell, name: &str, from: From) {
-    if echo(name, from) {
-        return;
-    }
+pub(super) fn choose(shell: Shell, name: &str, _from: From) {
     let current = settings::current();
     match name {
         "new" => shell.new_document(),
@@ -115,23 +109,4 @@ pub(super) fn update_menu_state() {
             })
             .await;
     });
-}
-
-/// 1 つのキーストロークの他のロードのコピーが到着するまでにかかる時間。
-const SAME_KEYSTROKE_MS: f64 = 150.0;
-
-/// これが実行されたばかりの項目の他のロードのコピーであるかどうか。
-///
-/// ショートカットは、メニューのアクセラレータとウィンドウ内のキー自体の 2 つのロードによってアプリケーションに到達できます。 2 つのどちらが到着するかは、プラットフォームと何にフォーカスがあるかによって異なります。そのため、両方が受け入れられ、キーストローク時間内に *他の* ルートによって到着したコピーは削除されます。同じ道を再び進むには、キーを押し続けるか、もう一度押す必要があります。これを通過する必要があります。Ctrl+Z を押したままにすると、元に戻し続ける必要があります。
-fn echo(name: &str, from: From) -> bool {
-    let now = js_sys::Date::now();
-    let menu = from == From::Menu;
-    LAST.with(|last| {
-        let mut last = last.borrow_mut();
-        if last.1 == name && last.2 != menu && now - last.0 < SAME_KEYSTROKE_MS {
-            return true;
-        }
-        *last = (now, name.to_string(), menu);
-        false
-    })
 }
