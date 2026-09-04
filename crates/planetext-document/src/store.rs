@@ -2027,4 +2027,43 @@ mod tests {
         );
         std::fs::remove_file(path).ok();
     }
+
+    /// 回帰: 未走査の巨大ファイルで、末尾付近の行を編集して Undo/Redo しても、
+    /// ピース分割（split）が EOF seek により即座に行われ、タイムラグなしで復元できることを検証する。
+    #[test]
+    fn undo_redo_near_tail_before_scan_completion_is_instant() {
+        let total = STRIDE * 5;
+        let lines: Vec<String> = (0..total).map(|i| format!("line {i}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (mut doc, path) = disk_doc("instant-undo-tail", &refs);
+
+        // 走査完了前（pending_source が残る状態）で末尾直前の行（total - 2）を置換
+        let target_line = total - 2;
+        doc.replace(
+            target_line,
+            target_line + 1,
+            vec!["modified tail".into()],
+            1,
+            &format!("line {target_line}"),
+            "modified tail",
+        )
+        .unwrap();
+
+        assert_eq!(doc.read(target_line, 1).unwrap(), vec!["modified tail"]);
+
+        // Undo 実行（split が走るが、EOF seek により即座に元行へ戻る）
+        let undone = doc.undo().unwrap().unwrap();
+        assert_eq!(undone.state, format!("line {target_line}"));
+        assert_eq!(
+            doc.read(target_line, 1).unwrap(),
+            vec![format!("line {target_line}")]
+        );
+
+        // Redo 実行（即座に再適用される）
+        let redone = doc.redo().unwrap().unwrap();
+        assert_eq!(redone.state, "modified tail");
+        assert_eq!(doc.read(target_line, 1).unwrap(), vec!["modified tail"]);
+
+        std::fs::remove_file(path).ok();
+    }
 }

@@ -624,6 +624,62 @@ impl Source {
             .collect())
     }
 
+    /// ファイル末尾（EOF）から指定行数だけ逆方向にさかのぼった絶対バイト位置を求める。
+    /// 走査完了前であっても、末尾付近の行へのアクセスや分割を EOF seek により 0 秒で完了させる。
+    pub(crate) fn byte_offset_from_end(&mut self, lines_from_end: usize) -> Result<usize, String> {
+        if lines_from_end == 0 {
+            return Ok(self.bytes as usize);
+        }
+        self.check()?;
+        const TAIL_CHUNK: u64 = 64 << 10;
+        let delimiter = self.delimiter();
+        let unit_bytes = self.encoding.unit_bytes();
+        let mut at = self.bytes;
+        let mut counted = 0;
+        let mut read_bytes = 0;
+        const MAX_SEARCH_BYTES: u64 = 32 << 20; // 32MB
+
+        while at > self.content_offset && counted < lines_from_end && read_bytes < MAX_SEARCH_BYTES
+        {
+            let from = at.saturating_sub(TAIL_CHUNK).max(self.content_offset);
+            let chunk_len = (at - from) as usize;
+            let mut chunk = vec![0; chunk_len];
+            self.file
+                .seek(SeekFrom::Start(from))
+                .map_err(|e| e.to_string())?;
+            self.file
+                .read_exact(&mut chunk)
+                .map_err(|e| e.to_string())?;
+
+            if unit_bytes == 1 {
+                let delim_byte = delimiter[0];
+                for pos in memchr::memchr_iter(delim_byte, &chunk).rev() {
+                    counted += 1;
+                    if counted == lines_from_end {
+                        return Ok((from as usize) + pos + 1);
+                    }
+                }
+            } else {
+                let delim_slice = delimiter.as_slice();
+                let chunk_units = (chunk.len() / 2) * 2;
+                for i in (0..chunk_units).step_by(2).rev() {
+                    if &chunk[i..i + 2] == delim_slice {
+                        counted += 1;
+                        if counted == lines_from_end {
+                            return Ok((from as usize) + i + 2);
+                        }
+                    }
+                }
+            }
+            read_bytes += chunk_len as u64;
+            at = from;
+        }
+        if at == self.content_offset && counted + 1 == lines_from_end {
+            return Ok(self.content_offset as usize);
+        }
+        Err("末尾からの探索範囲を超えました".to_string())
+    }
+
     fn indexed_start(
         &mut self,
         from: usize,

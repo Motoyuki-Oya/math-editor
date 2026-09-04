@@ -1003,14 +1003,51 @@ impl Document {
                         skip,
                     )
             }
-            Piece::Source { from, len, .. } => {
+            Piece::Source {
+                from,
+                len,
+                newlines,
+                ends_newline,
+                ..
+            } => {
                 let source = self.source.as_mut().ok_or_else(|| {
                     "文書ストアのディスク参照が失われました。開き直してください".to_string()
                 })?;
-                source.byte_offset_after_lines(*from, *len, skip)?
+                Self::source_byte_offset_in_piece(
+                    source,
+                    *from,
+                    *len,
+                    *newlines,
+                    *ends_newline,
+                    skip,
+                )?
             }
         };
         Ok(piece_start_byte + intra_byte)
+    }
+
+    /// ピース内の指定行数後のバイト位置を求める。末尾ピースかつ末尾付近なら EOF seek で即座に解決する。
+    fn source_byte_offset_in_piece(
+        source: &mut Source,
+        from: usize,
+        len: usize,
+        newlines: usize,
+        ends_newline: bool,
+        skip: usize,
+    ) -> Result<usize, String> {
+        let piece_lines = newlines + usize::from(!ends_newline);
+        let is_at_eof = from + len == source.bytes as usize;
+        if is_at_eof && piece_lines >= skip {
+            let from_end = piece_lines - skip;
+            if from_end < crate::source::STRIDE * 2 {
+                if let Ok(abs_pos) = source.byte_offset_from_end(from_end) {
+                    if abs_pos >= from {
+                        return Ok(abs_pos - from);
+                    }
+                }
+            }
+        }
+        source.byte_offset_after_lines(from, len, skip)
     }
 
     /// ピース列を行 `line` の前で切り、その位置のピース番号を返す。
@@ -1056,11 +1093,24 @@ impl Document {
                             skip,
                         )
                 }
-                Piece::Source { from, len, .. } => {
+                Piece::Source {
+                    from,
+                    len,
+                    newlines,
+                    ends_newline,
+                    ..
+                } => {
                     let source = self.source.as_mut().ok_or_else(|| {
                         "文書ストアのディスク参照が失われました。開き直してください".to_string()
                     })?;
-                    source.byte_offset_after_lines(*from, *len, skip)?
+                    Self::source_byte_offset_in_piece(
+                        source,
+                        *from,
+                        *len,
+                        *newlines,
+                        *ends_newline,
+                        skip,
+                    )?
                 }
             };
             let newlines = skip + leading;
