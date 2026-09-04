@@ -148,7 +148,7 @@ impl Document {
             encoding,
             line_ending,
         };
-        let is_small_file = written <= 10 * 1024 * 1024;
+        let is_small_file = written <= crate::search_index::BIGRAM_INDEX_THRESHOLD as u64;
         self.reinitialize_after_save(new_source, is_small_file);
         if is_small_file {
             self.materialize_bulk_transactions()?;
@@ -493,12 +493,12 @@ mod tests {
 
 
     /// 【回帰防止テスト】
-    /// 巨大ファイル（10MB超）の保存後、新しいベースへ切り替わり、メモリを圧迫しないよう
+    /// 巨大ファイル（30MB超）の保存後、新しいベースへ切り替わり、メモリを圧迫しないよう
     /// 操作ログと編集バッファが解放されることを検証する。
     #[test]
     fn large_file_save_clears_log_and_switches_base() {
         let large_chunk = "B".repeat(1024 * 1024); // 1MB の行
-        let lines: Vec<String> = vec![large_chunk.clone(); 11]; // 11MB 分
+        let lines: Vec<String> = vec![large_chunk.clone(); 31]; // 31MB 分
         let lines_ref: Vec<&str> = lines.iter().map(String::as_str).collect();
         let (mut doc, path) = disk_doc("large-save-clear", &lines_ref);
 

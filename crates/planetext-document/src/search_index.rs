@@ -7,7 +7,7 @@ use std::sync::{Arc, RwLock};
 use crate::source::{FileEncoding, Source};
 
 pub(crate) const INDEX_BLOCK_BYTES: usize = 512 * 1024;
-pub(crate) const BIGRAM_INDEX_THRESHOLD: usize = 10_000_000;
+pub(crate) const BIGRAM_INDEX_THRESHOLD: usize = 30 * 1024 * 1024;
 pub(crate) type BlockId = usize;
 
 /// エンコーディングに依存したバイト列による bi-gram。
@@ -17,9 +17,46 @@ pub(crate) struct Bigram(pub(crate) Vec<u8>);
 
 impl Bigram {
     pub(crate) fn new(first: char, second: char, encoding: FileEncoding) -> Option<Self> {
-        let mut bytes = encoding.encode_str(&first.to_string());
-        bytes.extend_from_slice(&encoding.encode_str(&second.to_string()));
-        (!bytes.is_empty()).then_some(Self(bytes))
+        match encoding {
+            FileEncoding::Utf8 | FileEncoding::Utf8Bom => {
+                let mut bytes = Vec::with_capacity(first.len_utf8() + second.len_utf8());
+                let mut buf = [0u8; 4];
+                bytes.extend_from_slice(first.encode_utf8(&mut buf).as_bytes());
+                bytes.extend_from_slice(second.encode_utf8(&mut buf).as_bytes());
+                Some(Self(bytes))
+            }
+            FileEncoding::Utf16Le => {
+                let mut bytes = Vec::with_capacity(8);
+                let mut buf = [0u16; 2];
+                for u in first.encode_utf16(&mut buf) {
+                    bytes.extend_from_slice(&u.to_le_bytes());
+                }
+                for u in second.encode_utf16(&mut buf) {
+                    bytes.extend_from_slice(&u.to_le_bytes());
+                }
+                Some(Self(bytes))
+            }
+            FileEncoding::Utf16Be => {
+                let mut bytes = Vec::with_capacity(8);
+                let mut buf = [0u16; 2];
+                for u in first.encode_utf16(&mut buf) {
+                    bytes.extend_from_slice(&u.to_be_bytes());
+                }
+                for u in second.encode_utf16(&mut buf) {
+                    bytes.extend_from_slice(&u.to_be_bytes());
+                }
+                Some(Self(bytes))
+            }
+            _ => {
+                let mut buf1 = [0u8; 4];
+                let mut buf2 = [0u8; 4];
+                let s1 = first.encode_utf8(&mut buf1);
+                let s2 = second.encode_utf8(&mut buf2);
+                let mut bytes = encoding.encode_str(s1);
+                bytes.extend_from_slice(&encoding.encode_str(s2));
+                (!bytes.is_empty()).then_some(Self(bytes))
+            }
+        }
     }
 
     pub(crate) fn from_query(query: &str, encoding: FileEncoding) -> Vec<Self> {
@@ -188,7 +225,15 @@ impl SearchIndex {
         let mut current_offset = read_start;
 
         for ch in text.chars() {
-            let ch_len = encoding.encode_str(&ch.to_string()).len();
+            let ch_len = match encoding {
+                FileEncoding::Utf8 | FileEncoding::Utf8Bom => ch.len_utf8(),
+                FileEncoding::Utf16Le | FileEncoding::Utf16Be => ch.len_utf16() * 2,
+                _ => {
+                    let mut buf = [0u8; 4];
+                    let s = ch.encode_utf8(&mut buf);
+                    encoding.encode_str(s).len()
+                }
+            };
             if let Some(prev) = previous {
                 // 境界またぎ bi-gram は終了側ブロックに所属
                 if current_offset >= start_byte && current_offset < end_byte {
