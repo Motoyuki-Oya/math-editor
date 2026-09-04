@@ -1492,13 +1492,29 @@ pub fn load_doc_contents(doc_id: usize, text: &str) {
 /// テキストを合わせ、カーソルを復元する。
 pub fn apply_restored(doc_id: usize, state: &str, touched_from: usize, line_count: usize) {
     let sessions = PANES.with(|panes| panes.borrow().clone());
+    let mut text_restored = false;
 
     for s in &sessions {
         if s.borrow().doc_id == doc_id {
             s.borrow_mut().edit(|editor| {
-                editor.apply_restored(state, touched_from, line_count);
+                if !text_restored {
+                    editor.apply_restored(state, touched_from, line_count);
+                    text_restored = true;
+                } else {
+                    editor.restore_state(state);
+                }
             });
         }
+    }
+
+    if !text_restored {
+        let doc = get_or_create_doc(doc_id);
+        let mut editor = Editor {
+            document: std::mem::take(&mut *doc.borrow_mut()),
+            cursors: vec![],
+        };
+        editor.apply_restored(state, touched_from, line_count);
+        *doc.borrow_mut() = editor.document;
     }
 
     redraw_doc(doc_id, Some(FOCUSED.get()));
@@ -1712,5 +1728,49 @@ mod tests {
         assert_eq!(borrowed.text().line_count(), 5);
         assert_eq!(borrowed.text().raw_line(0), Some("line 1"));
         assert_eq!(borrowed.text().raw_line(4), Some("line 5"));
+    }
+
+    /// 【Undo後の白飛び防止テスト】
+    /// Undo 時に touched_from 以降が一旦 Absent にリセットされた後、
+    /// 更新された known_revision に基づいて再フェッチされた行が正常にフィードされ、
+    /// 画面が白飛びせず元通り復元されることを検証する。
+    #[test]
+    fn undo_apply_restored_resets_lines_and_allows_refeed() {
+        let doc_id = 888;
+        let doc = get_or_create_doc(doc_id);
+        doc.borrow_mut().load_sparse(Some(20));
+
+        let initial_lines: Vec<_> = (0..20)
+            .map(|i| document::read_line(&format!("initial line {i}")))
+            .collect();
+        doc.borrow_mut().feed(0, initial_lines);
+
+        // 編集後の状態: revision = 2
+        doc.borrow_mut().known_revision = 2;
+        assert_eq!(doc.borrow().text().line_count(), 20);
+        assert_eq!(doc.borrow().text().raw_line(10), Some("initial line 10"));
+
+        // Undo 実行: revision は 1 に戻り、行 10 以降が巻き戻し対象
+        let restored_revision = 1;
+        doc.borrow_mut().known_revision = restored_revision;
+
+        apply_restored(doc_id, "0.0-0.0", 10, 20);
+
+        // 行 0..10 はそのまま保持され、行 10..20 は Absent になっている
+        assert_eq!(doc.borrow().text().raw_line(0), Some("initial line 0"));
+        assert_eq!(doc.borrow().text().raw_line(9), Some("initial line 9"));
+        assert!(doc.borrow().text().is_absent(10));
+        assert!(doc.borrow().text().is_absent(19));
+
+        // バックエンドから revision 1 の巻き戻し後行データが再フェッチされて feed される
+        let restored_lines: Vec<_> = (10..20)
+            .map(|i| document::read_line(&format!("restored line {i}")))
+            .collect();
+        doc.borrow_mut().feed(10, restored_lines);
+
+        // 全行が正常に復元されていること
+        assert_eq!(doc.borrow().text().raw_line(10), Some("restored line 10"));
+        assert_eq!(doc.borrow().text().raw_line(19), Some("restored line 19"));
+        assert!(!doc.borrow().text().is_absent(10));
     }
 }

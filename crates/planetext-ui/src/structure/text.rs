@@ -785,6 +785,7 @@ impl Text {
 
     /// 外部（他スライスの編集や文書エンジンからの通知）での行範囲置換を適用する。
     /// 自身での編集ではないため、`self.changes`（送信控え）には記録しない。
+    #[allow(dead_code)]
     pub fn replace_external(&mut self, from: usize, to: usize, lines: Vec<SourceLine>) {
         let from = from.min(self.line_count);
         let to = to.min(self.line_count);

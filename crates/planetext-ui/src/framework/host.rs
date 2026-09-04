@@ -362,6 +362,8 @@ pub struct RestoredLines {
     pub touched_from: usize,
     pub line_count: usize,
     #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
     pub clean: bool,
     #[serde(default)]
     pub modified_lines: Vec<usize>,

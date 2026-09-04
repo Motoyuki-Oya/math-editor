@@ -333,13 +333,16 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
         }
         Task::Undo { redo } => {
             if let Some(restored) = framework::undo_lines(handle, redo).await {
+                let doc_id = tab.id.get_untracked();
+                let doc_model = editor::get_or_create_doc_model(doc_id);
+                doc_model.borrow_mut().known_revision = restored.revision;
+
                 shell.apply_restored(
                     tab,
                     &restored.state,
                     restored.touched_from,
                     restored.line_count,
                 );
-                let doc_id = tab.id.get_untracked();
                 editor::set_doc_modified_lines(doc_id, restored.modified_lines);
                 if restored.clean {
                     shell.mark_clean_tab(tab);
