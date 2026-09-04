@@ -17,8 +17,6 @@ use super::shell::{Shell, Tab};
 use crate::editor;
 use crate::framework;
 
-/// 一度に取り寄せる行数。見えている窓と少しの余白が 1 回で届く程度。
-const CHUNK_LINES: usize = 20_000;
 const TAIL_LINES: usize = 200;
 
 enum Task {
@@ -49,9 +47,9 @@ thread_local! {
     static QUEUES: RefCell<HashMap<usize, VecDeque<(Tab, Task)>>> = RefCell::new(HashMap::new());
     /// 列が走っているタブ。二重に走らせない。
     static BUSY: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
-    /// 取り寄せ中（行描画）の範囲。重い検索タスクに巻き込まれず最優先で描画する。
+    /// ペインごとの取り寄せ中範囲（スライス単位）。
     static FETCH_RANGES: RefCell<HashMap<usize, Range<usize>>> = RefCell::new(HashMap::new());
-    /// 取り寄せが走っているタブ。
+    /// 取り寄せが走っているペイン。
     static FETCH_BUSY: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -81,31 +79,30 @@ fn fetch(shell: Shell, editor_pane: usize, range: Range<usize>) {
     let Some(tab) = shell.tab_of(editor_pane) else {
         return;
     };
-    let id = tab.id.get_untracked();
     FETCH_RANGES.with(|ranges| {
         let mut ranges = ranges.borrow_mut();
-        let current = ranges.entry(id).or_insert_with(|| range.clone());
+        let current = ranges.entry(editor_pane).or_insert_with(|| range.clone());
         if range.start <= current.end && current.start <= range.end {
             *current = current.start.min(range.start)..current.end.max(range.end);
         } else {
             *current = range;
         }
     });
-    let busy = FETCH_BUSY.with(|busy| busy.borrow().contains(&id));
+    let busy = FETCH_BUSY.with(|busy| busy.borrow().contains(&editor_pane));
     if busy {
         return;
     }
-    FETCH_BUSY.with(|busy| busy.borrow_mut().push(id));
+    FETCH_BUSY.with(|busy| busy.borrow_mut().push(editor_pane));
     spawn_local(async move {
-        run_fetch(shell, tab).await;
-        FETCH_BUSY.with(|busy| busy.borrow_mut().retain(|other| *other != id));
+        run_fetch(shell, tab, editor_pane).await;
+        FETCH_BUSY.with(|busy| busy.borrow_mut().retain(|other| *other != editor_pane));
     });
 }
 
-async fn run_fetch(shell: Shell, tab: Tab) {
-    let id = tab.id.get_untracked();
+async fn run_fetch(_shell: Shell, tab: Tab, editor_pane: usize) {
+    let doc_id = tab.id.get_untracked();
     loop {
-        let range = FETCH_RANGES.with(|ranges| ranges.borrow_mut().remove(&id));
+        let range = FETCH_RANGES.with(|ranges| ranges.borrow_mut().remove(&editor_pane));
         let Some(range) = range else {
             break;
         };
@@ -115,24 +112,21 @@ async fn run_fetch(shell: Shell, tab: Tab) {
         let Some(handle) = handle_of(tab).await else {
             break;
         };
-        let count = range.len().min(CHUNK_LINES);
+        let count = range.len();
         let Ok(read_res) = framework::read_lines(handle, range.start, count).await else {
             break;
         };
-        if !read_res.lines.is_empty() {
-            shell.feed(tab, read_res.from, &read_res.lines);
+        let known_revision = editor::get_or_create_doc_model(doc_id).borrow().known_revision;
+        if read_res.revision < known_revision {
+            // 編集前の古い revision の応答は行番号がずれているため破棄
+            continue;
         }
-        let rest = read_res.from + read_res.lines.len()..range.end;
-        if !rest.is_empty() && !read_res.lines.is_empty() {
-            FETCH_RANGES.with(|ranges| {
-                let mut ranges = ranges.borrow_mut();
-                let current = ranges.entry(id).or_insert_with(|| rest.clone());
-                if rest.start <= current.end && current.start <= rest.end {
-                    *current = current.start.min(rest.start)..current.end.max(rest.end);
-                } else {
-                    *current = rest;
-                }
-            });
+        if read_res.revision > known_revision {
+            let doc_model = editor::get_or_create_doc_model(doc_id);
+            doc_model.borrow_mut().known_revision = read_res.revision;
+        }
+        if !read_res.lines.is_empty() {
+            editor::feed_pane(editor_pane, read_res.from, &read_res.lines);
         }
     }
 }
@@ -312,8 +306,9 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
             Err(error) => shell.status.set(error),
         },
         Task::Edits(batch) => {
+            let mut latest_revision = None;
             for edit in &batch.edits {
-                if framework::replace_lines(
+                match framework::replace_lines(
                     handle,
                     edit.from,
                     edit.to,
@@ -324,10 +319,15 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
                     None,
                 )
                 .await
-                .is_err()
                 {
-                    return false;
+                    Ok(applied) => latest_revision = Some(applied.revision),
+                    Err(_) => return false,
                 }
+            }
+            if let Some(rev) = latest_revision {
+                let doc_id = tab.id.get_untracked();
+                let doc_model = editor::get_or_create_doc_model(doc_id);
+                doc_model.borrow_mut().known_revision = rev;
             }
         }
         Task::Undo { redo } => {
@@ -339,10 +339,7 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
                     restored.line_count,
                 );
                 let doc_id = tab.id.get_untracked();
-                let doc_ref = editor::get_or_create_doc(doc_id);
-                doc_ref
-                    .borrow_mut()
-                    .set_modified_lines(restored.modified_lines);
+                editor::set_doc_modified_lines(doc_id, restored.modified_lines);
                 if restored.clean {
                     shell.mark_clean_tab(tab);
                 } else {

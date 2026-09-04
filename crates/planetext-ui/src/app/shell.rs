@@ -381,9 +381,8 @@ impl Shell {
                     self.status.set("行数を確定しました".into());
                 } else {
                     let doc_id = tab.id.get_untracked();
-                    editor::get_or_create_doc(doc_id)
-                        .borrow_mut()
-                        .resize_pending(count);
+                    let doc_model = editor::get_or_create_doc_model(doc_id);
+                    doc_model.borrow_mut().counting = false;
                 }
                 // 走査が完了して行数が確定したため、下書きを確定した真の総行数で更新保存する。
                 sync::draft(tab);
@@ -394,24 +393,11 @@ impl Shell {
         false
     }
 
-    /// 届いた行をタブの文書へ入れます。タブが画面上ならそのペインへ、
-    /// 駐車中ならその文書へ。
+    /// 届いた行をタブの画面上のペイン（スライス）へ入れます。
     pub(super) fn feed(&self, tab: Tab, from: usize, lines: &[String]) {
         let panes = self.panes_showing(tab);
-        if !panes.is_empty() {
-            for pane in panes {
-                editor::feed_pane(pane.editor_pane(), from, lines);
-            }
-        } else {
-            let doc_id = tab.id.get_untracked();
-            let doc = editor::get_or_create_doc(doc_id);
-            doc.borrow_mut().feed(
-                from,
-                lines
-                    .iter()
-                    .map(|line| crate::format::document::read_line(line))
-                    .collect(),
-            );
+        for pane in panes {
+            editor::feed_pane(pane.editor_pane(), from, lines);
         }
     }
 
@@ -1172,8 +1158,7 @@ impl Shell {
             let tabs = pane.tabs.get_untracked();
             let mut tab_states = Vec::new();
             for tab in tabs {
-                let doc = editor::get_or_create_doc(tab.id.get_untracked());
-                let modified_lines = doc.borrow().modified_lines();
+                let modified_lines = editor::doc_modified_lines(tab.id.get_untracked());
                 tab_states.push(TabState {
                     id: tab.id.get_untracked(),
                     untitled_num: tab.untitled_num.get_untracked(),
@@ -1292,11 +1277,8 @@ impl Shell {
                                                 tab_copy.line_ending.set(doc.line_ending);
                                                 editor::set_doc_file_size(doc_id, Some(doc.bytes));
                                                 editor::load_sparse_doc(doc_id, doc.line_count);
-                                                let doc_ref = editor::get_or_create_doc(doc_id);
                                                 if !modified_lines.is_empty() {
-                                                    doc_ref
-                                                        .borrow_mut()
-                                                        .set_modified_lines(modified_lines);
+                                                    editor::set_doc_modified_lines(doc_id, modified_lines);
                                                 }
                                                 editor::redraw_doc(doc_id, None);
                                                 shell_copy.save_session();
@@ -1320,14 +1302,11 @@ impl Shell {
                                 });
                             } else {
                                 // 無題ドキュメントの下書き復元
-                                let doc = editor::get_or_create_doc(doc_id);
-                                doc.borrow_mut()
-                                    .load(crate::format::document::read(&draft.contents));
+                                editor::load_doc_contents(doc_id, &draft.contents);
                                 if !t_state.modified_lines.is_empty() {
-                                    doc.borrow_mut().set_modified_lines(t_state.modified_lines);
+                                    editor::set_doc_modified_lines(doc_id, t_state.modified_lines);
                                 } else {
-                                    let count = doc.borrow().text().line_count();
-                                    doc.borrow_mut().set_modified_lines((0..count).collect());
+                                    editor::mark_doc_all_modified(doc_id);
                                 }
                                 let tab_copy = tab;
                                 let draft_contents = draft.contents.clone();
@@ -1485,11 +1464,8 @@ impl Shell {
                     }
                 });
             } else {
-                let doc = editor::get_or_create_doc(draft.id);
-                doc.borrow_mut()
-                    .load(crate::format::document::read(&draft.contents));
-                let count = doc.borrow().text().line_count();
-                doc.borrow_mut().set_modified_lines((0..count).collect());
+                editor::load_doc_contents(draft.id, &draft.contents);
+                editor::mark_doc_all_modified(draft.id);
 
                 let tab_copy = tab;
                 let draft_contents = draft.contents.clone();
