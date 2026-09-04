@@ -7,55 +7,147 @@ mod edit;
 mod history;
 mod movement;
 mod nested;
-mod slice;
-
 pub use cursor::{merge_cursors, UnifiedCursor};
 pub use history::Flush;
-use history::Step;
-pub use slice::SliceModel;
+use history::{Recorder, Step};
 use crate::structure::text::{Pos, Sel, Text};
 
-/// 既存コードとの後方互換性のための型エイリアス。
-/// 各ビュー（ペイン）は独立した SliceModel を持ち、共有キャッシュは廃止される。
-pub type Document = SliceModel;
-
-/// 文書モデル (M): doc_id ごとに 1 つ存在し、全スライスとファイルモデル（文書エンジン）の間に立つ。
-/// テキスト本文は持たず、既知の revision、ファイル情報、および参加スライス台帳を管理する。
-#[derive(Debug, Default)]
-pub struct DocumentModel {
-    #[allow(dead_code)]
-    pub doc_id: usize,
-    pub known_revision: u64,
-    pub file_bytes: Option<usize>,
-    pub line_count: Option<usize>,
-    pub counting: bool,
-    pub slices: Vec<usize>,
-    pub modified_lines: std::collections::BTreeSet<usize>,
-    pub cached_slice: Option<SliceModel>,
+/// ドキュメントのモデル層: テキスト本体、Undo/Redo 履歴、変更行、既知の revision の管理。
+/// 表記や画面、キャレット位置については何も知らず、同一 doc_id の複数ペイン間で共有されます。
+#[derive(Clone, Debug, Default)]
+pub struct Document {
+    pub(crate) text: Text,
+    pub(crate) recorder: Recorder,
+    pub(crate) modified_lines: std::collections::BTreeSet<usize>,
+    pub(crate) file_bytes: Option<usize>,
+    pub(crate) counting: bool,
+    pub(crate) known_revision: u64,
 }
 
-impl DocumentModel {
-    pub fn new(doc_id: usize) -> Self {
-        Self {
-            doc_id,
-            known_revision: 0,
-            file_bytes: None,
-            line_count: None,
-            counting: false,
-            slices: Vec::new(),
-            modified_lines: std::collections::BTreeSet::new(),
-            cached_slice: None,
+impl Document {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_counting(&self) -> bool {
+        self.counting
+    }
+
+    pub fn text(&self) -> &Text {
+        &self.text
+    }
+
+    pub fn text_mut(&mut self) -> &mut Text {
+        &mut self.text
+    }
+
+    pub fn file_bytes(&self) -> Option<usize> {
+        self.file_bytes
+    }
+
+    pub fn set_file_bytes(&mut self, bytes: Option<usize>) {
+        self.file_bytes = bytes;
+    }
+
+    pub fn known_revision(&self) -> u64 {
+        self.known_revision
+    }
+
+    pub fn set_known_revision(&mut self, rev: u64) {
+        self.known_revision = rev;
+    }
+
+    pub fn modified_lines(&self) -> Vec<usize> {
+        self.modified_lines.iter().copied().collect()
+    }
+
+    pub fn clear_modified(&mut self) {
+        self.modified_lines.clear();
+    }
+
+    pub fn set_modified_lines(&mut self, lines: Vec<usize>) {
+        self.modified_lines = lines.into_iter().collect();
+    }
+
+    pub fn mark_lines_modified(&mut self, from_line: usize, to_line: usize, end_line: usize) {
+        let removed_lines = to_line.saturating_sub(from_line);
+        let inserted_lines = end_line.saturating_sub(from_line);
+
+        let mut next_modified = std::collections::BTreeSet::new();
+        for &line in &self.modified_lines {
+            if line < from_line {
+                next_modified.insert(line);
+            } else if line > to_line {
+                let shifted = (line as isize + (inserted_lines as isize - removed_lines as isize))
+                    .max(0) as usize;
+                next_modified.insert(shifted);
+            }
+        }
+        for l in from_line..=end_line {
+            next_modified.insert(l);
+        }
+        self.modified_lines = next_modified;
+    }
+
+    pub fn load(&mut self, text: Text) {
+        self.text = text;
+        self.recorder = Recorder::default();
+        self.clear_modified();
+        self.counting = false;
+    }
+
+    pub fn load_sparse(&mut self, line_count: Option<usize>) {
+        const INITIAL_PENDING_LINES: usize = 1_000;
+        match line_count {
+            Some(count) => {
+                self.load(Text::pending(count.max(1)));
+                self.counting = false;
+            }
+            None => {
+                self.load(Text::pending(INITIAL_PENDING_LINES));
+                self.counting = true;
+            }
         }
     }
 
-    pub fn register_slice(&mut self, pane: usize) {
-        if !self.slices.contains(&pane) {
-            self.slices.push(pane);
+    pub fn load_pending(&mut self, line_count: usize) {
+        if line_count == 0 {
+            self.load_sparse(None);
+        } else {
+            self.load_sparse(Some(line_count));
+            self.counting = true;
         }
     }
 
-    pub fn unregister_slice(&mut self, pane: usize) {
-        self.slices.retain(|&p| p != pane);
+    pub fn resize_pending(&mut self, line_count: usize) {
+        self.text.resize_pending(line_count);
+        self.counting = false;
+    }
+
+    pub fn resident_lines(&self) -> usize {
+        self.text.line_count() - self.text.absent_lines()
+    }
+
+    pub fn evict_far(&mut self, keep: std::ops::Range<usize>, pinned: &[usize]) {
+        self.text.evict_far(keep, pinned);
+    }
+
+    pub fn forget_range(&mut self, range: std::ops::Range<usize>) {
+        self.text.forget_range(range);
+    }
+
+    pub fn feed(&mut self, from: usize, lines: Vec<crate::structure::text::SourceLine>) {
+        let end = from + lines.len();
+        if self.counting && end > self.text.line_count() {
+            self.text.resize_pending(end);
+        }
+        for (offset, line) in lines.into_iter().enumerate() {
+            self.text.fill_line(from + offset, line);
+        }
+    }
+
+    pub fn stats(&self) -> (usize, usize) {
+        self.text.stats()
     }
 }
 

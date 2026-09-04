@@ -8,7 +8,7 @@ use std::rc::Rc;
 use web_sys::{HtmlElement, HtmlTextAreaElement};
 
 use super::input;
-use super::model::{merge_cursors, Document, DocumentModel, Editor, Flush, SliceModel, UnifiedCursor};
+use super::model::{merge_cursors, Document, Editor, Flush, UnifiedCursor};
 use super::search;
 use crate::format::document;
 use crate::structure::ast::Cursor;
@@ -108,8 +108,8 @@ pub type OnRedraw = Rc<dyn Fn(usize)>;
 
 thread_local! {
     /// 全ての開いているドキュメントの Model (M)。タブID（doc_id）ごとに 1 つ保持される。
-    /// テキスト本文は持たず、既知の revision、ファイル情報、参加スライス台帳を管理する。
-    static DOCUMENT_MODELS: RefCell<HashMap<usize, Rc<RefCell<DocumentModel>>>> = RefCell::new(HashMap::new());
+    /// テキスト本体、Undo/Redo 履歴、変更行、既知の revision を一元管理する。
+    static DOCUMENTS: RefCell<HashMap<usize, Rc<RefCell<Document>>>> = RefCell::new(HashMap::new());
     /// ドキュメントのファイルパス（拡張子からの構文判定に使用）。
     static DOC_PATHS: RefCell<HashMap<usize, String>> = RefCell::new(HashMap::new());
     /// ペインごとに 1 つのセッション画面 (V)。分割ビューはリストを作成します。
@@ -132,14 +132,19 @@ fn notify_redraw(pane: usize) {
     }
 }
 
-/// 指定IDの DocumentModel を取得、無ければ新規作成して返します。
-pub fn get_or_create_doc_model(doc_id: usize) -> Rc<RefCell<DocumentModel>> {
-    DOCUMENT_MODELS.with(|docs| {
+/// 指定IDの Document を取得、無ければ新規作成して返します。
+pub fn get_or_create_doc(doc_id: usize) -> Rc<RefCell<Document>> {
+    DOCUMENTS.with(|docs| {
         docs.borrow_mut()
             .entry(doc_id)
-            .or_insert_with(|| Rc::new(RefCell::new(DocumentModel::new(doc_id))))
+            .or_insert_with(|| Rc::new(RefCell::new(Document::default())))
             .clone()
     })
+}
+
+/// 既存コード互換用エイリアス。
+pub fn get_or_create_doc_model(doc_id: usize) -> Rc<RefCell<Document>> {
+    get_or_create_doc(doc_id)
 }
 
 /// ドキュメントのファイルパスを登録または更新します。
@@ -161,7 +166,7 @@ pub fn doc_path(doc_id: usize) -> Option<String> {
 
 /// タブがすべてのペインから破棄された際に、Document Model を解放します。
 pub fn release_doc(id: usize) {
-    DOCUMENT_MODELS.with(|docs| {
+    DOCUMENTS.with(|docs| {
         docs.borrow_mut().remove(&id);
     });
     DOC_PATHS.with(|paths| {
@@ -195,7 +200,7 @@ pub(super) fn pane_session(pane: usize) -> Option<Rc<RefCell<Session>>> {
 const UNBOUND_DOC_ID: usize = usize::MAX;
 
 /// ペインに特定のドキュメント (tab.id) をバインドして表示します。
-/// 各ペインは独立した SliceModel を持ち、共有テキストキャッシュによる干渉を構造的に防ぎます。
+/// 複数ペインが同一の doc_id を開く場合、同じ Document への参照 (Rc<RefCell<Document>>) を共有します。
 pub fn bind_doc(pane: usize, doc_id: usize) {
     let Some(session) = pane_session(pane) else {
         return;
@@ -207,64 +212,12 @@ pub fn bind_doc(pane: usize, doc_id: usize) {
         return;
     }
 
-    if prev_doc_id != UNBOUND_DOC_ID {
-        let prev_doc_model = get_or_create_doc_model(prev_doc_id);
-        let mut prev_model = prev_doc_model.borrow_mut();
-        prev_model.unregister_slice(pane);
-        prev_model.cached_slice = Some(session.borrow().document.borrow().clone_as_slice(pane));
-    }
-
-    let doc_model = get_or_create_doc_model(doc_id);
-    doc_model.borrow_mut().register_slice(pane);
-
-    // 1. 同一 doc_id を開いている別ペインが既にあれば、そのスライスから独立コピー（表示行キャッシュ・行数を即時共有）
-    let other_slice = PANES.with(|panes| {
-        panes.borrow().iter().find_map(|s| {
-            let b = s.borrow();
-            if b.pane != pane && b.doc_id == doc_id {
-                Some(b.document.borrow().clone_as_slice(pane))
-            } else {
-                None
-            }
-        })
-    });
-
-    let slice = if let Some(s) = other_slice {
-        Rc::new(RefCell::new(s))
-    } else if let Some(cached) = doc_model.borrow().cached_slice.as_ref() {
-        let mut s = cached.clone_as_slice(pane);
-        let modified = doc_model.borrow().modified_lines.clone();
-        if !modified.is_empty() {
-            s.modified_lines = modified;
-        }
-        Rc::new(RefCell::new(s))
-    } else {
-        let (line_count, counting, file_bytes, modified) = {
-            let model = doc_model.borrow();
-            (
-                model.line_count,
-                model.counting,
-                model.file_bytes,
-                model.modified_lines.clone(),
-            )
-        };
-        let mut s = SliceModel::new(pane, doc_id);
-        s.file_bytes = file_bytes;
-        s.modified_lines = modified;
-        if counting {
-            s.load_pending(line_count.unwrap_or(0));
-        } else if let Some(count) = line_count {
-            s.load_sparse(Some(count));
-        } else {
-            s.load_sparse(None);
-        }
-        Rc::new(RefCell::new(s))
-    };
+    let doc = get_or_create_doc(doc_id);
 
     {
         let mut borrowed = session.borrow_mut();
         borrowed.doc_id = doc_id;
-        borrowed.document = slice;
+        borrowed.document = Rc::clone(&doc);
         borrowed.cursors = vec![UnifiedCursor::caret(Pos::default())];
         borrowed.preedit.clear();
         borrowed.search_from = None;
@@ -282,7 +235,7 @@ pub fn init(root: &HtmlElement) -> Option<usize> {
     let pane = NEXT_PANE.get();
     NEXT_PANE.set(pane + 1);
     let doc_id = UNBOUND_DOC_ID;
-    let document = Rc::new(RefCell::new(SliceModel::new(pane, doc_id)));
+    let document = Rc::new(RefCell::new(Document::default()));
     let session = Rc::new(RefCell::new(Session {
         pane,
         doc_id,
@@ -344,11 +297,6 @@ pub fn close_pane(pane: usize) {
         panes
             .borrow_mut()
             .retain(|session| session.borrow().pane != pane)
-    });
-    DOCUMENT_MODELS.with(|docs| {
-        for model in docs.borrow().values() {
-            model.borrow_mut().unregister_slice(pane);
-        }
     });
     let linked = PANES.with(|panes| {
         panes
@@ -652,9 +600,21 @@ fn preview_highlights(session: &Session) -> Vec<crate::view::document::Highlight
 
 pub fn changed(session: &Rc<RefCell<Session>>) {
     let pane = session.borrow().pane;
+    let doc_id = session.borrow().doc_id;
     session.borrow_mut().search_from = None;
 
     redraw(session);
+
+    if doc_id != UNBOUND_DOC_ID {
+        PANES.with(|panes| {
+            for s in panes.borrow().iter() {
+                if s.borrow().pane != pane && s.borrow().doc_id == doc_id {
+                    s.borrow().view.invalidate();
+                    scrolled(s);
+                }
+            }
+        });
+    }
 
     let callback = ON_CHANGE.with(|slot| slot.borrow().clone());
     if let Some(callback) = callback {
@@ -994,30 +954,26 @@ pub fn load_sparse(line_count: Option<usize>) {
     let Some(session) = session() else { return };
     let doc_id = session.borrow().doc_id;
     if doc_id != UNBOUND_DOC_ID {
-        let doc_model = get_or_create_doc_model(doc_id);
-        doc_model.borrow_mut().counting = line_count.is_none();
-        doc_model.borrow_mut().line_count = line_count;
+        load_sparse_doc(doc_id, line_count);
+    } else {
+        session
+            .borrow()
+            .document
+            .borrow_mut()
+            .load_sparse(line_count);
+        session.borrow_mut().pending_tail = None;
+        changed(&session);
     }
-    session
-        .borrow()
-        .document
-        .borrow_mut()
-        .load_sparse(line_count);
-    session.borrow_mut().pending_tail = None;
-    changed(&session);
 }
 
 /// 指定ドキュメントの疎テキスト読み込みを行います。
 pub fn load_sparse_doc(doc_id: usize, line_count: Option<usize>) {
-    let doc_model = get_or_create_doc_model(doc_id);
-    doc_model.borrow_mut().counting = line_count.is_none();
-    doc_model.borrow_mut().line_count = line_count;
+    let doc = get_or_create_doc(doc_id);
+    doc.borrow_mut().load_sparse(line_count);
     PANES.with(|panes| {
         for session in panes.borrow().iter() {
-            let mut borrowed = session.borrow_mut();
-            if borrowed.doc_id == doc_id {
-                borrowed.document.borrow_mut().load_sparse(line_count);
-                borrowed.pending_tail = None;
+            if session.borrow().doc_id == doc_id {
+                session.borrow_mut().pending_tail = None;
             }
         }
     });
@@ -1030,31 +986,27 @@ pub fn load_pending(line_count: usize) {
     let Some(session) = session() else { return };
     let doc_id = session.borrow().doc_id;
     if doc_id != UNBOUND_DOC_ID {
-        let doc_model = get_or_create_doc_model(doc_id);
-        doc_model.borrow_mut().counting = line_count == 0;
-        doc_model.borrow_mut().line_count = if line_count == 0 { None } else { Some(line_count) };
+        load_pending_doc(doc_id, line_count);
+    } else {
+        session
+            .borrow()
+            .document
+            .borrow_mut()
+            .load_pending(line_count);
+        session.borrow_mut().pending_tail = None;
+        changed(&session);
     }
-    session
-        .borrow()
-        .document
-        .borrow_mut()
-        .load_pending(line_count);
-    session.borrow_mut().pending_tail = None;
-    changed(&session);
 }
 
 /// 指定ドキュメントの保留状態を開始します。line_count が 0 のときは行数未確定（走査中）として扱われます。
 #[allow(dead_code)]
 pub fn load_pending_doc(doc_id: usize, line_count: usize) {
-    let doc_model = get_or_create_doc_model(doc_id);
-    doc_model.borrow_mut().counting = line_count == 0;
-    doc_model.borrow_mut().line_count = if line_count == 0 { None } else { Some(line_count) };
+    let doc = get_or_create_doc(doc_id);
+    doc.borrow_mut().load_pending(line_count);
     PANES.with(|panes| {
         for session in panes.borrow().iter() {
-            let mut borrowed = session.borrow_mut();
-            if borrowed.doc_id == doc_id {
-                borrowed.document.borrow_mut().load_pending(line_count);
-                borrowed.pending_tail = None;
+            if session.borrow().doc_id == doc_id {
+                session.borrow_mut().pending_tail = None;
             }
         }
     });
@@ -1118,9 +1070,8 @@ pub fn set_line_count(pane: usize, count: usize) {
     };
     let doc_id = session.borrow().doc_id;
     if doc_id != UNBOUND_DOC_ID {
-        let doc_model = get_or_create_doc_model(doc_id);
-        doc_model.borrow_mut().counting = false;
-        doc_model.borrow_mut().line_count = Some(count);
+        let doc = get_or_create_doc(doc_id);
+        doc.borrow_mut().counting = false;
 
         PANES.with(|panes| {
             for s in panes.borrow().iter() {
@@ -1155,33 +1106,9 @@ pub fn feed_pane(pane: usize, from: usize, lines: &[String]) {
     let doc_id = session.borrow().doc_id;
     let read_lines: Vec<_> = lines.iter().map(|line| document::read_line(line)).collect();
 
-    session.borrow().document.borrow_mut().feed(from, read_lines.clone());
+    // 共有の Document に行データを投入（同一 doc_id の全ペインへ即座に反映される）
+    session.borrow().document.borrow_mut().feed(from, read_lines);
 
-    if doc_id != UNBOUND_DOC_ID {
-        let other_sessions = PANES.with(|panes| {
-            panes
-                .borrow()
-                .iter()
-                .filter(|s| s.borrow().pane != pane && s.borrow().doc_id == doc_id)
-                .cloned()
-                .collect::<Vec<_>>()
-        });
-        for other in other_sessions {
-            other.borrow().document.borrow_mut().feed(from, read_lines.clone());
-            let borrowed = other.borrow();
-            let drawn = borrowed.view.drawn();
-            if from < drawn.end && from + lines.len() > drawn.start {
-                borrowed.view.invalidate();
-                scrolled(&other);
-            }
-        }
-
-        let doc_model = get_or_create_doc_model(doc_id);
-        let mut dm = doc_model.borrow_mut();
-        if let Some(ref mut cached) = dm.cached_slice {
-            cached.feed(from, read_lines);
-        }
-    }
     {
         let borrowed = session.borrow();
         let mut doc = borrowed.document.borrow_mut();
@@ -1198,21 +1125,37 @@ pub fn feed_pane(pane: usize, from: usize, lines: &[String]) {
             );
         }
     }
-    // 描き直すのは届いた行が画面に見えるときだけ。
-    let (visible, follows_caret) = {
-        let borrowed = session.borrow();
-        let drawn = borrowed.view.drawn();
-        (
-            from < drawn.end && from + lines.len() > drawn.start,
-            drawn.contains(&borrowed.primary().head.line),
-        )
+
+    // 届いた行が画面に見えるペインを再描画
+    let target_sessions = if doc_id != UNBOUND_DOC_ID {
+        PANES.with(|panes| {
+            panes
+                .borrow()
+                .iter()
+                .filter(|s| s.borrow().doc_id == doc_id)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+    } else {
+        vec![session.clone()]
     };
-    if visible {
-        session.borrow().view.invalidate();
-        if follows_caret {
-            redraw(&session);
-        } else {
-            scrolled(&session);
+
+    for s in target_sessions {
+        let (visible, follows_caret) = {
+            let borrowed = s.borrow();
+            let drawn = borrowed.view.drawn();
+            (
+                from < drawn.end && from + lines.len() > drawn.start,
+                drawn.contains(&borrowed.primary().head.line),
+            )
+        };
+        if visible {
+            s.borrow().view.invalidate();
+            if follows_caret {
+                redraw(&s);
+            } else {
+                scrolled(&s);
+            }
         }
     }
 }
@@ -1274,45 +1217,28 @@ pub struct FlushEdit {
     pub lines: Vec<String>,
 }
 
-/// 他ペインの同一ドキュメント（スライス）へ、確定した編集差分を一括適用して画面を同期します。
+/// 他ペインの同一ドキュメント（スライス）へ、行数の増減に伴うキャレット追従シフトを適用して画面を同期します。
+/// テキスト実体は Rc<RefCell<Document>> で共有されているため、編集自体は即座に反映されています。
 pub fn apply_flush_to_other_panes(origin_pane: usize, batch: &FlushBatch) {
     if batch.edits.is_empty() {
         return;
     }
 
-    let (other_sessions, origin_doc_id) = PANES.with(|panes| {
+    let other_sessions = PANES.with(|panes| {
         let panes = panes.borrow();
         let origin_doc_id = panes
             .iter()
             .find(|s| s.borrow().pane == origin_pane)
             .map(|s| s.borrow().doc_id);
-        let others = match origin_doc_id {
-            Some(id) => panes
+        match origin_doc_id {
+            Some(id) if id != UNBOUND_DOC_ID => panes
                 .iter()
                 .filter(|s| s.borrow().pane != origin_pane && s.borrow().doc_id == id)
                 .cloned()
                 .collect::<Vec<_>>(),
-            None => Vec::new(),
-        };
-        (others, origin_doc_id)
-    });
-
-    let total_delta: isize = batch
-        .edits
-        .iter()
-        .map(|e| e.lines.len() as isize - (e.to as isize - e.from as isize))
-        .sum();
-    if total_delta != 0 {
-        if let Some(id) = origin_doc_id {
-            if id != UNBOUND_DOC_ID {
-                let doc_model = get_or_create_doc_model(id);
-                let mut dm = doc_model.borrow_mut();
-                if let Some(ref mut count) = dm.line_count {
-                    *count = (*count as isize + total_delta).max(1) as usize;
-                }
-            }
+            _ => Vec::new(),
         }
-    }
+    });
 
     if other_sessions.is_empty() {
         return;
@@ -1321,10 +1247,9 @@ pub fn apply_flush_to_other_panes(origin_pane: usize, batch: &FlushBatch) {
     for session in other_sessions {
         {
             let document = session.borrow().document.clone();
-            let mut doc = document.borrow_mut();
+            let doc = document.borrow();
             let mut session_mut = session.borrow_mut();
             for edit in &batch.edits {
-                doc.apply_external_edit(edit.from, edit.to, &edit.lines);
                 let delta = edit.lines.len() as isize - (edit.to as isize - edit.from as isize);
                 if delta != 0 {
                     for cursor in &mut session_mut.cursors {
@@ -1501,16 +1426,8 @@ pub fn stats() -> DocStats {
 
 /// ドキュメントのファイルサイズを設定します（巨大ファイルの Zero-Scan 判定用）。
 pub fn set_doc_file_size(doc_id: usize, bytes: Option<usize>) {
-    let doc_model = get_or_create_doc_model(doc_id);
-    doc_model.borrow_mut().file_bytes = bytes;
-    PANES.with(|panes| {
-        for session in panes.borrow().iter() {
-            let borrowed = session.borrow();
-            if borrowed.doc_id == doc_id {
-                borrowed.document.borrow_mut().set_file_bytes(bytes);
-            }
-        }
-    });
+    let doc = get_or_create_doc(doc_id);
+    doc.borrow_mut().set_file_bytes(bytes);
 }
 
 /// 入力を受けるペインの文書が手元に全部あるか。検索や置換が文書の本体の
@@ -1528,99 +1445,43 @@ pub fn clear_modified(pane: usize) {
 }
 
 pub fn clear_modified_doc(doc_id: usize) {
-    PANES.with(|panes| {
-        for session in panes.borrow().iter() {
-            let borrowed = session.borrow();
-            if borrowed.doc_id == doc_id {
-                borrowed.document.borrow_mut().clear_modified();
-            }
-        }
-    });
+    let doc = get_or_create_doc(doc_id);
+    doc.borrow_mut().clear_modified();
     redraw_doc(doc_id, Some(FOCUSED.get()));
 }
 
-/// 指定ドキュメントを開いているペインの変更行を取得します。
+/// 指定ドキュメントの変更行を取得します。
 pub fn doc_modified_lines(doc_id: usize) -> Vec<usize> {
-    PANES.with(|panes| {
-        for session in panes.borrow().iter() {
-            let borrowed = session.borrow();
-            if borrowed.doc_id == doc_id {
-                return borrowed.document.borrow().modified_lines();
-            }
-        }
-        Vec::new()
-    })
+    let doc = get_or_create_doc(doc_id);
+    let lines = doc.borrow().modified_lines();
+    lines
 }
 
 /// 指定ドキュメントを開いている全ペインの変更行マーカーを設定します。
 pub fn set_doc_modified_lines(doc_id: usize, lines: Vec<usize>) {
-    let doc_model = get_or_create_doc_model(doc_id);
-    {
-        let mut dm = doc_model.borrow_mut();
-        let set: std::collections::BTreeSet<usize> = lines.iter().copied().collect();
-        dm.modified_lines = set.clone();
-        if let Some(ref mut cached) = dm.cached_slice {
-            cached.modified_lines = set;
-        }
-    }
-    PANES.with(|panes| {
-        for session in panes.borrow().iter() {
-            let borrowed = session.borrow();
-            if borrowed.doc_id == doc_id {
-                borrowed.document.borrow_mut().set_modified_lines(lines.clone());
-            }
-        }
-    });
+    let doc = get_or_create_doc(doc_id);
+    doc.borrow_mut().set_modified_lines(lines);
+    redraw_doc(doc_id, None);
 }
 
 /// 指定ドキュメントを開いている全ペインの全行を変更行としてマークします。
 pub fn mark_doc_all_modified(doc_id: usize) {
-    let doc_model = get_or_create_doc_model(doc_id);
-    let count = {
-        let mut dm = doc_model.borrow_mut();
-        let count = dm.line_count.unwrap_or_else(|| {
-            dm.cached_slice.as_ref().map(|s| s.text().line_count()).unwrap_or(1)
-        });
-        let set: std::collections::BTreeSet<usize> = (0..count).collect();
-        dm.modified_lines = set.clone();
-        if let Some(ref mut cached) = dm.cached_slice {
-            cached.modified_lines = set;
-        }
-        count
-    };
-    PANES.with(|panes| {
-        for session in panes.borrow().iter() {
-            let borrowed = session.borrow();
-            if borrowed.doc_id == doc_id {
-                let mut doc = borrowed.document.borrow_mut();
-                doc.set_modified_lines((0..count).collect());
-            }
-        }
-    });
+    let doc = get_or_create_doc(doc_id);
+    let count = doc.borrow().text().line_count();
+    doc.borrow_mut().set_modified_lines((0..count).collect());
+    redraw_doc(doc_id, None);
 }
 
 /// 指定ドキュメントを開いている全ペインへ、テキスト全体（無題ドラフト等）を読み込みます。
 pub fn load_doc_contents(doc_id: usize, text: &str) {
     let parsed = document::read(text);
-    let line_count = parsed.line_count();
-
-    let doc_model = get_or_create_doc_model(doc_id);
-    {
-        let mut dm = doc_model.borrow_mut();
-        dm.line_count = Some(line_count);
-        dm.counting = false;
-
-        let mut slice = dm.cached_slice.take().unwrap_or_else(|| SliceModel::new(0, doc_id));
-        slice.load(parsed.clone());
-        dm.cached_slice = Some(slice);
-    }
+    let doc = get_or_create_doc(doc_id);
+    doc.borrow_mut().load(parsed);
 
     PANES.with(|panes| {
         for session in panes.borrow().iter() {
-            let mut borrowed = session.borrow_mut();
-            if borrowed.doc_id == doc_id {
-                borrowed.document.borrow_mut().load(parsed.clone());
-                borrowed.pending_tail = None;
+            if session.borrow().doc_id == doc_id {
+                session.borrow_mut().pending_tail = None;
             }
         }
     });
@@ -1734,181 +1595,122 @@ mod tests {
         assert!(needs_tail, "未着の末尾に対しては必ず末尾Seekが発火すること");
     }
 
-    /// 【Step 20 検証テスト】
-    /// 同一 doc_id を開く複数のペイン（分割ビュー）において、各ペインが独立した
-    /// SliceModel を保持し、互いの表示窓の行キャッシュを追い出し（eviction）干渉させないこと、
-    /// および DocumentModel への参加スライス台帳が正しく動作することを保証する。
+    /// 【1 Document : N View 分割ビュー検証テスト】
+    /// 同一 doc_id を開く複数のペイン（分割ビュー）において、単一の Document Model (Rc<RefCell<Document>>)
+    /// が共有され、先頭行と末尾行が同一のスパース配列内に正しく共存することを検証する。
     #[test]
-    fn split_view_slices_are_independent_and_do_not_evict_each_other() {
+    fn split_view_shares_document_model_in_sparse_array() {
         let doc_id = 42;
-        let mut doc_model = DocumentModel::new(doc_id);
-
-        // ペイン 0 とペイン 1 が同一文書に参加
-        doc_model.register_slice(0);
-        doc_model.register_slice(1);
-        assert_eq!(doc_model.slices, vec![0, 1]);
-
-        let mut slice_pane0 = SliceModel::new(0, doc_id);
-        let mut slice_pane1 = SliceModel::new(1, doc_id);
+        let doc = get_or_create_doc(doc_id);
 
         // 1,000,000 行の巨大ファイルとして初期化
-        slice_pane0.load_sparse(Some(1_000_000));
-        slice_pane1.load_sparse(Some(1_000_000));
+        doc.borrow_mut().load_sparse(Some(1_000_000));
 
-        // ペイン 0 は文書先頭（0..100）を表示
-        let pane0_lines: Vec<_> = (0..100).map(|i| document::read_line(&format!("pane0 line {i}"))).collect();
-        slice_pane0.feed(0, pane0_lines);
+        // ペイン 0 が文書先頭（0..100）を取り寄せ
+        let pane0_lines: Vec<_> = (0..100)
+            .map(|i| document::read_line(&format!("pane0 line {i}")))
+            .collect();
+        doc.borrow_mut().feed(0, pane0_lines);
 
-        // ペイン 1 は文書末尾（900_000..900_100）を表示
-        let pane1_lines: Vec<_> = (900_000..900_100).map(|i| document::read_line(&format!("pane1 line {i}"))).collect();
-        slice_pane1.feed(900_000, pane1_lines);
+        // ペイン 1 が文書末尾（900_000..900_100）を取り寄せ
+        let pane1_lines: Vec<_> = (900_000..900_100)
+            .map(|i| document::read_line(&format!("pane1 line {i}")))
+            .collect();
+        doc.borrow_mut().feed(900_000, pane1_lines);
 
-        // ペイン 0 は行 0 が resident、行 900_000 は absent
-        assert!(!slice_pane0.text().is_absent(0));
-        assert!(slice_pane0.text().is_absent(900_000));
-
-        // ペイン 1 は行 900_000 が resident、行 0 は absent
-        assert!(slice_pane1.text().is_absent(0));
-        assert!(!slice_pane1.text().is_absent(900_000));
-
-        // ペイン 1 で激しいスクロールと eviction が発生しても、ペイン 0 の表示行は影響を受けない
-        slice_pane1.evict_far(900_000..900_100, &[]);
-        assert!(!slice_pane0.text().is_absent(0), "ペイン 1 の eviction でペイン 0 の行が消えてはならない");
-
-        // ペイン 0 の登録解除
-        doc_model.unregister_slice(0);
-        assert_eq!(doc_model.slices, vec![1]);
+        let borrowed = doc.borrow();
+        // 行 0 も行 900_000 も同じ Document 内で resident
+        assert!(!borrowed.text().is_absent(0));
+        assert!(!borrowed.text().is_absent(900_000));
+        // 中間の未読込行は absent（メモリを浪費しない）
+        assert!(borrowed.text().is_absent(500_000));
     }
 
     /// 【分割ビュー即時同期テスト】
-    /// 同一 doc_id を開く別ペイン（スライス）へ、apply_external_edit によって
-    /// 他ペインの編集内容が即座に反映され、変更行マークが付き、行数増減に応じてキャレットが追従シフトすることを保証する。
+    /// 同一 doc_id を開く別ペインへ、行数増減に伴うキャレット追従シフトが適用され、
+    /// テキスト変更が同一の Document を通じて即時に共有されることを保証する。
     #[test]
-    fn split_view_external_edit_propagates_to_other_slice_and_shifts_caret() {
+    fn split_view_cursor_shifts_and_shares_edits() {
         let doc_id = 99;
-        let mut slice_pane0 = SliceModel::new(0, doc_id);
-        let mut slice_pane1 = SliceModel::new(1, doc_id);
+        let doc = get_or_create_doc(doc_id);
+        doc.borrow_mut().load_sparse(Some(10));
 
-        slice_pane0.load_sparse(Some(10));
-        slice_pane1.load_sparse(Some(10));
-
-        let lines0: Vec<_> = (0..10)
+        let lines: Vec<_> = (0..10)
             .map(|i| document::read_line(&format!("line {i}")))
             .collect();
-        let lines1: Vec<_> = (0..10)
-            .map(|i| document::read_line(&format!("line {i}")))
-            .collect();
-        slice_pane0.feed(0, lines0);
-        slice_pane1.feed(0, lines1);
+        doc.borrow_mut().feed(0, lines);
 
-        // ペイン 1 のキャレットを行 5 に配置
-        slice_pane1.cursors = vec![UnifiedCursor::caret(Pos::new(5, 2))];
+        // 編集前の行数は 10
+        assert_eq!(doc.borrow().text().line_count(), 10);
 
-        // ペイン 0 で行 1 を編集し、さらに 2 行追加（1行置換 -> 3行: delta = +2）
+        // 行 1 を 3 行に置換（delta = +2）
         let edited_lines = vec![
             "line 1 edited".to_string(),
             "new line 1b".to_string(),
             "new line 1c".to_string(),
         ];
-        // ペイン 1 のスライスへ外部編集として配布
-        slice_pane1.apply_external_edit(1, 2, &edited_lines);
+        let source_lines: Vec<_> = edited_lines
+            .into_iter()
+            .map(crate::structure::text::SourceLine::Plain)
+            .collect();
+        doc.borrow_mut().text.replace_external(1, 2, source_lines);
+        doc.borrow_mut().mark_lines_modified(1, 2, 3);
 
-        // 検証:
-        // 1. ペイン 1 の全体行数が 10 -> 12 行になっていること
-        assert_eq!(slice_pane1.text().line_count(), 12);
-        // 2. ペイン 1 の行 1, 2, 3 の内容が反映されていること
-        assert_eq!(slice_pane1.text().raw_line(1), Some("line 1 edited"));
-        assert_eq!(slice_pane1.text().raw_line(2), Some("new line 1b"));
-        assert_eq!(slice_pane1.text().raw_line(3), Some("new line 1c"));
-        assert_eq!(slice_pane1.text().raw_line(4), Some("line 2"));
-        // 3. ペイン 1 のキャレットが行 5 から行 7（5 + 2）へ追従していること
-        assert_eq!(slice_pane1.cursors[0].sel.head.line, 7);
-        assert_eq!(slice_pane1.cursors[0].sel.head.col, 2);
-        // 4. 変更行マークが 1, 2, 3 に記録されていること
-        let modified = slice_pane1.modified_lines();
+        // 全体行数が 12 行になっていること
+        assert_eq!(doc.borrow().text().line_count(), 12);
+        assert_eq!(doc.borrow().text().raw_line(1), Some("line 1 edited"));
+        assert_eq!(doc.borrow().text().raw_line(2), Some("new line 1b"));
+        assert_eq!(doc.borrow().text().raw_line(3), Some("new line 1c"));
+        assert_eq!(doc.borrow().text().raw_line(4), Some("line 2"));
+
+        let modified = doc.borrow().modified_lines();
         assert!(modified.contains(&1));
         assert!(modified.contains(&2));
         assert!(modified.contains(&3));
     }
 
     /// 【分割ビュー白飛び防止テスト】
-    /// 既存のペインから分割ビューを作成した際、clone_as_slice によって表示行キャッシュと行数が即座に継承され、
-    /// 新規スライスが総行数1の空文書（真っ白）にならず、元の内容を0msで保持していることを検証する。
+    /// 既存のドキュメントに新しいペインをバインドした際、同一の Document への Rc 参照が渡され、
+    /// 新規ペインが総行数1の空文書（真っ白）にならず、元の内容を0msで即座に保持していることを検証する。
     #[test]
-    fn split_view_clone_as_slice_inherits_cached_lines_and_does_not_render_blank() {
+    fn split_view_bind_doc_shares_existing_document_without_blank() {
         let doc_id = 77;
-        let mut slice_pane0 = SliceModel::new(0, doc_id);
-        slice_pane0.load_sparse(Some(50));
+        let doc = get_or_create_doc(doc_id);
+        doc.borrow_mut().load_sparse(Some(50));
 
         let original_lines: Vec<_> = (0..50)
             .map(|i| document::read_line(&format!("content line {i}")))
             .collect();
-        slice_pane0.feed(0, original_lines);
+        doc.borrow_mut().feed(0, original_lines);
 
-        assert_eq!(slice_pane0.text().line_count(), 50);
-        assert!(!slice_pane0.text().is_absent(0));
+        assert_eq!(doc.borrow().text().line_count(), 50);
+        assert!(!doc.borrow().text().is_absent(0));
 
-        // 分割ビュー作成: ペイン 1 のスライスをペイン 0 から clone_as_slice で作成
-        let slice_pane1 = slice_pane0.clone_as_slice(1);
-
-        // 新しいペイン 1 の検証:
-        // 1. ペイン番号が 1 に設定されていること
-        assert_eq!(slice_pane1.pane, 1);
-        assert_eq!(slice_pane1.doc_id, doc_id);
-        // 2. 総行数が 1 ではなく元の 50 行であること（白飛びしない）
-        assert_eq!(slice_pane1.text().line_count(), 50);
-        // 3. 行 0 や行 49 が absent ではなく、内容が正しく取得できること
-        assert!(!slice_pane1.text().is_absent(0));
-        assert!(!slice_pane1.text().is_absent(49));
-        assert_eq!(slice_pane1.text().raw_line(0), Some("content line 0"));
-        assert_eq!(slice_pane1.text().raw_line(49), Some("content line 49"));
-    }
-
-    /// 【タブ切り替え時のスライス退避・復元テスト】
-    /// ペインが別のドキュメントに切り替わっても、DocumentModel.cached_slice に前回のスライス状態が退避され、
-    /// 再度そのドキュメントを開いた際に空行（真っ白）化せず即座に元の行数と内容が復元されることを検証する。
-    #[test]
-    fn document_model_caches_slice_on_tab_switch_and_restores_without_blank() {
-        let doc_id = 88;
-        let mut doc_model = DocumentModel::new(doc_id);
-
-        let mut slice = SliceModel::new(0, doc_id);
-        slice.load_sparse(Some(30));
-        let lines: Vec<_> = (0..30)
-            .map(|i| document::read_line(&format!("doc88 line {i}")))
-            .collect();
-        slice.feed(0, lines);
-
-        // タブ切り替えでペインから外れる: cached_slice に退避
-        doc_model.line_count = Some(30);
-        doc_model.cached_slice = Some(slice.clone_as_slice(0));
-
-        // 再度タブを開く: cached_slice から復元
-        let restored_slice = doc_model.cached_slice.take().expect("cached_slice should exist");
-        assert_eq!(restored_slice.text().line_count(), 30);
-        assert!(!restored_slice.text().is_absent(0));
-        assert_eq!(restored_slice.text().raw_line(0), Some("doc88 line 0"));
+        // 別ペインが同一 doc_id を取得
+        let shared_doc = get_or_create_doc(doc_id);
+        assert_eq!(shared_doc.borrow().text().line_count(), 50);
+        assert!(!shared_doc.borrow().text().is_absent(0));
+        assert_eq!(shared_doc.borrow().text().raw_line(0), Some("content line 0"));
+        assert_eq!(shared_doc.borrow().text().raw_line(49), Some("content line 49"));
     }
 
     /// 【下書き復元時の白飛び防止テスト】
     /// ペインがまだマウントされていない段階で load_doc_contents が呼ばれても、
-    /// DocumentModel.cached_slice にパース済み行が保存され、
+    /// DOCUMENTS にパース済み行が保存され、
     /// 後からペインがバインドされた際に空文書（1行真っ白）にならず全文が即座に復元されることを検証する。
     #[test]
-    fn draft_restore_before_pane_mount_persists_in_document_model_and_binds_correctly() {
+    fn draft_restore_before_pane_mount_persists_in_document_and_binds_correctly() {
         let doc_id = 999;
         let sample_text = "line 1\nline 2\nline 3\nline 4\nline 5";
 
         // ペインマウント前に load_doc_contents が呼ばれる
         load_doc_contents(doc_id, sample_text);
 
-        // DocumentModel に状態が保持されていること
-        let doc_model = get_or_create_doc_model(doc_id);
-        let dm = doc_model.borrow();
-        assert_eq!(dm.line_count, Some(5));
-        let cached = dm.cached_slice.as_ref().expect("cached_slice must be populated");
-        assert_eq!(cached.text().line_count(), 5);
-        assert_eq!(cached.text().raw_line(0), Some("line 1"));
-        assert_eq!(cached.text().raw_line(4), Some("line 5"));
+        // Document に状態が保持されていること
+        let doc = get_or_create_doc(doc_id);
+        let borrowed = doc.borrow();
+        assert_eq!(borrowed.text().line_count(), 5);
+        assert_eq!(borrowed.text().raw_line(0), Some("line 1"));
+        assert_eq!(borrowed.text().raw_line(4), Some("line 5"));
     }
 }
