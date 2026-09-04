@@ -635,4 +635,574 @@ mod tests {
             assert_eq!(columns, vec![1, 8], "{encoding:?}");
         }
     }
+
+    use crate::search::{literal_positions, SearchSpec};
+    use crate::source::{LineEnding, CHUNK, MAX_LINE_BYTES};
+    use crate::test_utils::*;
+
+    #[test]
+    fn scanning_reports_matches_and_notation_lines_in_order() {
+        let (mut doc, path) = disk_doc("scan", &["fox", "a$b", "the fox and fox", "last"]);
+        let pattern = regex::Regex::new("fox").unwrap();
+        let (hits, scanned_to) = doc.scan(&pattern, '$', 0, 10, 64).unwrap();
+        assert_eq!(scanned_to, 4);
+        let kinds: Vec<(usize, bool, usize, usize)> = hits
+            .iter()
+            .map(|hit| (hit.line, hit.notation, hit.start, hit.end))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (0, false, 0, 3),
+                (1, true, 0, 0),
+                (2, false, 4, 7),
+                (2, false, 12, 15),
+            ]
+        );
+        // 途中から頼めば続きが返る。
+        let (hits, _) = doc.scan(&pattern, '$', 2, 10, 64).unwrap();
+        assert_eq!(hits.len(), 2);
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn estimating_matches_is_exact_when_every_line_is_sampled() {
+        let (mut doc, path) = disk_doc("estimate", &["hit hit", "none", "hit"]);
+        let pattern = regex::Regex::new("hit").unwrap();
+        assert_eq!(doc.estimate_matches(&pattern).unwrap(), 3);
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn estimating_matches_extrapolates_uniform_samples() {
+        let lines: Vec<String> = (0..200_000).map(|_| "hit".to_string()).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (mut doc, path) = disk_doc("estimate-large", &refs);
+        let pattern = regex::Regex::new("hit").unwrap();
+        assert_eq!(doc.estimate_matches(&pattern).unwrap(), 200_000);
+        std::fs::remove_file(path).ok();
+    }
+
+
+    /// 【回帰防止テスト】
+    /// バックグラウンド走査中の巨大ファイル（pending_source が残る状態）であっても、
+    /// estimate_matches は最初のチャンク行数で頭打ちにならず、ファイル全体のサイズに
+    /// 正しく外挿された推定件数を返すことを保証する。
+    /// また、走査が完了した後は自動的に confirm_scan_if_done が走り、確定件数が返ることを保証する。
+    #[test]
+    fn estimate_matches_extrapolates_pending_source_and_confirms_when_done() {
+        let lines: Vec<String> = (0..100_000)
+            .map(|i| format!("line {i} with keyword target"))
+            .collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (mut doc, path) = disk_doc("estimate-pending-extrapolate", &refs);
+        let pattern = regex::Regex::new("target").unwrap();
+
+        let initial_lines = 1_000;
+        let initial_bytes = doc.pieces_byte_offset_for_test(initial_lines);
+        let total_bytes = doc.pieces_byte_offset_for_test(100_000);
+
+        doc.simulate_pending_source_for_test(initial_bytes, initial_lines, total_bytes);
+
+        // 未確定状態（count = 1,000）でも、ファイル全体規模（約100,000件）に外挿されること
+        let estimated = doc.estimate_matches(&pattern).unwrap();
+        assert!(
+            (90_000..=110_000).contains(&estimated),
+            "未確定走査中でもファイル全体規模に外挿されること: expected ~100000, got {estimated}"
+        );
+
+        // 走査完了をシミュレート
+        doc.simulate_scan_done_for_test(100_000);
+
+        // 走査完了後は confirm_scan_if_done が自動で走り、count が 100,000 に確定すること
+        let final_estimated = doc.estimate_matches(&pattern).unwrap();
+        assert!(
+            (final_estimated as isize - 100_000).abs() <= 10,
+            "走査完了後の推定件数は約100,000件であること: got {final_estimated}"
+        );
+        assert_eq!(doc.line_count(), 100_000);
+
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn ascii_case_fold_finds_non_overlapping_matches() {
+        assert_eq!(literal_positions(b"xxAbCaBC", b"abc", false), vec![2, 5]);
+        assert_eq!(literal_positions(b"aaaa", b"aa", false), vec![0, 2]);
+        assert!(literal_positions(b"ABC", b"abc", true).is_empty());
+    }
+
+
+    #[test]
+    fn ascii_case_insensitive_scan_keeps_utf8_columns() {
+        let (mut doc, path) = disk_doc("ascii-fold", &["前AbC後aBc"]);
+        let (hits, _) = doc.scan_literal("abc", false, '$', 0, 1, 64).unwrap();
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.start, hit.end))
+                .collect::<Vec<_>>(),
+            vec![(1, 4), (5, 8)]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn search_snapshot_keeps_the_contents_at_search_start() {
+        let (mut doc, path) = disk_doc("search-snapshot", &["before", "tail"]);
+        doc.replace(0, 1, vec!["first".into()], 1, "", "").unwrap();
+        let mut snapshot = doc.search_snapshot().unwrap();
+        doc.replace(0, 1, vec!["second".into()], 2, "", "").unwrap();
+        let query = crate::search::CompiledQuery::compile("first", false, true, '$').unwrap();
+        let found = snapshot
+            .search_candidates(
+                SearchSpec {
+                    query: &query,
+                    from: 0,
+                    end: 2,
+                    after_col: None,
+                },
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(found.hits.len(), 1);
+        assert!(!found.cancelled);
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn native_search_stops_when_cancelled() {
+        let (doc, path) = disk_doc("search-cancel", &["a", "b"]);
+        let mut snapshot = doc.search_snapshot().unwrap();
+        let query = crate::search::CompiledQuery::compile("missing", false, true, '$').unwrap();
+        let found = snapshot
+            .search_candidates(
+                SearchSpec {
+                    query: &query,
+                    from: 0,
+                    end: 2,
+                    after_col: None,
+                },
+                &|| true,
+            )
+            .unwrap();
+        assert!(found.cancelled);
+        assert!(found.hits.is_empty());
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn literal_search_candidates_resume_after_a_character_column() {
+        let (doc, path) = disk_doc("literal-search-resume", &["前needle後needle", "needle"]);
+        let mut snapshot = doc.search_snapshot().unwrap();
+        let query = crate::search::CompiledQuery::compile("needle", false, true, '$').unwrap();
+        let found = snapshot
+            .search_candidates(
+                SearchSpec {
+                    query: &query,
+                    from: 0,
+                    end: 2,
+                    after_col: Some(8),
+                },
+                &|| false,
+            )
+            .unwrap();
+
+        assert!(!found.cancelled);
+        assert_eq!(found.scanned_to, 2);
+        assert_eq!(
+            found
+                .hits
+                .iter()
+                .map(|hit| (hit.line, hit.start, hit.end))
+                .collect::<Vec<_>>(),
+            vec![(0, 8, 14), (1, 0, 6)]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn literal_scan_reports_utf8_character_columns() {
+        let (mut doc, path) = disk_doc("literal-scan", &["前abc後abc"]);
+        let (hits, _) = doc.scan_literal("abc", true, '$', 0, 1, 64).unwrap();
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.start, hit.end))
+                .collect::<Vec<_>>(),
+            vec![(1, 4), (5, 8)]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn literal_scan_handles_a_source_line_over_the_display_limit() {
+        let prefix = "x".repeat(MAX_LINE_BYTES + 1);
+        let line = format!("{prefix}needle");
+        let (mut doc, path) = disk_doc("literal-over-display-limit", &[&line]);
+
+        let (hits, scanned_to) = doc.scan_literal("needle", true, '$', 0, 1, 64).unwrap();
+
+        assert_eq!(scanned_to, 1);
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.line, hit.notation, hit.start, hit.end))
+                .collect::<Vec<_>>(),
+            vec![(0, false, MAX_LINE_BYTES + 1, MAX_LINE_BYTES + 7)]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn literal_scan_finds_a_match_across_its_source_chunk_boundary() {
+        let line = format!("{}needle", "x".repeat(CHUNK - 3));
+        let (mut doc, path) = disk_doc("literal-chunk-boundary", &[&line]);
+
+        let (hits, _) = doc.scan_literal("needle", true, '$', 0, 1, 64).unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            (hits[0].line, hits[0].start, hits[0].end),
+            (0, CHUNK - 3, CHUNK + 3)
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn literal_scan_keeps_utf16_alignment_and_character_columns() {
+        for (encoding, alignment_line, alignment_query) in [
+            (FileEncoding::Utf16Le, "\0\u{1}Ā", "Ā"),
+            (FileEncoding::Utf16Be, "ĀĀ\u{1}", "\u{1}"),
+        ] {
+            let (mut doc, path) = encoded_disk_doc(
+                &format!("literal-{encoding:?}"),
+                &["前😀needle後", "needle", alignment_line],
+                encoding,
+                LineEnding::Lf,
+                false,
+            );
+
+            let (hits, _) = doc.scan_literal("needle", true, '$', 0, 3, 64).unwrap();
+            assert_eq!(
+                hits.iter()
+                    .map(|hit| (hit.line, hit.start, hit.end))
+                    .collect::<Vec<_>>(),
+                vec![(0, 2, 8), (1, 0, 6)]
+            );
+            let (aligned, _) = doc
+                .scan_literal(alignment_query, true, '$', 2, 1, 64)
+                .unwrap();
+            assert_eq!(
+                aligned
+                    .iter()
+                    .map(|hit| (hit.line, hit.start, hit.end))
+                    .collect::<Vec<_>>(),
+                vec![(2, 2, 3)]
+            );
+            std::fs::remove_file(path).ok();
+        }
+    }
+
+
+    #[test]
+    fn literal_scan_searches_edited_pieces_and_keeps_global_lines() {
+        let (mut doc, path) = disk_doc("literal-edited-piece", &["zero", "one", "two", "three"]);
+        doc.replace(
+            1,
+            3,
+            vec![
+                "edited needle".into(),
+                "middle".into(),
+                "needle tail".into(),
+            ],
+            1,
+            "",
+            "",
+        )
+        .unwrap();
+
+        let (hits, _) = doc
+            .scan_literal("needle", true, '$', 0, doc.line_count(), 64)
+            .unwrap();
+
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.line, hit.start, hit.end))
+                .collect::<Vec<_>>(),
+            vec![(1, 7, 13), (3, 0, 6)]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn notation_marker_suppresses_all_literal_hits_on_its_line() {
+        let (mut doc, path) = disk_doc("literal-notation", &["needle $ needle", "needle"]);
+
+        let (hits, _) = doc.scan_literal("needle", true, '$', 0, 2, 64).unwrap();
+
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.line, hit.notation, hit.start, hit.end))
+                .collect::<Vec<_>>(),
+            vec![(0, true, 0, 0), (1, false, 0, 6)]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn literal_scan_small_limit_counts_a_marker_line_once() {
+        let (mut doc, path) = disk_doc(
+            "literal-small-limit-marker",
+            &["needle $ needle", "前needle後needle", "needle"],
+        );
+
+        let (hits, scanned_to) = doc.scan_literal("needle", true, '$', 0, 3, 2).unwrap();
+
+        assert_eq!(scanned_to, 2);
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.line, hit.notation, hit.start, hit.end))
+                .collect::<Vec<_>>(),
+            vec![(0, true, 0, 0), (1, false, 1, 7)]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn literal_scan_line_numbers_are_correct_across_source_and_edit_pieces() {
+        let (mut doc, path) = disk_doc(
+            "literal-multiple-pieces",
+            &["needle 0", "one", "two", "three", "needle 4"],
+        );
+        doc.replace(2, 3, vec!["needle 2".into()], 1, "", "")
+            .unwrap();
+
+        let (hits, scanned_to) = doc.scan_literal("needle", true, '$', 0, 5, 64).unwrap();
+
+        assert_eq!(scanned_to, 5);
+        assert_eq!(
+            hits.iter().map(|hit| hit.line).collect::<Vec<_>>(),
+            vec![0, 2, 4]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn finding_lines_that_contain_a_character() {
+        let (mut doc, path) = disk_doc("contains", &["aa", "a$b", "cc", "$"]);
+        assert_eq!(doc.lines_containing(0, 3, '$').unwrap(), vec![1, 3]);
+        assert_eq!(doc.lines_containing(0, 99, '$').unwrap(), vec![1, 3]);
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn search_snapshot_maps_hits_across_intervening_edits() {
+        let (mut doc, path) = disk_doc("search-map", &["apple", "banana", "cherry"]);
+        let snap = doc.search_snapshot().unwrap();
+        // 検索スナップショット取得後に先頭に 1 行挿入
+        doc.replace(0, 0, vec!["prefix".to_string()], 1, "", "")
+            .unwrap();
+        assert_eq!(doc.line_count(), 4);
+
+        // スナップショット時点では "cherry" は 2 行目
+        let hits = vec![crate::search::ScanHit {
+            line: 2,
+            notation: false,
+            start: 0,
+            end: 6,
+        }];
+        let mapped = doc.map_search_hits(&snap, hits);
+        assert_eq!(mapped.len(), 1);
+        // 現在の文書では 3 行目へ写像されていること
+        assert_eq!(mapped[0].line, 3);
+        assert_eq!(mapped[0].start, 0);
+        assert_eq!(mapped[0].end, 6);
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn search_snapshot_invalidates_hits_overlapping_edits() {
+        let (mut doc, path) = disk_doc("search-invalid", &["apple", "banana", "cherry"]);
+        let snap = doc.search_snapshot().unwrap();
+        // 検索スナップショット取得後に "banana"（1行目）を削除
+        doc.replace(1, 2, Vec::new(), 1, "", "").unwrap();
+        assert_eq!(doc.line_count(), 2);
+
+        // スナップショット時点での "banana" ヒット
+        let hits = vec![crate::search::ScanHit {
+            line: 1,
+            notation: false,
+            start: 0,
+            end: 6,
+        }];
+        let mapped = doc.map_search_hits(&snap, hits);
+        // 削除範囲と重なっているため無効化されること
+        assert!(mapped.is_empty());
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn search_index_estimates_matches_and_updates_on_edit() {
+        let (mut doc, path) = disk_doc(
+            "index-test",
+            &["apple banana", "orange apple", "grape apple"],
+        );
+        doc.enable_search_index();
+
+        // 初期状態で "apple" が 3 件推定されること
+        let re = regex::Regex::new("apple").unwrap();
+        assert_eq!(doc.estimate_matches(&re).unwrap(), 3);
+
+        // 1行目を置換して "apple" を減らす
+        doc.replace(
+            0,
+            1,
+            vec!["kiwi banana".to_string()],
+            1,
+            "apple banana",
+            "kiwi banana",
+        )
+        .unwrap();
+
+        // 差分キャッシュにより推定件数が 2 件になること
+        assert_eq!(doc.estimate_matches(&re).unwrap(), 2);
+
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn search_index_treats_structure_format_as_raw_text() {
+        // 構造フォーマット・数式記法を含むテキストもフィルタリングせずそのまま bi-gram インデックス化されること
+        let (mut doc, path) = disk_doc(
+            "index-notation-test",
+            &["formula: $(E = mc^2)$", "text line", "another $(x + y)$"],
+        );
+        doc.enable_search_index();
+
+        let re = regex::Regex::new(r"\$\(").unwrap();
+        // 記法プレフィックス "$(" を含む箇所が 2 件推定されること
+        assert_eq!(doc.estimate_matches(&re).unwrap(), 2);
+
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn search_index_undo_redo_updates_deltas() {
+        let (mut doc, path) = disk_doc(
+            "index-undo-test",
+            &["apple banana", "orange apple", "grape apple"],
+        );
+        doc.enable_search_index();
+
+        let re = regex::Regex::new("apple").unwrap();
+        assert_eq!(doc.estimate_matches(&re).unwrap(), 3);
+
+        // 1行目を置換
+        doc.replace(
+            0,
+            1,
+            vec!["kiwi banana".to_string()],
+            1,
+            "apple banana",
+            "kiwi banana",
+        )
+        .unwrap();
+        assert_eq!(doc.estimate_matches(&re).unwrap(), 2);
+
+        // undo で差分キャッシュが元に戻り、3 件になること
+        doc.undo().unwrap();
+        assert_eq!(doc.estimate_matches(&re).unwrap(), 3);
+
+        // redo で再度 2 件になること
+        doc.redo().unwrap();
+        assert_eq!(doc.estimate_matches(&re).unwrap(), 2);
+
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn search_candidates_finds_distant_matches_efficiently() {
+        use crate::search::{CompiledQuery, SearchSpec};
+
+        // 512KB を超える複数ブロックのファイルを作成し、遠いブロックのみにターゲットを配置
+        let mut lines = Vec::new();
+        // 1行約100バイト * 15,000行 = 約1.5MB（約3ブロック分）
+        let padding = "x".repeat(95);
+        for _ in 0..15_000 {
+            lines.push(padding.clone());
+        }
+        lines.push("hello target_needle world".to_string());
+        lines.push(padding);
+
+        let lines_ref: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        let (mut doc, path) = disk_doc("distant-block-test", &lines_ref);
+        doc.enable_search_index();
+
+        let compiled = CompiledQuery::compile("target_needle", false, true, '\0').unwrap();
+        let spec = SearchSpec {
+            query: &compiled,
+            from: 0,
+            end: doc.line_count(),
+            after_col: None,
+        };
+        let candidates = doc.search_candidates(spec, &|| false).unwrap();
+        assert!(!candidates.cancelled);
+        assert_eq!(candidates.hits.len(), 1);
+        assert_eq!(candidates.hits[0].line, 15_000);
+        assert_eq!(candidates.hits[0].start, 6);
+
+        std::fs::remove_file(path).ok();
+    }
+
+
+    /// 回帰: 1 行に 64 件を超える一致がある場合でも、after_col の後ろの
+    /// 一致が切り捨てられずに返ることを検証する。
+    #[test]
+    fn search_returns_matches_beyond_64_within_a_line() {
+        // 1 行に 70 個の "m" を含む行を作る
+        let many = "m ".repeat(70);
+        let (mut doc, path) = disk_doc("many-matches", &[&many, "tail"]);
+        let query = crate::search::CompiledQuery::compile("m", false, true, '$').unwrap();
+
+        // after_col を 65 件目のあたりへ置いて検索し、残りの一致が返ること
+        let found = doc
+            .search_candidates(
+                SearchSpec {
+                    query: &query,
+                    from: 0,
+                    end: 2,
+                    after_col: Some(130),
+                },
+                &|| false,
+            )
+            .unwrap();
+        assert!(
+            !found.hits.is_empty(),
+            "after_col 以降の一致が返ること（64件上限で潰れない）"
+        );
+        // 返った一致はすべて after_col 以降
+        for hit in &found.hits {
+            assert!(hit.notation || hit.line > 0 || hit.start >= 130);
+        }
+        std::fs::remove_file(path).ok();
+    }
+
 }

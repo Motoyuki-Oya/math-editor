@@ -1707,3 +1707,585 @@ impl Document {
     }
 }
 
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::source::{FileEncoding, LineEnding};
+    use crate::test_utils::*;
+
+    #[test]
+    fn opening_indexes_lines_without_holding_the_contents() {
+        let (mut doc, path) = disk_doc("open", &["ab", "", "cd"]);
+        assert_eq!(doc.line_count(), 3);
+        assert_eq!(all(&mut doc), vec!["ab", "", "cd"]);
+        assert_eq!(doc.read(2, 1).unwrap(), vec!["cd"]);
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn replacing_lines_and_undoing_restores_the_document() {
+        let (mut doc, path) = disk_doc("undo", &["a", "b", "c"]);
+        doc.replace(1, 2, vec!["X".into(), "Y".into()], 1, "before", "after")
+            .unwrap();
+        assert_eq!(all(&mut doc), vec!["a", "X", "Y", "c"]);
+        let undone = doc.undo().unwrap().unwrap();
+        assert_eq!(undone.state, "before");
+        assert_eq!(undone.touched_from, 1);
+        assert_eq!(all(&mut doc), vec!["a", "b", "c"]);
+        let redone = doc.redo().unwrap().unwrap();
+        assert_eq!(redone.state, "after");
+        assert_eq!(all(&mut doc), vec!["a", "X", "Y", "c"]);
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn no_op_edit_and_undo_keep_zero_removed_lines() {
+        let (mut doc, path) = disk_doc("no-op", &["a", "b"]);
+        doc.replace(1, 1, Vec::new(), 1, "before", "after").unwrap();
+
+        assert_eq!(doc.log_first_tx_removed_lines_for_test(), 0);
+        assert_eq!(all(&mut doc), vec!["a", "b"]);
+        let undone = doc.undo().unwrap().unwrap();
+        assert_eq!(undone.state, "before");
+        assert_eq!(all(&mut doc), vec!["a", "b"]);
+        assert_eq!(doc.redo().unwrap().unwrap().state, "after");
+        assert_eq!(all(&mut doc), vec!["a", "b"]);
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn steps_in_the_same_group_undo_together() {
+        let (mut doc, path) = disk_doc("group", &["a", "b", "c"]);
+        // 「すべて置換」のように、複数の置き換えが 1 つのグループで届く。
+        doc.replace(2, 3, vec!["C".into()], 7, "start", "mid")
+            .unwrap();
+        doc.replace(0, 1, vec!["A".into()], 7, "ignored", "end")
+            .unwrap();
+        assert_eq!(all(&mut doc), vec!["A", "b", "C"]);
+        let undone = doc.undo().unwrap().unwrap();
+        assert_eq!(all(&mut doc), vec!["a", "b", "c"]);
+        assert_eq!(undone.state, "start");
+        assert_eq!(undone.touched_from, 0);
+        assert!(doc.undo().unwrap().is_none());
+        let redone = doc.redo().unwrap().unwrap();
+        assert_eq!(all(&mut doc), vec!["A", "b", "C"]);
+        assert_eq!(redone.state, "end");
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn different_groups_undo_one_at_a_time() {
+        let mut doc = Document::empty();
+        doc.replace(0, 1, vec!["b".into()], 1, "s1", "e1").unwrap();
+        doc.replace(0, 1, vec!["c".into()], 2, "s2", "e2").unwrap();
+        doc.undo().unwrap();
+        assert_eq!(all(&mut doc), vec!["b"]);
+        doc.undo().unwrap();
+        assert_eq!(all(&mut doc), vec![""]);
+    }
+
+
+    #[test]
+    fn a_new_edit_clears_the_redo_branch() {
+        let mut doc = Document::empty();
+        doc.replace(0, 1, vec!["b".into()], 1, "", "").unwrap();
+        doc.undo().unwrap();
+        doc.replace(0, 1, vec!["c".into()], 2, "", "").unwrap();
+        assert!(doc.redo().unwrap().is_none());
+        assert_eq!(all(&mut doc), vec!["c"]);
+    }
+
+
+    #[test]
+    fn multiple_sequential_edits_in_one_group_undo_and_redo_correctly() {
+        let mut doc = Document::empty();
+        // 文字入力のように同一グループで順次行が置き換わる
+        doc.replace(0, 1, vec!["a".into()], 1, "0.0-0.0", "0.1-0.1")
+            .unwrap();
+        doc.replace(0, 1, vec!["ab".into()], 1, "", "0.2-0.2")
+            .unwrap();
+        doc.replace(0, 1, vec!["abc".into()], 1, "", "0.3-0.3")
+            .unwrap();
+        assert_eq!(all(&mut doc), vec!["abc"]);
+
+        // Undo 実行: 最初の "" (空) に戻る
+        let undone = doc.undo().unwrap().unwrap();
+        assert_eq!(undone.state, "0.0-0.0");
+        assert_eq!(all(&mut doc), vec![""]);
+
+        // Redo 実行: 最終状態 "abc" に正しく戻る（中間の "a" や "ab" に巻き戻らない）
+        let redone = doc.redo().unwrap().unwrap();
+        assert_eq!(redone.state, "0.3-0.3");
+        assert_eq!(all(&mut doc), vec!["abc"]);
+
+        // 再度 Undo 実行: 再び空に戻る
+        let undone2 = doc.undo().unwrap().unwrap();
+        assert_eq!(undone2.state, "0.0-0.0");
+        assert_eq!(all(&mut doc), vec![""]);
+    }
+
+
+    #[test]
+    fn out_of_range_replacements_are_rejected() {
+        let mut doc = Document::empty();
+        assert!(doc.replace(0, 2, vec![], 1, "", "").is_err());
+        assert!(doc.replace(1, 0, vec![], 1, "", "").is_err());
+    }
+
+
+    #[test]
+    fn assembling_a_range_uses_edges_and_overrides() {
+        let (mut doc, path) = disk_doc("assemble", &["aa", "bb", "cc", "dd"]);
+        let overrides = std::collections::HashMap::from([(2usize, "CC".to_string())]);
+        assert_eq!(
+            doc.assemble(0, Some("a".into()), 3, Some("d".into()), &overrides)
+                .unwrap(),
+            "a\nbb\nCC\nd"
+        );
+        assert_eq!(
+            doc.assemble(1, None, 1, None, &Default::default()).unwrap(),
+            "bb"
+        );
+        assert!(doc.assemble(0, None, 4, None, &Default::default()).is_err());
+        std::fs::remove_file(path).ok();
+    }
+
+
+    /// 【回帰防止テスト】
+    /// assemble の実体化が MAX_ASSEMBLE_BYTES（10MB）を超える場合、
+    /// 安全のためにエラーを返し、巨大なヒープ確保によるプロセス圧迫を防ぐ。
+    #[test]
+    fn assemble_enforces_max_bytes_limit() {
+        let large_line = "A".repeat(1024 * 1024); // 1MB の行
+        let lines: Vec<String> = vec![large_line.clone(); 12]; // 12MB 分
+        let lines_ref: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (mut doc, path) = disk_doc("assemble-limit", &lines_ref);
+
+        let overrides = std::collections::HashMap::default();
+        let res = doc.assemble(0, None, 11, None, &overrides);
+        assert!(res.is_err(), "10MB を超える assemble はエラーを返すこと");
+        assert!(
+            res.unwrap_err().contains("上限10MB"),
+            "エラーメッセージに上限情報が含まれること"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+
+    /// 【回帰防止テスト】
+    /// 編集バッファと操作ログのメモリ使用量が memory_usage() で正しく追跡されることを保証する。
+    #[test]
+    fn document_memory_usage_tracks_edits() {
+        let (mut doc, path) = disk_doc("memory-tracking", &["hello", "world"]);
+        let initial_memory = doc.memory_usage();
+
+        doc.replace(1, 2, vec!["new content line".into()], 1, "", "")
+            .unwrap();
+        let edited_memory = doc.memory_usage();
+        assert!(
+            edited_memory > initial_memory,
+            "編集によりメモリ追跡値が増加すること"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn trailing_newline_final_empty_line_edits_target_the_right_range() {
+        for line_ending in [LineEnding::Lf, LineEnding::CrLf] {
+            for (operation, inserted, edited) in [
+                ("edit", vec!["edited"], vec!["head", "edited"]),
+                (
+                    "replace",
+                    vec!["replacement one", "replacement two"],
+                    vec!["head", "replacement one", "replacement two"],
+                ),
+                ("delete", Vec::new(), vec!["head"]),
+            ] {
+                let name = format!("trailing-{line_ending:?}-{operation}");
+                let (mut doc, path) =
+                    encoded_disk_doc(&name, &["head"], FileEncoding::Utf8, line_ending, true);
+                assert_encoded_document_state(&mut doc, &["head", ""]);
+
+                doc.replace(
+                    1,
+                    2,
+                    inserted.into_iter().map(str::to_string).collect(),
+                    1,
+                    "before",
+                    "after",
+                )
+                .unwrap();
+                assert_encoded_document_state(&mut doc, &edited);
+
+                let undone = doc.undo().unwrap().unwrap();
+                assert_eq!(undone.state, "before");
+                assert_encoded_document_state(&mut doc, &["head", ""]);
+                let redone = doc.redo().unwrap().unwrap();
+                assert_eq!(redone.state, "after");
+                assert_encoded_document_state(&mut doc, &edited);
+                std::fs::remove_file(path).ok();
+            }
+        }
+    }
+
+
+    #[test]
+    fn edited_separators_match_document_line_ending_and_encoding() {
+        for (encoding, line_ending) in [
+            (FileEncoding::Utf8, LineEnding::Lf),
+            (FileEncoding::Utf8, LineEnding::CrLf),
+            (FileEncoding::Utf8, LineEnding::Cr),
+            (FileEncoding::Utf16Le, LineEnding::CrLf),
+            (FileEncoding::Utf16Be, LineEnding::Cr),
+        ] {
+            let name = format!("separator-{encoding:?}-{line_ending:?}");
+            let (mut doc, path) =
+                encoded_disk_doc(&name, &["head", "tail"], encoding, line_ending, false);
+            doc.replace(1, 1, vec!["左".into(), "右".into()], 1, "before", "after")
+                .unwrap();
+            assert_encoded_document_state(&mut doc, &["head", "左", "右", "tail"]);
+
+            let saved = format!("{path}.saved");
+            doc.save(&saved).unwrap();
+            let expected_text = ["head", "左", "右", "tail"]
+                .join(std::str::from_utf8(line_ending.as_bytes()).unwrap());
+            let expected_bytes = match encoding {
+                FileEncoding::Utf16Le | FileEncoding::Utf16Be => {
+                    utf16_file_bytes(&expected_text, encoding)
+                }
+                _ => encoded_text(&expected_text, encoding),
+            };
+            assert_eq!(std::fs::read(&saved).unwrap(), expected_bytes);
+
+            assert_eq!(doc.undo().unwrap().unwrap().state, "before");
+            assert_encoded_document_state(&mut doc, &["head", "tail"]);
+            assert_eq!(doc.redo().unwrap().unwrap().state, "after");
+            assert_encoded_document_state(&mut doc, &["head", "左", "右", "tail"]);
+            std::fs::remove_file(path).ok();
+            std::fs::remove_file(saved).ok();
+        }
+    }
+
+
+    #[test]
+    fn boundary_separators_survive_insertions_and_replacements() {
+        for (name, from, to, inserted, expected) in [
+            (
+                "replace-start",
+                0,
+                1,
+                vec!["A", "AA"],
+                vec!["A", "AA", "b", "c"],
+            ),
+            (
+                "replace-middle",
+                1,
+                2,
+                vec!["B", "BB"],
+                vec!["a", "B", "BB", "c"],
+            ),
+            (
+                "replace-eof",
+                2,
+                3,
+                vec!["C", "CC"],
+                vec!["a", "b", "C", "CC"],
+            ),
+            (
+                "insert-start",
+                0,
+                0,
+                vec!["H", "HH"],
+                vec!["H", "HH", "a", "b", "c"],
+            ),
+            (
+                "insert-middle",
+                1,
+                1,
+                vec!["M", "MM"],
+                vec!["a", "M", "MM", "b", "c"],
+            ),
+            (
+                "insert-eof",
+                3,
+                3,
+                vec!["T", "TT"],
+                vec!["a", "b", "c", "T", "TT"],
+            ),
+        ] {
+            let (mut doc, path) = disk_doc(name, &["a", "b", "c"]);
+            doc.replace(
+                from,
+                to,
+                inserted.into_iter().map(str::to_string).collect(),
+                1,
+                "",
+                "",
+            )
+            .unwrap();
+            let expected: Vec<String> = expected.into_iter().map(str::to_string).collect();
+            assert_document_state(&mut doc, &expected);
+            std::fs::remove_file(path).ok();
+        }
+    }
+
+
+    #[test]
+    fn document_boundaries_stay_consistent_beyond_node_capacity() {
+        let (mut doc, path) = disk_doc("many-pieces", &["base"]);
+        let mut expected = vec!["base".to_string()];
+        for i in 0..24 {
+            let line = format!("line-{i}");
+            let at = doc.line_count();
+            doc.replace(at, at, vec![line.clone()], i + 1, "", "")
+                .unwrap();
+            expected.push(line);
+        }
+        doc.replace(
+            9,
+            15,
+            vec!["middle-a".into(), "middle-b".into(), "middle-c".into()],
+            100,
+            "",
+            "",
+        )
+        .unwrap();
+        expected.splice(
+            9..15,
+            ["middle-a", "middle-b", "middle-c"].map(str::to_string),
+        );
+        assert_document_state(&mut doc, &expected);
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn oversized_delete_is_rejected_without_mutating_the_document() {
+        let mut doc = Document::empty();
+        let line = "a".repeat(5 * 1024 * 1024);
+        doc.replace(
+            0,
+            1,
+            vec![line.clone(), line.clone(), line.clone(), line.clone(), line],
+            1,
+            "before",
+            "after",
+        )
+        .unwrap();
+        let undo_len = doc.log_head_for_test();
+
+        assert!(doc
+            .replace(0, 5, Vec::new(), 2, "before delete", "after delete")
+            .is_err());
+        assert_eq!(doc.line_count(), 5);
+        assert_eq!(doc.read(4, 1).unwrap().len(), 1);
+        assert_eq!(doc.log_head_for_test(), undo_len);
+    }
+
+
+    #[test]
+    fn replace_lines_with_base_revision_maps_old_coordinates() {
+        let (mut doc, path) = disk_doc("base-rev-map", &["line0", "line1", "line2", "line3"]);
+        let base_rev = doc.revision();
+
+        // 別の編集が先頭に入って revision が進む
+        doc.replace(0, 0, vec!["new0".to_string()], 1, "", "")
+            .unwrap();
+        assert_eq!(doc.line_count(), 5);
+
+        // 古い base_rev を基準にした「line2（旧2行目）の置換」を適用
+        doc.replace_with_base(
+            base_rev,
+            2,
+            3,
+            vec!["replaced_line2".to_string()],
+            2,
+            "",
+            "",
+        )
+        .unwrap();
+
+        // 現在座標（3行目）が置換されていること
+        let lines = doc.read(0, doc.line_count()).unwrap();
+        assert_eq!(
+            lines,
+            vec!["new0", "line0", "line1", "replaced_line2", "line3"]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn bulk_replace_all_is_evaluated_on_demand_and_undoable() {
+        let (mut doc, path) = disk_doc("bulk-test", &["foo 123", "bar 456", "foo 789"]);
+        let base_rev = doc.revision();
+        let pattern = regex::RegexBuilder::new("foo")
+            .case_insensitive(true)
+            .build()
+            .unwrap();
+        let op = crate::operation_log::BulkOperation::ReplaceAll {
+            from_line: 0,
+            to_line: 3,
+            query: "foo".to_string(),
+            replacement: "baz".to_string(),
+            case_sensitive: false,
+            pattern: std::sync::Arc::new(pattern),
+        };
+        doc.apply_bulk_operation(base_rev, 1, op, "", "").unwrap();
+
+        // オンデマンドに評価されて置換結果が返ること
+        let lines = doc.read(0, 3).unwrap();
+        assert_eq!(lines, vec!["baz 123", "bar 456", "baz 789"]);
+
+        // Undo すると瞬時に元に戻ること
+        doc.undo().unwrap().unwrap();
+        let restored = doc.read(0, 3).unwrap();
+        assert_eq!(restored, vec!["foo 123", "bar 456", "foo 789"]);
+
+        // Redo すると再度適用されること
+        doc.redo().unwrap().unwrap();
+        let reapplied = doc.read(0, 3).unwrap();
+        assert_eq!(reapplied, vec!["baz 123", "bar 456", "baz 789"]);
+
+        std::fs::remove_file(path).ok();
+    }
+
+
+    /// 回帰: 同一 group の連続編集で既存トランザクションの revision が上書きされず、
+    /// 保存直後に続けてタイプしても saved checkpoint が壊れないことを検証する。
+    #[test]
+    fn merging_edits_keeps_revisions_immutable() {
+        let (mut doc, path) = disk_doc("merge-revision", &["a", "b"]);
+        // 保存して saved checkpoint を作る
+        doc.save(&path).unwrap();
+        let saved_rev = doc.revision();
+        assert!(doc.is_clean());
+
+        // 同一 group で連続タイプ（マージが発生する）
+        doc.replace(0, 1, vec!["a1".into()], 1, "", "").unwrap();
+        let rev1 = doc.revision();
+        assert!(!doc.is_clean());
+        doc.replace(0, 1, vec!["a12".into()], 1, "", "").unwrap();
+        let rev2 = doc.revision();
+
+        // マージは既存トランザクションへ追記するだけで、公開済みの revision を
+        // 書き換えない（保存済み checkpoint が破壊されない）。
+        assert_eq!(rev1, rev2, "マージで公開 revision を上書きしない");
+        assert!(
+            doc.log_validate_base_for_test(rev1).is_ok(),
+            "公開済み revision は残る"
+        );
+        assert!(
+            doc.log_validate_base_for_test(saved_rev).is_ok(),
+            "saved checkpoint は残る"
+        );
+        assert!(!doc.is_clean(), "内容が変わっているので dirty のまま");
+
+        // Undo すると saved 直後の状態へ 1 ステップで戻る（saved を飛び越さない）
+        doc.undo().unwrap();
+        assert!(doc.is_clean(), "Undo で saved checkpoint へ戻る");
+        assert_eq!(all(&mut doc), vec!["a", "b"]);
+        std::fs::remove_file(path).ok();
+    }
+
+
+    /// 回帰: Undo 後の Redo 枝にしか存在しない revision を基準にした編集を拒否する。
+    #[test]
+    fn validate_base_rejects_redo_branch_revisions() {
+        let (mut doc, path) = disk_doc("redo-branch", &["x"]);
+        doc.replace(0, 1, vec!["y".into()], 1, "", "").unwrap();
+        let undone_rev = doc.revision();
+
+        // Undo して現在 head を巻き戻す（undone_rev は Redo 枝にだけ残る）
+        doc.undo().unwrap();
+        assert_eq!(all(&mut doc), vec!["x"]);
+
+        // Redo 枝の revision を base にした編集は拒否される
+        let result = doc.replace_with_base(undone_rev, 0, 1, vec!["z".into()], 2, "", "");
+        assert!(result.is_err(), "Redo 枝の revision は受け付けない");
+        std::fs::remove_file(path).ok();
+    }
+
+
+    /// 回帰: 小さいファイルで bulk（すべて置換）を保存した後、
+    /// 変換済みの行へ同じ規則が再適用されず（foo→foofoo の二重化）、
+    /// Undo が正しく元の内容へ戻ることを検証する。
+    #[test]
+    fn bulk_replace_all_survives_save_without_double_apply() {
+        let (mut doc, path) = disk_doc("bulk-save", &["foo a", "bar b", "foo c"]);
+        let base_rev = doc.revision();
+        let pattern = regex::RegexBuilder::new("foo").build().unwrap();
+        let op = crate::operation_log::BulkOperation::ReplaceAll {
+            from_line: 0,
+            to_line: 3,
+            query: "foo".to_string(),
+            replacement: "baz".to_string(),
+            case_sensitive: true,
+            pattern: std::sync::Arc::new(pattern),
+        };
+        doc.apply_bulk_operation(base_rev, 1, op, "", "").unwrap();
+        assert_eq!(all(&mut doc), vec!["baz a", "bar b", "baz c"]);
+
+        // 保存（小さいファイルは Undo 履歴を保持する分岐）
+        doc.save(&path).unwrap();
+        assert!(doc.is_clean());
+
+        // 二重適用されていないこと
+        assert_eq!(all(&mut doc), vec!["baz a", "bar b", "baz c"]);
+
+        // Undo で bulk が元へ戻ること（マテリアライズ済み splice として）
+        doc.undo().unwrap();
+        assert_eq!(all(&mut doc), vec!["foo a", "bar b", "foo c"]);
+
+        // Redo で再適用されること
+        doc.redo().unwrap();
+        assert_eq!(all(&mut doc), vec!["baz a", "bar b", "baz c"]);
+        std::fs::remove_file(path).ok();
+    }
+
+
+    /// 回帰: bulk 操作（すべて置換）の後に通常編集が入っても、
+    /// 後続の新規テキストへ過去の bulk 規則が勝手に適用されず、
+    /// Undo も各段階へ正しく戻ることを検証する。
+    #[test]
+    fn new_edits_after_bulk_are_not_transformed_retroactively() {
+        let (mut doc, path) = disk_doc("bulk-edit-seq", &["foo 1", "bar 2", "foo 3"]);
+        let base_rev = doc.revision();
+        let pattern = regex::RegexBuilder::new("foo").build().unwrap();
+        let op = crate::operation_log::BulkOperation::ReplaceAll {
+            from_line: 0,
+            to_line: 3,
+            query: "foo".to_string(),
+            replacement: "baz".to_string(),
+            case_sensitive: true,
+            pattern: std::sync::Arc::new(pattern),
+        };
+        doc.apply_bulk_operation(base_rev, 1, op, "", "").unwrap();
+        assert_eq!(all(&mut doc), vec!["baz 1", "bar 2", "baz 3"]);
+
+        // bulk 適用後に、範囲内に新たな "foo new" を通常挿入する
+        doc.replace(1, 1, vec!["foo new".to_string()], 2, "", "foo new")
+            .unwrap();
+
+        // 挿入された "foo new" は "baz new" に書き換わらずそのまま残ること
+        assert_eq!(all(&mut doc), vec!["baz 1", "foo new", "bar 2", "baz 3"]);
+
+        // 1回目の Undo で通常編集（foo new の挿入）が取り消されること
+        doc.undo().unwrap();
+        assert_eq!(all(&mut doc), vec!["baz 1", "bar 2", "baz 3"]);
+
+        // 2回目の Undo で bulk 操作自体が取り消されて初期状態に戻ること
+        doc.undo().unwrap();
+        assert_eq!(all(&mut doc), vec!["foo 1", "bar 2", "foo 3"]);
+
+        std::fs::remove_file(path).ok();
+    }
+
+}

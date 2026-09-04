@@ -9,7 +9,7 @@ mod search;
 mod search_index;
 mod source;
 #[cfg(test)]
-mod store;
+mod test_utils;
 
 use document::Document;
 pub use search::CompiledQuery;

@@ -1238,4 +1238,454 @@ mod tests {
 
         std::fs::remove_file(path).ok();
     }
+
+    use crate::document::Document;
+    use crate::search::SearchSpec;
+    use crate::test_utils::*;
+
+    #[test]
+    fn background_scan_confirms_and_reads_the_empty_final_line() {
+        let path = std::env::temp_dir().join(format!(
+            "planetext-store-{}-background-final.txt",
+            std::process::id()
+        ));
+        let line = "0123456789\n";
+        let complete_lines = 100_000usize;
+        std::fs::write(&path, line.repeat(complete_lines)).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let (mut doc, scan) = Document::open(&path).unwrap();
+        assert!(scan.is_some());
+        assert_eq!(doc.read_tail(2).unwrap(), vec!["0123456789", ""]);
+        scan.unwrap().run().unwrap();
+        doc.confirm_scan();
+        assert_eq!(doc.line_count(), complete_lines + 1);
+        assert_eq!(doc.read(complete_lines, 1).unwrap(), vec![""]);
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn replacing_provisional_final_line_preserves_pending_source_suffix() {
+        let path = std::env::temp_dir().join(format!(
+            "planetext-store-{}-background-provisional-final.txt",
+            std::process::id()
+        ));
+        let source_lines = 100_000usize;
+        let source = (0..source_lines)
+            .map(|line| format!("source line {line:06}\n"))
+            .collect::<String>();
+        std::fs::write(&path, &source).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let (mut doc, scan) = Document::open(&path).unwrap();
+        let scan = scan.expect("the file must exceed the initial scan chunk");
+        let provisional_line = doc.line_count() - 1;
+        let original = doc.read(provisional_line, 1).unwrap();
+
+        doc.replace(
+            provisional_line,
+            provisional_line + 1,
+            vec!["edited provisional line".into()],
+            1,
+            "before",
+            "after",
+        )
+        .unwrap();
+        scan.run().unwrap();
+        doc.confirm_scan();
+
+        assert_eq!(doc.line_count(), source_lines + 1);
+        assert_eq!(
+            doc.read(provisional_line, 2).unwrap(),
+            vec![
+                "edited provisional line".to_string(),
+                format!("source line {:06}", provisional_line + 1),
+            ]
+        );
+        assert_eq!(
+            doc.read(source_lines - 1, 2).unwrap(),
+            vec![format!("source line {:06}", source_lines - 1), "".into()]
+        );
+
+        let undone = doc.undo().unwrap().unwrap();
+        assert_eq!(undone.state, "before");
+        assert_eq!(doc.line_count(), source_lines + 1);
+        assert_eq!(doc.read(provisional_line, 1).unwrap(), original);
+        assert_eq!(
+            doc.read(source_lines - 1, 2).unwrap(),
+            vec![format!("source line {:06}", source_lines - 1), "".into()]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn confirming_background_scan_preserves_prior_edits_and_history() {
+        let path = std::env::temp_dir().join(format!(
+            "planetext-store-{}-background-edited.txt",
+            std::process::id()
+        ));
+        let source_line = "0123456789 source line\n";
+        let source_lines = 60_000usize;
+        let source_bytes = source_line.repeat(source_lines);
+        std::fs::write(&path, &source_bytes).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let (mut doc, scan) = Document::open(&path).unwrap();
+        let scan = scan.expect("the file must exceed the initial scan chunk");
+
+        doc.replace(
+            1,
+            2,
+            vec!["edited one".into(), "edited two".into()],
+            1,
+            "before",
+            "after",
+        )
+        .unwrap();
+        scan.run().unwrap();
+        doc.confirm_scan();
+
+        assert_eq!(doc.line_count(), source_lines + 2);
+        assert_eq!(doc.pieces_line_count_for_test(), source_lines + 2);
+        assert_eq!(doc.pieces_newline_count_for_test(), source_lines + 1);
+        assert_eq!(
+            doc.bytes(),
+            source_bytes.len() - "0123456789 source line".len() + "edited one\nedited two".len()
+        );
+        assert_eq!(
+            doc.read(0, 4).unwrap(),
+            vec![
+                "0123456789 source line",
+                "edited one",
+                "edited two",
+                "0123456789 source line"
+            ]
+        );
+
+        let undone = doc.undo().unwrap().unwrap();
+        assert_eq!(undone.state, "before");
+        assert_eq!(doc.line_count(), source_lines + 1);
+        assert_eq!(doc.pieces_newline_count_for_test(), source_lines);
+        assert_eq!(doc.bytes(), source_bytes.len());
+        assert_eq!(doc.read(0, 3).unwrap(), vec!["0123456789 source line"; 3]);
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn sparse_mark_at_eof_exposes_the_final_empty_line() {
+        let path = std::env::temp_dir().join(format!(
+            "planetext-store-{}-stride-final-empty.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, "\n".repeat(STRIDE)).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let (mut doc, scan) =
+            Document::open_with_encoding(&path, Some(FileEncoding::Utf8)).unwrap();
+
+        assert!(scan.is_none());
+        assert_eq!(doc.source_sparse_mark_for_test(1), doc.source_bytes_for_test());
+        assert_eq!(doc.line_count(), STRIDE + 1);
+        assert_eq!(doc.read(STRIDE, 1).unwrap(), vec![""]);
+        std::fs::remove_file(path).ok();
+    }
+
+
+    /// 間引きの索引: STRIDE を越える文書でも、行は最寄りの索引から読み流して届く。
+    #[test]
+    fn far_lines_are_reached_through_the_sparse_index() {
+        let lines: Vec<String> = (0..STRIDE * 2 + 5).map(|i| format!("line {i}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (mut doc, path) = disk_doc("stride", &refs);
+        assert_eq!(doc.line_count(), STRIDE * 2 + 5);
+        assert_eq!(
+            doc.read(STRIDE + 3, 2).unwrap(),
+            vec![
+                format!("line {}", STRIDE + 3),
+                format!("line {}", STRIDE + 4)
+            ]
+        );
+        assert_eq!(
+            doc.read(STRIDE * 2 + 4, 5).unwrap(),
+            vec![format!("line {}", STRIDE * 2 + 4)]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn multi_piece_callbacks_keep_global_line_numbers() {
+        let (mut doc, path) = disk_doc("global-lines", &["a", "b", "c", "d", "e", "f"]);
+        doc.replace(
+            3,
+            4,
+            vec!["x".into(), "$one".into(), "y$".into()],
+            1,
+            "",
+            "",
+        )
+        .unwrap();
+        assert_eq!(doc.lines_containing(0, 99, '$').unwrap(), vec![4, 5]);
+        let overrides = std::collections::HashMap::from([(5, "override".to_string())]);
+        assert_eq!(
+            doc.assemble(2, None, 6, None, &overrides).unwrap(),
+            "c\nx\n$one\noverride\ne"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+
+    /// EOF seekによる末尾読みの実測。行数走査は開始しない。
+    #[test]
+    #[ignore]
+    fn scale_check_reading_the_tail_without_line_count() {
+        let path = r"C:\workspace\test-800mb.txt";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let (mut doc, _scan) = Document::open(path).unwrap();
+        let start = std::time::Instant::now();
+        let tail = doc.read_tail(100).unwrap();
+        println!("read tail: {:?} ({} lines)", start.elapsed(), tail.len());
+        assert_eq!(tail.len(), 100);
+    }
+
+
+    /// 先頭1MBの同期読みと、残りの行数・間引き索引走査だけの実測。
+    #[test]
+    #[ignore]
+    fn scale_check_counting_lines() {
+        let path = r"C:\workspace\test-800mb.txt";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let start = std::time::Instant::now();
+        let (mut doc, scan) = Document::open(path).unwrap();
+        let opened = start.elapsed();
+        let start = std::time::Instant::now();
+        if let Some(scan) = scan {
+            scan.run().unwrap();
+        }
+        doc.confirm_scan();
+        println!(
+            "open: {opened:?}, scan: {:?}, lines: {}",
+            start.elapsed(),
+            doc.line_count()
+        );
+        assert_eq!(doc.line_count(), 16_000_001);
+    }
+
+
+    /// 規模の実測: `cargo test -p planetext --release -- --ignored --nocapture`。
+    /// C:\workspace\test-800mb.txt がある環境でだけ動く。
+    #[test]
+    #[ignore]
+    fn scale_check_opening_a_huge_file() {
+        let path = r"C:\workspace\test-800mb.txt";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let start = std::time::Instant::now();
+        let (mut doc, scan) = Document::open(path).unwrap();
+        println!(
+            "open (scanned {} lines): {:?}",
+            doc.line_count(),
+            start.elapsed()
+        );
+        let start = std::time::Instant::now();
+        if let Some(scan) = scan {
+            scan.run().unwrap();
+        }
+        doc.confirm_scan();
+        println!(
+            "scan (exact {} lines): {:?}",
+            doc.line_count(),
+            start.elapsed()
+        );
+        let start = std::time::Instant::now();
+        let middle = doc.read(doc.line_count() / 2, 100).unwrap();
+        println!(
+            "read 100 lines: {:?} ({} lines)",
+            start.elapsed(),
+            middle.len()
+        );
+        let missing = "planetext-not-present";
+        let start = std::time::Instant::now();
+        let _ = doc
+            .scan_literal(missing, true, '$', 0, doc.line_count(), 64)
+            .unwrap();
+        println!("literal full scan: {:?}", start.elapsed());
+        let start = std::time::Instant::now();
+        let _ = doc
+            .scan_literal("PLANETEXT-NOT-PRESENT", false, '$', 0, doc.line_count(), 64)
+            .unwrap();
+        println!("ASCII fold full scan: {:?}", start.elapsed());
+        let mut snapshot = doc.search_snapshot().unwrap();
+        let query = crate::search::CompiledQuery::compile(missing, false, true, '$').unwrap();
+        let start = std::time::Instant::now();
+        let searched = snapshot
+            .search_candidates(
+                SearchSpec {
+                    query: &query,
+                    from: 0,
+                    end: doc.line_count(),
+                    after_col: None,
+                },
+                &|| false,
+            )
+            .unwrap();
+        println!(
+            "single native job ({} hits): {:?}",
+            searched.hits.len(),
+            start.elapsed()
+        );
+        let start = std::time::Instant::now();
+        let estimate = doc
+            .estimate_matches(&regex::Regex::new("fox").unwrap())
+            .unwrap();
+        println!("estimate ({estimate} matches): {:?}", start.elapsed());
+    }
+
+
+    /// 巨大な行を含むファイルで MAX_READ_BYTES ガードが正しく働き、
+    /// 1回の read で 20MB を超えずに安全に打ち切られることを検証する。
+    #[test]
+    fn huge_lines_are_capped_at_max_read_bytes() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("planetext-huge-lines-test.txt");
+        // 5MBの行を10行（合計50MB）書き込む
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut writer = std::io::BufWriter::new(file);
+            let big_line = "a".repeat(5 * 1024 * 1024);
+            for i in 0..10 {
+                use std::io::Write;
+                if i > 0 {
+                    writeln!(writer).unwrap();
+                }
+                write!(writer, "{big_line}").unwrap();
+            }
+        }
+        let (mut doc, scan) = Document::open(path.to_str().unwrap()).unwrap();
+        if let Some(scan) = scan {
+            scan.run().unwrap();
+        }
+        doc.confirm_scan();
+        assert_eq!(doc.line_count(), 10);
+        // 10行読もうとしても、20MBガードにより最初の4〜5行で打ち切られる
+        let lines = doc.read(0, 10).unwrap();
+        assert!(lines.len() < 10);
+        assert!(lines.len() >= 3);
+        let total_read_bytes: usize = lines.iter().map(|l| l.len()).sum();
+        assert!(total_read_bytes <= 25 * 1024 * 1024);
+        std::fs::remove_file(path).ok();
+    }
+
+
+    /// 10万行の巨大ファイルを生成して開き、索引付け・途中行 seek 読みが正しく動くことを検証。
+    #[test]
+    fn opening_and_reading_large_many_lines_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("planetext-100k-lines-test.txt");
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut writer = std::io::BufWriter::new(file);
+            for i in 0..100_000 {
+                use std::io::Write;
+                if i > 0 {
+                    writeln!(writer).unwrap();
+                }
+                write!(writer, "line {i} with some content").unwrap();
+            }
+        }
+        let (mut doc, scan) = Document::open(path.to_str().unwrap()).unwrap();
+        if let Some(scan) = scan {
+            scan.run().unwrap();
+        }
+        doc.confirm_scan();
+        assert_eq!(doc.line_count(), 100_000);
+        // 先頭、中間、末尾の行を正確にseek読みできるか
+        let middle = doc.read(50_000, 3).unwrap();
+        assert_eq!(
+            middle,
+            vec![
+                "line 50000 with some content",
+                "line 50001 with some content",
+                "line 50002 with some content"
+            ]
+        );
+        let tail = doc.read(99_998, 2).unwrap();
+        assert_eq!(
+            tail,
+            vec![
+                "line 99998 with some content",
+                "line 99999 with some content"
+            ]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+
+    /// 回帰: 未走査（バックグラウンド走査完了前）の巨大ファイルで、
+    /// 起動直後に末尾付近の行を読み出しても（Ctrl+End相当）、
+    /// 1行ごとの読み捨てではなく SIMD による一括スキップで即座に届くことを検証する。
+    #[test]
+    fn reading_distant_lines_before_scan_completion_is_fast() {
+        let lines: Vec<String> = (0..STRIDE * 5).map(|i| format!("content {i}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (mut doc, path) = disk_doc("distant-lines", &refs);
+
+        // 走査完了前（pending_source がまだ残る状態）
+        assert_eq!(doc.line_count(), STRIDE * 5);
+        let read = doc.read(STRIDE * 4 + 10, 3).unwrap();
+        assert_eq!(
+            read,
+            vec![
+                format!("content {}", STRIDE * 4 + 10),
+                format!("content {}", STRIDE * 4 + 11),
+                format!("content {}", STRIDE * 4 + 12),
+            ]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+
+    /// 回帰: 未走査の巨大ファイルで、末尾付近の行を編集して Undo/Redo しても、
+    /// ピース分割（split）が EOF seek により即座に行われ、タイムラグなしで復元できることを検証する。
+    #[test]
+    fn undo_redo_near_tail_before_scan_completion_is_instant() {
+        let total = STRIDE * 5;
+        let lines: Vec<String> = (0..total).map(|i| format!("line {i}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (mut doc, path) = disk_doc("instant-undo-tail", &refs);
+
+        // 走査完了前（pending_source が残る状態）で末尾直前の行（total - 2）を置換
+        let target_line = total - 2;
+        doc.replace(
+            target_line,
+            target_line + 1,
+            vec!["modified tail".into()],
+            1,
+            &format!("line {target_line}"),
+            "modified tail",
+        )
+        .unwrap();
+
+        assert_eq!(doc.read(target_line, 1).unwrap(), vec!["modified tail"]);
+
+        // Undo 実行（split が走るが、EOF seek により即座に元行へ戻る）
+        let undone = doc.undo().unwrap().unwrap();
+        assert_eq!(undone.state, format!("line {target_line}"));
+        assert_eq!(
+            doc.read(target_line, 1).unwrap(),
+            vec![format!("line {target_line}")]
+        );
+
+        // Redo 実行（即座に再適用される）
+        let redone = doc.redo().unwrap().unwrap();
+        assert_eq!(redone.state, "modified tail");
+        assert_eq!(doc.read(target_line, 1).unwrap(), vec!["modified tail"]);
+
+        std::fs::remove_file(path).ok();
+    }
+
 }

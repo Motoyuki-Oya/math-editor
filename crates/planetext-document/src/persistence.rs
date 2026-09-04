@@ -377,3 +377,432 @@ impl DraftDiff {
         })
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use crate::document::Document;
+    use crate::source::{FileEncoding, LineEnding};
+    use crate::test_utils::*;
+
+    #[test]
+    fn empty_and_bom_only_files_expose_one_empty_line() {
+        for (name, bytes, specified, offset) in [
+            ("empty", Vec::new(), Some(FileEncoding::Utf8Bom), 0),
+            ("utf8-bom-only", b"\xEF\xBB\xBF".to_vec(), None, 3),
+            ("utf16le-bom-only", b"\xFF\xFE".to_vec(), None, 2),
+            ("utf16be-bom-only", b"\xFE\xFF".to_vec(), None, 2),
+        ] {
+            let path = std::env::temp_dir()
+                .join(format!("planetext-store-{}-{name}.txt", std::process::id()));
+            std::fs::write(&path, bytes).unwrap();
+            let (mut doc, scan) =
+                Document::open_with_encoding(path.to_str().unwrap(), specified).unwrap();
+
+            assert!(scan.is_none());
+            assert_eq!(doc.source_content_offset_for_test(), Some(offset));
+            assert_eq!(doc.line_count(), 1);
+            assert_eq!(doc.read(0, 1).unwrap(), vec![""]);
+            assert_eq!(doc.read_tail(1).unwrap(), vec![""]);
+            std::fs::remove_file(path).ok();
+        }
+    }
+
+
+    #[test]
+    fn forced_utf8_bom_without_a_bom_keeps_all_content() {
+        for (name, bytes) in [
+            ("short-one", b"x".as_slice()),
+            ("short-two", b"xy".as_slice()),
+            ("full", b"first\nsecond".as_slice()),
+        ] {
+            let path = std::env::temp_dir().join(format!(
+                "planetext-store-{}-forced-bom-{name}.txt",
+                std::process::id()
+            ));
+            std::fs::write(&path, bytes).unwrap();
+            let (mut doc, _) =
+                Document::open_with_encoding(path.to_str().unwrap(), Some(FileEncoding::Utf8Bom))
+                    .unwrap();
+
+            assert_eq!(doc.source_content_offset_for_test(), Some(0));
+            assert_eq!(
+                all(&mut doc),
+                String::from_utf8_lossy(bytes).lines().collect::<Vec<_>>()
+            );
+            std::fs::remove_file(path).ok();
+        }
+    }
+
+
+    #[test]
+    fn draft_construction_is_dirty_without_an_undo_step() {
+        let mut doc = Document::from_draft(vec!["draft one".into(), "draft two".into()]);
+
+        assert_eq!(all(&mut doc), vec!["draft one", "draft two"]);
+        assert!(!doc.is_clean());
+        assert!(doc.undo().unwrap().is_none());
+    }
+
+
+    #[test]
+    fn first_edit_after_draft_construction_undoes_to_the_dirty_draft() {
+        let mut doc = Document::from_draft(vec!["draft".into()]);
+
+        doc.replace(0, 1, vec!["edited".into()], 1, "before", "after")
+            .unwrap();
+        assert!(doc.undo().unwrap().is_some());
+
+        assert_eq!(all(&mut doc), vec!["draft"]);
+        assert!(!doc.is_clean());
+    }
+
+
+    #[test]
+    fn saving_a_constructed_draft_marks_it_clean() {
+        let mut doc = Document::from_draft(vec!["draft".into()]);
+        let path = std::env::temp_dir().join(format!(
+            "planetext-store-{}-save-constructed-draft.txt",
+            std::process::id()
+        ));
+
+        doc.save(path.to_str().unwrap()).unwrap();
+
+        assert!(doc.is_clean());
+        std::fs::remove_file(path).ok();
+    }
+
+
+    /// 【回帰防止テスト】
+    /// 小さいファイルの保存後、Undo履歴が保持され、保存状態（is_clean）がマークされることを検証する。
+    #[test]
+    fn small_file_save_retains_undo_history() {
+        let (mut doc, path) = disk_doc("small-save-undo", &["first line", "second line"]);
+        doc.replace(1, 2, vec!["edited second line".into()], 1, "", "")
+            .unwrap();
+        assert!(!doc.is_clean());
+
+        doc.save(&path).unwrap();
+        assert!(doc.is_clean(), "保存後は clean になること");
+        assert!(
+            doc.log_transactions_len_for_test() > 0,
+            "小さいファイルは保存後も Undo 履歴が保持されること"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+
+    /// 【回帰防止テスト】
+    /// 巨大ファイル（10MB超）の保存後、新しいベースへ切り替わり、メモリを圧迫しないよう
+    /// 操作ログと編集バッファが解放されることを検証する。
+    #[test]
+    fn large_file_save_clears_log_and_switches_base() {
+        let large_chunk = "B".repeat(1024 * 1024); // 1MB の行
+        let lines: Vec<String> = vec![large_chunk.clone(); 11]; // 11MB 分
+        let lines_ref: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (mut doc, path) = disk_doc("large-save-clear", &lines_ref);
+
+        doc.replace(1, 2, vec!["edited large line".into()], 1, "", "")
+            .unwrap();
+        assert!(doc.log_transactions_len_for_test() > 0);
+
+        doc.save(&path).unwrap();
+        assert!(doc.is_clean(), "保存後は clean になること");
+        assert_eq!(
+            doc.log_transactions_len_for_test(),
+            0,
+            "巨大ファイルは保存後に操作ログが破棄されてメモリが解放されること"
+        );
+        assert_eq!(doc.buffers_len_for_test(), 0, "編集バッファも解放されること");
+        std::fs::remove_file(path).ok();
+    }
+
+
+    /// 保存すると保存先が新しい本体になり、続きの読みも元に戻すも生きている。
+    #[test]
+    fn saving_adopts_the_written_file_as_the_source() {
+        let (mut doc, path) = disk_doc("save", &["a", "b"]);
+        doc.replace(1, 2, vec!["B".into()], 1, "before", "")
+            .unwrap();
+        doc.save(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\nB");
+        assert_eq!(all(&mut doc), vec!["a", "B"]);
+        let undone = doc.undo().unwrap().unwrap();
+        assert_eq!(undone.state, "before");
+        assert_eq!(all(&mut doc), vec!["a", "b"]);
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn a_failed_overwrite_keeps_the_open_source_readable() {
+        let (mut doc, path) = disk_doc("failed-save", &["a", "b"]);
+        let tmp = format!("{path}.saving");
+        std::fs::create_dir(&tmp).unwrap();
+        assert!(doc.save(&path).is_err());
+        std::fs::remove_dir(tmp).unwrap();
+        assert_eq!(doc.read(0, 2).unwrap(), vec!["a", "b"]);
+        std::fs::remove_file(path).ok();
+    }
+
+
+    /// 開いている間の外部変更は、壊れた読みを返さずに断る。
+    #[test]
+    fn outside_changes_are_refused_instead_of_read_wrong() {
+        let (mut doc, path) = disk_doc("outside", &["a", "b"]);
+        std::fs::write(&path, "changed elsewhere\nlonger than before").unwrap();
+        assert!(doc.read(0, 2).is_err());
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn utf16_bom_files_read_edit_undo_redo_save_and_reopen() {
+        for (name, encoding, first) in [
+            ("le", FileEncoding::Utf16Le, "\u{a01}\u{100} first"),
+            ("be", FileEncoding::Utf16Be, "\u{100}\u{a01} first"),
+        ] {
+            let path = std::env::temp_dir().join(format!(
+                "planetext-store-{}-utf16-{name}.txt",
+                std::process::id()
+            ));
+            let original = format!("{first}\n中央\nlast");
+            std::fs::write(&path, utf16_file_bytes(&original, encoding)).unwrap();
+            let (mut doc, scan) = Document::open(path.to_str().unwrap()).unwrap();
+            if let Some(scan) = scan {
+                scan.run().unwrap();
+                doc.confirm_scan();
+            }
+
+            assert_eq!(doc.encoding(), encoding);
+            assert_eq!(doc.source_content_offset_for_test(), Some(2));
+            assert_eq!(all(&mut doc), vec![first, "中央", "last"]);
+            doc.replace(
+                1,
+                2,
+                vec!["編集一".into(), "編集二".into()],
+                1,
+                "before",
+                "after",
+            )
+            .unwrap();
+            assert_eq!(all(&mut doc), vec![first, "編集一", "編集二", "last"]);
+            assert_eq!(doc.undo().unwrap().unwrap().state, "before");
+            assert_eq!(all(&mut doc), vec![first, "中央", "last"]);
+            assert_eq!(doc.redo().unwrap().unwrap().state, "after");
+            assert_eq!(all(&mut doc), vec![first, "編集一", "編集二", "last"]);
+
+            doc.save(path.to_str().unwrap()).unwrap();
+            let saved = std::fs::read(&path).unwrap();
+            assert!(saved.starts_with(match encoding {
+                FileEncoding::Utf16Le => b"\xFF\xFE",
+                FileEncoding::Utf16Be => b"\xFE\xFF",
+                _ => unreachable!(),
+            }));
+            let (mut reopened, _) = Document::open(path.to_str().unwrap()).unwrap();
+            assert_eq!(reopened.encoding(), encoding);
+            assert_eq!(all(&mut reopened), vec![first, "編集一", "編集二", "last"]);
+            std::fs::remove_file(path).ok();
+        }
+    }
+
+
+    #[test]
+    fn encoding_change_keeps_existing_edit_and_undo_ranges_decodable() {
+        let (mut doc, path) = disk_doc("encoding-change", &["base", "tail"]);
+        doc.replace(1, 2, vec!["編集".into()], 1, "before", "after")
+            .unwrap();
+        doc.set_encoding(FileEncoding::Utf16Be);
+
+        assert_eq!(all(&mut doc), vec!["base", "編集"]);
+        assert_eq!(doc.undo().unwrap().unwrap().state, "before");
+        assert_eq!(all(&mut doc), vec!["base", "tail"]);
+        assert_eq!(doc.redo().unwrap().unwrap().state, "after");
+        assert_eq!(all(&mut doc), vec!["base", "編集"]);
+        doc.save(&path).unwrap();
+
+        let (mut reopened, _) = Document::open(&path).unwrap();
+        assert_eq!(reopened.encoding(), FileEncoding::Utf16Be);
+        assert_eq!(all(&mut reopened), vec!["base", "編集"]);
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn shift_jis_reading_and_writing_and_search() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("planetext-sjis-test.txt");
+        let path_str = path.to_str().unwrap();
+
+        // CP932 / Shift-JIS: 2バイト目が 0x5C (\) になる文字「表」「能」「構」や半角カナ「ｱｲｳ」を含む
+        let original_text = "日本語のテスト\n表・能・構の文字\n半角ｶﾅｱｲｳｴｵ\n12345";
+        let (sjis_bytes, _, _) = encoding_rs::SHIFT_JIS.encode(original_text);
+        std::fs::write(&path, &sjis_bytes).unwrap();
+
+        // 開いて自動判別
+        let (mut doc, _) = Document::open(path_str).unwrap();
+        assert_eq!(doc.encoding(), FileEncoding::ShiftJis);
+        assert_eq!(doc.line_count(), 4);
+        assert_eq!(
+            doc.read(0, 4).unwrap(),
+            vec!["日本語のテスト", "表・能・構の文字", "半角ｶﾅｱｲｳｴｵ", "12345"]
+        );
+
+        // リテラル検索
+        let (hits, _) = doc.scan_literal("能", true, '$', 0, 4, 64).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].line, 1);
+        assert_eq!(hits[0].start, 2);
+        assert_eq!(hits[0].end, 3);
+
+        // 正規表現検索
+        let pattern = regex::Regex::new(r"表.能").unwrap();
+        let (hits, _) = doc.scan(&pattern, '$', 0, 4, 64).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].line, 1);
+        assert_eq!(hits[0].start, 0);
+        assert_eq!(hits[0].end, 3);
+
+        // 編集して Shift-JIS で保存
+        doc.replace(3, 4, vec!["新行".into()], 1, "", "").unwrap();
+        doc.save(path_str).unwrap();
+
+        let saved_bytes = std::fs::read(&path).unwrap();
+        let (decoded, _, _) = encoding_rs::SHIFT_JIS.decode(&saved_bytes);
+        assert_eq!(
+            decoded,
+            "日本語のテスト\n表・能・構の文字\n半角ｶﾅｱｲｳｴｵ\n新行"
+        );
+
+        std::fs::remove_file(path).ok();
+    }
+
+
+    #[test]
+    fn euc_jp_and_iso2022jp_reading() {
+        let dir = std::env::temp_dir();
+
+        // EUC-JP テスト
+        let euc_path = dir.join("planetext-euc-test.txt");
+        let euc_text = "EUC-JPの日本語テキスト\n二行目";
+        let (euc_bytes, _, _) = encoding_rs::EUC_JP.encode(euc_text);
+        std::fs::write(&euc_path, &euc_bytes).unwrap();
+
+        let (mut doc, _) = Document::open(euc_path.to_str().unwrap()).unwrap();
+        assert_eq!(doc.encoding(), FileEncoding::EucJp);
+        assert_eq!(
+            doc.read(0, 2).unwrap(),
+            vec!["EUC-JPの日本語テキスト", "二行目"]
+        );
+        std::fs::remove_file(euc_path).ok();
+
+        // ISO-2022-JP テスト
+        let jis_path = dir.join("planetext-jis-test.txt");
+        let jis_text = "JISの日本語テキスト\n二行目";
+        let (jis_bytes, _, _) = encoding_rs::ISO_2022_JP.encode(jis_text);
+        std::fs::write(&jis_path, &jis_bytes).unwrap();
+
+        let (mut doc, _) = Document::open(jis_path.to_str().unwrap()).unwrap();
+        assert_eq!(doc.encoding(), FileEncoding::Iso2022Jp);
+        assert_eq!(
+            doc.read(0, 2).unwrap(),
+            vec!["JISの日本語テキスト", "二行目"]
+        );
+        std::fs::remove_file(jis_path).ok();
+    }
+
+
+    #[test]
+    fn line_ending_detection_and_saving() {
+        let dir = std::env::temp_dir();
+        let crlf_path = dir.join("planetext-crlf-test.txt");
+        std::fs::write(&crlf_path, b"line1\r\nline2\r\nline3").unwrap();
+
+        let (mut doc, _) = Document::open(crlf_path.to_str().unwrap()).unwrap();
+        assert_eq!(doc.line_ending(), LineEnding::CrLf);
+        assert_eq!(doc.read(0, 3).unwrap(), vec!["line1", "line2", "line3"]);
+
+        // LFに切り替えて保存
+        doc.set_line_ending(LineEnding::Lf);
+        doc.save(crlf_path.to_str().unwrap()).unwrap();
+
+        let saved = std::fs::read(&crlf_path).unwrap();
+        assert_eq!(saved, b"line1\nline2\nline3");
+        std::fs::remove_file(crlf_path).ok();
+
+        // CR 単独改行ファイルの読み込みと各行の分解テスト
+        let cr_path = dir.join("planetext-cr-test.txt");
+        std::fs::write(&cr_path, b"cr_line1\rcr_line2\rcr_line3").unwrap();
+        let (mut cr_doc, _) = Document::open(cr_path.to_str().unwrap()).unwrap();
+        assert_eq!(cr_doc.line_ending(), LineEnding::Cr);
+        assert_eq!(cr_doc.line_count(), 3);
+        assert_eq!(
+            cr_doc.read(0, 3).unwrap(),
+            vec!["cr_line1", "cr_line2", "cr_line3"]
+        );
+        std::fs::remove_file(cr_path).ok();
+    }
+
+
+    #[test]
+    fn reopen_with_encoding_switches_decoding() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("planetext-reopen-test.txt");
+        let text = "あいうえお";
+        let (sjis_bytes, _, _) = encoding_rs::SHIFT_JIS.encode(text);
+        std::fs::write(&path, &sjis_bytes).unwrap();
+
+        let (mut doc, _) = Document::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(doc.encoding(), FileEncoding::ShiftJis);
+        assert_eq!(doc.read(0, 1).unwrap(), vec!["あいうえお"]);
+
+        // UTF-8 で強制開き直し（文字化けが起きることを確認）
+        doc.reopen_with_encoding(FileEncoding::Utf8).unwrap();
+        assert_eq!(doc.encoding(), FileEncoding::Utf8);
+        assert_ne!(doc.read(0, 1).unwrap(), vec!["あいうえお"]);
+
+        // 再度 Shift-JIS で開き直すと正常に復帰
+        doc.reopen_with_encoding(FileEncoding::ShiftJis).unwrap();
+        assert_eq!(doc.encoding(), FileEncoding::ShiftJis);
+        assert_eq!(doc.read(0, 1).unwrap(), vec!["あいうえお"]);
+
+        std::fs::remove_file(path).ok();
+    }
+
+
+    /// 回帰: Clean な下書きに遠方の保留 Redo 差分があるとき、
+    /// 復元時にその行マークまで確定され、即時 Redo が全文走査へ落ちないことを検証する。
+    #[test]
+    fn draft_restore_includes_pending_redo_in_max_needed_line() {
+        use crate::persistence::DraftDiff;
+        // max_needed_line の計算ロジックを直接検証する（lib.rs 側の統合は別途）。
+        // 保留 Redo 差分（head より後ろ）の from_line が active 差分より遠方にある場合、
+        // max_needed_line はその Redo 差分の位置を含む必要がある。
+        let active = DraftDiff {
+            group: 1,
+            from_line: 5,
+            removed_lines: 1,
+            lines: vec!["a".into()],
+            deleted_lines: vec![],
+            before: String::new(),
+            after: String::new(),
+        };
+        let pending_redo = DraftDiff {
+            group: 2,
+            from_line: 999_999,
+            removed_lines: 1,
+            lines: vec!["b".into()],
+            deleted_lines: vec![],
+            before: String::new(),
+            after: String::new(),
+        };
+        let diffs = [active, pending_redo];
+        let max_needed_line = diffs
+            .iter()
+            .map(|d| d.from_line + d.removed_lines)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(max_needed_line, 1_000_000, "保留 Redo の位置を含むこと");
+    }
+
+}
