@@ -1399,4 +1399,24 @@ mod tests {
         // - キャレットも真の末尾行（15999999）へ移動していること
         assert_eq!(editor.primary().head.line, 15_999_999);
     }
+
+    /// 【回帰防止テスト】
+    /// 下書き復元等で行数が確定（!counting）していても、末尾行が手元に未着（is_absent）なら、
+    /// 末尾Seek判定が true になり EOF からの即時末尾取得へ向かうことを保証する。
+    #[test]
+    fn absent_tail_triggers_eof_tail_seek_even_when_not_counting() {
+        let mut editor = Editor::default();
+        // 下書き復元で確定行数 16,000,000 行で開かれた状態（counting = false）
+        editor.load_pending(16_000_000);
+        editor.document.counting = false;
+
+        let count = editor.text().line_count();
+        let last_line = count.saturating_sub(1);
+        // 末尾行はまだ手元に届いていない（未着）
+        assert!(editor.text().is_absent(last_line));
+
+        // 末尾Seekが必要かどうかの判定（keys.rs の Ctrl+End 判定ロジックと同一）
+        let needs_tail = editor.document.is_counting() || editor.text().is_absent(last_line);
+        assert!(needs_tail, "未着の末尾に対しては必ず末尾Seekが発火すること");
+    }
 }

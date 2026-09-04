@@ -48,7 +48,17 @@ pub fn on_keydown(session: &Rc<RefCell<Session>>, event: KeyboardEvent) {
         event.prevent_default();
         return;
     }
-    if ctrl && key == "End" && session.borrow().is_counting() {
+    let needs_tail = {
+        let borrowed = session.borrow();
+        let count = borrowed.document.borrow().text().line_count();
+        borrowed.is_counting()
+            || borrowed
+                .document
+                .borrow()
+                .text()
+                .is_absent(count.saturating_sub(1))
+    };
+    if ctrl && key == "End" && needs_tail {
         let pane = session.borrow().pane;
         session::request_tail(pane);
         event.prevent_default();
