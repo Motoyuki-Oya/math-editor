@@ -403,7 +403,7 @@ async fn find_far(
     forward: bool,
 ) -> Result<Option<bool>, String> {
     use crate::format::document;
-    let Some((after, line_count)) = editor::far_search_start() else {
+    let Some((after, line_count)) = editor::far_search_start(forward) else {
         return Ok(Some(false));
     };
     let start_line = after.0.line;

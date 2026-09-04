@@ -417,11 +417,17 @@ pub fn replace_and_find_next(
 }
 
 /// 文書の本体の走査で検索を続けるための出発点: 検索キーと行数。
-pub fn far_search_start() -> Option<(search::Key, usize)> {
+/// 順方向（次へ）は選択末尾、逆方向（前へ）は選択先頭を出発点とする。
+pub fn far_search_start(forward: bool) -> Option<(search::Key, usize)> {
     let session = session()?;
     let borrowed = session.borrow();
     let doc = borrowed.document.borrow();
-    let from = search::key_at(borrowed.primary().end(), borrowed.nested_cursor());
+    let edge = if forward {
+        borrowed.primary().end()
+    } else {
+        borrowed.primary().start()
+    };
+    let from = search::key_at(edge, borrowed.nested_cursor());
     Some((from, doc.text().line_count()))
 }
 

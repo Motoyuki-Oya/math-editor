@@ -17,6 +17,8 @@ pub(crate) struct Bigram(pub(crate) Vec<u8>);
 
 impl Bigram {
     pub(crate) fn new(first: char, second: char, encoding: FileEncoding) -> Option<Self> {
+        let first = first.to_lowercase().next().unwrap_or(first);
+        let second = second.to_lowercase().next().unwrap_or(second);
         match encoding {
             FileEncoding::Utf8 | FileEncoding::Utf8Bom => {
                 let mut bytes = Vec::with_capacity(first.len_utf8() + second.len_utf8());
@@ -60,7 +62,8 @@ impl Bigram {
     }
 
     pub(crate) fn from_query(query: &str, encoding: FileEncoding) -> Vec<Self> {
-        let chars: Vec<_> = query.chars().collect();
+        let lower_query = query.to_lowercase();
+        let chars: Vec<_> = lower_query.chars().collect();
         chars
             .windows(2)
             .filter_map(|w| Self::new(w[0], w[1], encoding))
@@ -384,6 +387,10 @@ mod tests {
     fn bigram_creation_and_query_extraction() {
         let bigrams = Bigram::from_query("hello", FileEncoding::Utf8);
         assert_eq!(bigrams.len(), 4);
+
+        // 大文字小文字を問わず同一の lowercase Bigram が得られること
+        let bigrams_upper = Bigram::from_query("HeLLo", FileEncoding::Utf8);
+        assert_eq!(bigrams, bigrams_upper);
     }
 
     #[test]

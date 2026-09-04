@@ -165,3 +165,81 @@ fn bench_search_800mb() {
     app.close_document(handle);
 }
 
+#[test]
+#[ignore]
+fn bench_800mb_japanese_and_prev() {
+    let path = "C:\\workspace\\test-800mb.txt";
+    if !Path::new(path).exists() {
+        println!("File {path} does not exist, skipping.");
+        return;
+    }
+
+    let app = Application::default();
+    let opened = app.open_document(path.to_string()).expect("Failed to open");
+    let handle = opened.handle;
+
+    let finish_job = app.finish_document(handle).expect("finish_document failed");
+    let total_lines = loop {
+        if let Some(count) = finish_job.poll().expect("poll failed") {
+            break count;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+
+    // 1. 日本語（非ASCII）検索: case_sensitive = false でも mmap 直接走査で 0.3秒台で完了すること
+    let t_ja = Instant::now();
+    let job_ja = app.prepare_search(
+        handle,
+        "テスト文字列".to_string(),
+        false, // regex
+        false, // case_sensitive: false
+        '\0',
+        0,
+        total_lines,
+        None,
+        true,
+    ).expect("prepare_search failed");
+    let page_ja = job_ja.run().expect("run failed");
+    let ja_duration = t_ja.elapsed();
+    println!("[BENCH 800MB] Japanese search (case_sensitive=false) took {:?}, hits={}", ja_duration, page_ja.hits.len());
+    assert!(ja_duration < Duration::from_secs(2), "日本語検索がフォールバックせず高速に完了すること");
+
+    // 2. 「前へ」逆方向検索
+    let t_prev = Instant::now();
+    let job_prev = app.prepare_search(
+        handle,
+        "cccquick".to_string(),
+        false,
+        true,
+        '\0',
+        total_lines,
+        total_lines,
+        None,
+        false,
+    ).expect("prepare_search failed");
+    let page_prev = job_prev.run().expect("run failed");
+    let prev_duration = t_prev.elapsed();
+    println!("[BENCH 800MB] Previous search took {:?}, hits={}", prev_duration, page_prev.hits.len());
+    assert!(!page_prev.hits.is_empty());
+
+    // 3. 2回目の「前へ」: 直前のヒット位置から前へ再検索したときに自分自身に留まらないこと
+    let hit0 = &page_prev.hits[0];
+    let job_prev2 = app.prepare_search(
+        handle,
+        "cccquick".to_string(),
+        false,
+        true,
+        '\0',
+        hit0.line,
+        total_lines,
+        Some(hit0.start),
+        false,
+    ).expect("prepare_search failed");
+    let page_prev2 = job_prev2.run().expect("run failed");
+    assert!(!page_prev2.hits.is_empty());
+    let hit1 = &page_prev2.hits[0];
+    assert!(hit1.line != hit0.line || hit1.start != hit0.start, "直前の一致自身に留まらず別のヒットへ移動すること");
+
+    app.close_document(handle);
+}
+

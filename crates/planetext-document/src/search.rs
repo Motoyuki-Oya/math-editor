@@ -389,7 +389,7 @@ impl CompiledQuery {
             .case_insensitive(!case_sensitive)
             .build()
             .map_err(|e| format!("正規表現を読めませんでした: {e}"))?;
-        let literal = (!regex && (case_sensitive || query.is_ascii())).then(|| query.to_string());
+        let literal = (!regex).then(|| query.to_string());
         Ok(Self {
             pattern: Arc::new(pattern),
             literal,
@@ -497,24 +497,20 @@ impl Document {
                     }
 
                     let page_end = (at + page_lines).min(doc_lines);
-                    let skip_scan = if case_sensitive {
-                        if let (Some(index), Some(query)) = (self.search_index().cloned(), literal) {
-                            if let (Ok(start_byte), Ok(end_byte)) = (
-                                self.byte_offset_of_line(at),
-                                self.byte_offset_of_line(page_end),
-                            ) {
-                                let start_block = start_byte / crate::search_index::INDEX_BLOCK_BYTES;
-                                let end_block = end_byte / crate::search_index::INDEX_BLOCK_BYTES;
-                                let is_clean_range = if is_clean {
-                                    true
-                                } else {
-                                    !mod_lines.iter().any(|&line| line >= at && line < page_end)
-                                };
-                                if is_clean_range {
-                                    (start_block..=end_block).all(|b| !index.may_contain_query(b, query))
-                                } else {
-                                    false
-                                }
+                    let skip_scan = if let (Some(index), Some(query)) = (self.search_index().cloned(), literal) {
+                        if let (Ok(start_byte), Ok(end_byte)) = (
+                            self.byte_offset_of_line(at),
+                            self.byte_offset_of_line(page_end),
+                        ) {
+                            let start_block = start_byte / crate::search_index::INDEX_BLOCK_BYTES;
+                            let end_block = end_byte / crate::search_index::INDEX_BLOCK_BYTES;
+                            let is_clean_range = if is_clean {
+                                true
+                            } else {
+                                !mod_lines.iter().any(|&line| line >= at && line < page_end)
+                            };
+                            if is_clean_range {
+                                (start_block..=end_block).all(|b| !index.may_contain_query(b, query))
                             } else {
                                 false
                             }

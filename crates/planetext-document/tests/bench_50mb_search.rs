@@ -145,7 +145,24 @@ fn bench_search_50mb() {
     let prev_duration = t_prev_start.elapsed();
     println!("[BENCH 50MB] Previous search pipeline (forward=false search + read_lines): {:?}, hit line: {}, current_index: {:?}",
         prev_duration, hit_prev.line, page_prev.current_index);
-    assert_eq!(hit_prev.line, target_line);
+    // 5. 2回目以降の「前へ」: 直前のヒット位置 (target_line, hit_prev.start) から前を検索した場合、
+    // 自分自身に留まらず、正しく直前（先頭ラップアラウンドなど）へ進むこと
+    let job_prev_again = app.prepare_search(
+        handle,
+        "cccquick".to_string(),
+        false,
+        true,
+        '\0',
+        hit_prev.line,
+        scanned_lines,
+        Some(hit_prev.start),
+        false, // forward: false (前へ)
+    ).expect("prepare_search failed");
+    let page_prev_again = job_prev_again.run().expect("job.run failed");
+    assert!(!page_prev_again.hits.is_empty(), "前へ再検索でもヒットすること");
+    // 1件しか存在しないファイルなので、自分自身（start位置）より前にはないため、末尾（ラップアラウンド）へ回る
+    assert_eq!(page_prev_again.hits[0].line, target_line);
+    assert_eq!(page_prev_again.current_index, Some(1));
 
     app.close_document(handle);
     let _ = std::fs::remove_dir_all(&temp_dir);

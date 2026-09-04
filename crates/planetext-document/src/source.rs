@@ -472,9 +472,10 @@ impl Source {
         let query_chars = query.chars().count();
 
         // 1. 生バイト一致位置の抽出
-        let raw_positions = if case_sensitive {
+        let has_casing = query.chars().any(|c| c.is_alphabetic() && (c.to_lowercase().collect::<String>() != c.to_uppercase().collect::<String>()));
+        let raw_positions = if case_sensitive || !has_casing {
             memchr::memmem::find_iter(haystack, &encoded_query).collect::<Vec<_>>()
-        } else if query.is_ascii() && encoded_query.len() == query.len() {
+        } else if unit == 1 {
             crate::search::literal_positions(haystack, &encoded_query, false)
         } else {
             return Err("fallback".to_string());
