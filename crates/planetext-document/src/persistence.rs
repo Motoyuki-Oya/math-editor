@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::document::Document;
 use crate::piece_tree::Piece;
@@ -135,14 +135,12 @@ impl Document {
         self.source = Some(Source {
             path: Path::new(path).to_path_buf(),
             file,
-            index: Arc::new(ScanIndex {
-                state: Mutex::new(ScanState {
-                    marks,
-                    lines: self.count,
-                    done: true,
-                    broken: None,
-                }),
-            }),
+            index: Arc::new(ScanIndex::new(ScanState {
+                marks,
+                lines: self.count,
+                done: true,
+                broken: None,
+            })),
             bytes: written,
             content_offset: initial_offset,
             pending_from: None,

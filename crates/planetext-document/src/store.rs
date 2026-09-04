@@ -1996,7 +1996,7 @@ mod tests {
             before: String::new(),
             after: String::new(),
         };
-        let diffs = vec![active, pending_redo];
+        let diffs = [active, pending_redo];
         let max_needed_line = diffs
             .iter()
             .map(|d| d.from_line + d.removed_lines)

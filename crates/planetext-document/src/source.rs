@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::SystemTime;
 
 /// 何行ごとに行頭のバイト位置を控えるか。1600 万行でも索引は数万個で済み、
@@ -269,6 +269,7 @@ fn index_chunk_impl(
 /// 走査スレッドが更新する間引き索引と行数。
 pub(crate) struct ScanIndex {
     pub(crate) state: Mutex<ScanState>,
+    pub(crate) cv: Condvar,
 }
 
 pub(crate) struct ScanState {
@@ -283,6 +284,13 @@ pub(crate) struct ScanState {
 }
 
 impl ScanIndex {
+    pub(crate) fn new(state: ScanState) -> Self {
+        Self {
+            state: Mutex::new(state),
+            cv: Condvar::new(),
+        }
+    }
+
     /// `Ok(Some(lines))` は完了、`Ok(None)` は走査中、`Err` は遅延エラー。
     pub(crate) fn status(&self) -> Result<Option<usize>, String> {
         let index = self.state.lock().unwrap();
@@ -290,6 +298,14 @@ impl ScanIndex {
             Some(error) => Err(error.clone()),
             None if index.done => Ok(Some(index.lines)),
             None => Ok(None),
+        }
+    }
+
+    /// 指定したマーク番号（または走査完了）まで待機する。
+    pub(crate) fn wait_for_mark(&self, mark_index: usize) {
+        let mut state = self.state.lock().unwrap();
+        while !state.done && state.marks.len() <= mark_index && state.broken.is_none() {
+            state = self.cv.wait(state).unwrap();
         }
     }
 }
@@ -337,7 +353,9 @@ impl BackgroundScan {
                 let mut index = self.index.state.lock().unwrap();
                 index.lines = self.line + 1;
                 index.done = true;
-                return Ok(Some(index.lines));
+                drop(index);
+                self.index.cv.notify_all();
+                return Ok(Some(self.line + 1));
             }
             let mut marks = Vec::new();
             index_chunk(
@@ -352,8 +370,13 @@ impl BackgroundScan {
             self.offset += len as u64;
             self.reader.consume(len);
             let mut index = self.index.state.lock().unwrap();
+            let has_new_marks = !marks.is_empty();
             index.marks.extend(marks);
             index.lines = self.line;
+            drop(index);
+            if has_new_marks {
+                self.index.cv.notify_all();
+            }
         }
     }
 }
@@ -440,14 +463,12 @@ impl Source {
                 LineEnding::detect_encoded(content, encoding),
             )
         };
-        let index = Arc::new(ScanIndex {
-            state: Mutex::new(ScanState {
-                marks: vec![initial_offset as u64],
-                lines: 0,
-                done: false,
-                broken: None,
-            }),
-        });
+        let index = Arc::new(ScanIndex::new(ScanState {
+            marks: vec![initial_offset as u64],
+            lines: 0,
+            done: false,
+            broken: None,
+        }));
         let delimiter_text = match line_ending {
             LineEnding::Cr => "\r",
             _ => "\n",
@@ -725,6 +746,7 @@ impl Source {
         }
         let target = source_line + skip;
         let indexed_line = target / STRIDE;
+        self.index.wait_for_mark(indexed_line);
         let state = self.index.state.lock().unwrap();
         let available_idx = indexed_line.min(state.marks.len().saturating_sub(1));
         if let Some(&mark) = state.marks.get(available_idx) {
@@ -860,6 +882,28 @@ impl Source {
         if take == 0 {
             return Ok((from, from));
         }
+        let is_at_eof = from + len == self.bytes as usize;
+        if is_at_eof {
+            let index_lines = {
+                let state = self.index.state.lock().unwrap();
+                (state.done || state.lines > 0).then_some(state.lines)
+            };
+            if let Some(total_lines) = index_lines {
+                if total_lines >= skip + take {
+                    let from_end_start = total_lines - skip;
+                    let from_end_end = total_lines - (skip + take);
+                    if from_end_start < STRIDE * 2 {
+                        let start_res = self.byte_offset_from_end(from_end_start);
+                        let end_res = self.byte_offset_from_end(from_end_end);
+                        if let (Ok(s), Ok(e)) = (start_res, end_res) {
+                            if s >= from && e >= s && e <= from + len {
+                                return Ok((s, e));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let (start, remaining_skip) = self.indexed_start(from, len, skip)?;
         let range_end = from.saturating_add(len);
         self.file
@@ -927,6 +971,25 @@ impl Source {
         self.check()?;
         if lines == 0 {
             return Ok(0);
+        }
+        let is_at_eof = from + len == self.bytes as usize;
+        if is_at_eof {
+            let index_lines = {
+                let state = self.index.state.lock().unwrap();
+                (state.done || state.lines > 0).then_some(state.lines)
+            };
+            if let Some(total_lines) = index_lines {
+                if total_lines >= lines {
+                    let from_end = total_lines - lines;
+                    if from_end < STRIDE * 2 {
+                        if let Ok(abs_pos) = self.byte_offset_from_end(from_end) {
+                            if abs_pos >= from {
+                                return Ok((abs_pos - from).min(len));
+                            }
+                        }
+                    }
+                }
+            }
         }
         let (start, mut remaining) = self.indexed_start(from, len, lines)?;
         if remaining == 0 {
@@ -1098,6 +1161,81 @@ mod tests {
             .unwrap();
         assert_eq!(start, marks[1] as usize);
         assert_eq!(remaining, 3);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn wait_for_mark_coordinates_with_background_scan() {
+        let path = std::env::temp_dir().join(format!(
+            "planetext-source-{}-wait-mark.txt",
+            std::process::id()
+        ));
+        let total_lines = STRIDE * 10;
+        let text = (0..total_lines)
+            .map(|line| format!("line-{line:06}-{}", "x".repeat(150)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, &text).unwrap();
+
+        let (mut source, scan) = Source::open_with_encoding(&path, None).unwrap();
+        let scan = scan.unwrap();
+        // 背景走査スレッドを起動
+        let scan_handle = std::thread::spawn(move || {
+            scan.run().unwrap();
+        });
+
+        // 走査完了を待たずに、中間マーク（STRIDE * 3 + 5 行目）を要求
+        let (start, remaining) = source
+            .indexed_start(
+                source.content_offset as usize,
+                source.bytes as usize - source.content_offset as usize,
+                STRIDE * 3 + 5,
+            )
+            .unwrap();
+
+        // indexed_start は Condvar で待機し、STRIDE * 3 のマーク以降のオフセットを返し、
+        // 残りスキップ行数は STRIDE 未満（ここでは 5）になること
+        assert_eq!(remaining, 5);
+        assert!(start > 0);
+
+        scan_handle.join().unwrap();
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn byte_range_and_offset_near_eof_use_eof_seek_accurately() {
+        let path = std::env::temp_dir().join(format!(
+            "planetext-source-{}-eof-seek.txt",
+            std::process::id()
+        ));
+        let total_lines = STRIDE * 3;
+        let text = (0..total_lines)
+            .map(|line| format!("line-{line:05}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, &text).unwrap();
+
+        let (mut source, scan) = Source::open_with_encoding(&path, None).unwrap();
+        if let Some(scan) = scan {
+            scan.run().unwrap();
+        }
+
+        let total_len = source.bytes as usize;
+        // 末尾から 3 行目から 2 行分のバイト範囲
+        let skip = total_lines - 3;
+        let take = 2;
+        let (range_from, range_to) = source
+            .byte_range_for_lines(0, total_len, skip, take)
+            .unwrap();
+
+        let slice = &text.as_bytes()[range_from..range_to];
+        let expected = format!("line-{:05}\nline-{:05}\n", skip, skip + 1);
+        assert_eq!(slice, expected.as_bytes());
+
+        // byte_offset_after_lines も正確
+        let offset = source.byte_offset_after_lines(0, total_len, skip).unwrap();
+        assert_eq!(offset, range_from);
+
         std::fs::remove_file(path).ok();
     }
 }
