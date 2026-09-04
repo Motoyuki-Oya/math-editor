@@ -231,16 +231,26 @@ pub fn bind_doc(pane: usize, doc_id: usize) {
 
     let slice = if let Some(s) = other_slice {
         Rc::new(RefCell::new(s))
-    } else if let Some(mut s) = doc_model.borrow_mut().cached_slice.take() {
-        s.pane = pane;
+    } else if let Some(cached) = doc_model.borrow().cached_slice.as_ref() {
+        let mut s = cached.clone_as_slice(pane);
+        let modified = doc_model.borrow().modified_lines.clone();
+        if !modified.is_empty() {
+            s.modified_lines = modified;
+        }
         Rc::new(RefCell::new(s))
     } else {
-        let (line_count, counting, file_bytes) = {
+        let (line_count, counting, file_bytes, modified) = {
             let model = doc_model.borrow();
-            (model.line_count, model.counting, model.file_bytes)
+            (
+                model.line_count,
+                model.counting,
+                model.file_bytes,
+                model.modified_lines.clone(),
+            )
         };
         let mut s = SliceModel::new(pane, doc_id);
         s.file_bytes = file_bytes;
+        s.modified_lines = modified;
         if counting {
             s.load_pending(line_count.unwrap_or(0));
         } else if let Some(count) = line_count {
@@ -1142,10 +1152,36 @@ pub fn feed_pane(pane: usize, from: usize, lines: &[String]) {
     let Some(session) = pane_session(pane) else {
         return;
     };
-    session.borrow().document.borrow_mut().feed(
-        from,
-        lines.iter().map(|line| document::read_line(line)).collect(),
-    );
+    let doc_id = session.borrow().doc_id;
+    let read_lines: Vec<_> = lines.iter().map(|line| document::read_line(line)).collect();
+
+    session.borrow().document.borrow_mut().feed(from, read_lines.clone());
+
+    if doc_id != UNBOUND_DOC_ID {
+        let other_sessions = PANES.with(|panes| {
+            panes
+                .borrow()
+                .iter()
+                .filter(|s| s.borrow().pane != pane && s.borrow().doc_id == doc_id)
+                .cloned()
+                .collect::<Vec<_>>()
+        });
+        for other in other_sessions {
+            other.borrow().document.borrow_mut().feed(from, read_lines.clone());
+            let borrowed = other.borrow();
+            let drawn = borrowed.view.drawn();
+            if from < drawn.end && from + lines.len() > drawn.start {
+                borrowed.view.invalidate();
+                scrolled(&other);
+            }
+        }
+
+        let doc_model = get_or_create_doc_model(doc_id);
+        let mut dm = doc_model.borrow_mut();
+        if let Some(ref mut cached) = dm.cached_slice {
+            cached.feed(from, read_lines);
+        }
+    }
     {
         let borrowed = session.borrow();
         let mut doc = borrowed.document.borrow_mut();
@@ -1518,6 +1554,15 @@ pub fn doc_modified_lines(doc_id: usize) -> Vec<usize> {
 
 /// 指定ドキュメントを開いている全ペインの変更行マーカーを設定します。
 pub fn set_doc_modified_lines(doc_id: usize, lines: Vec<usize>) {
+    let doc_model = get_or_create_doc_model(doc_id);
+    {
+        let mut dm = doc_model.borrow_mut();
+        let set: std::collections::BTreeSet<usize> = lines.iter().copied().collect();
+        dm.modified_lines = set.clone();
+        if let Some(ref mut cached) = dm.cached_slice {
+            cached.modified_lines = set;
+        }
+    }
     PANES.with(|panes| {
         for session in panes.borrow().iter() {
             let borrowed = session.borrow();
@@ -1530,12 +1575,24 @@ pub fn set_doc_modified_lines(doc_id: usize, lines: Vec<usize>) {
 
 /// 指定ドキュメントを開いている全ペインの全行を変更行としてマークします。
 pub fn mark_doc_all_modified(doc_id: usize) {
+    let doc_model = get_or_create_doc_model(doc_id);
+    let count = {
+        let mut dm = doc_model.borrow_mut();
+        let count = dm.line_count.unwrap_or_else(|| {
+            dm.cached_slice.as_ref().map(|s| s.text().line_count()).unwrap_or(1)
+        });
+        let set: std::collections::BTreeSet<usize> = (0..count).collect();
+        dm.modified_lines = set.clone();
+        if let Some(ref mut cached) = dm.cached_slice {
+            cached.modified_lines = set;
+        }
+        count
+    };
     PANES.with(|panes| {
         for session in panes.borrow().iter() {
             let borrowed = session.borrow();
             if borrowed.doc_id == doc_id {
                 let mut doc = borrowed.document.borrow_mut();
-                let count = doc.text().line_count();
                 doc.set_modified_lines((0..count).collect());
             }
         }
@@ -1545,6 +1602,19 @@ pub fn mark_doc_all_modified(doc_id: usize) {
 /// 指定ドキュメントを開いている全ペインへ、テキスト全体（無題ドラフト等）を読み込みます。
 pub fn load_doc_contents(doc_id: usize, text: &str) {
     let parsed = document::read(text);
+    let line_count = parsed.line_count();
+
+    let doc_model = get_or_create_doc_model(doc_id);
+    {
+        let mut dm = doc_model.borrow_mut();
+        dm.line_count = Some(line_count);
+        dm.counting = false;
+
+        let mut slice = dm.cached_slice.take().unwrap_or_else(|| SliceModel::new(0, doc_id));
+        slice.load(parsed.clone());
+        dm.cached_slice = Some(slice);
+    }
+
     PANES.with(|panes| {
         for session in panes.borrow().iter() {
             let mut borrowed = session.borrow_mut();
@@ -1818,5 +1888,27 @@ mod tests {
         assert_eq!(restored_slice.text().line_count(), 30);
         assert!(!restored_slice.text().is_absent(0));
         assert_eq!(restored_slice.text().raw_line(0), Some("doc88 line 0"));
+    }
+
+    /// 【下書き復元時の白飛び防止テスト】
+    /// ペインがまだマウントされていない段階で load_doc_contents が呼ばれても、
+    /// DocumentModel.cached_slice にパース済み行が保存され、
+    /// 後からペインがバインドされた際に空文書（1行真っ白）にならず全文が即座に復元されることを検証する。
+    #[test]
+    fn draft_restore_before_pane_mount_persists_in_document_model_and_binds_correctly() {
+        let doc_id = 999;
+        let sample_text = "line 1\nline 2\nline 3\nline 4\nline 5";
+
+        // ペインマウント前に load_doc_contents が呼ばれる
+        load_doc_contents(doc_id, sample_text);
+
+        // DocumentModel に状態が保持されていること
+        let doc_model = get_or_create_doc_model(doc_id);
+        let dm = doc_model.borrow();
+        assert_eq!(dm.line_count, Some(5));
+        let cached = dm.cached_slice.as_ref().expect("cached_slice must be populated");
+        assert_eq!(cached.text().line_count(), 5);
+        assert_eq!(cached.text().raw_line(0), Some("line 1"));
+        assert_eq!(cached.text().raw_line(4), Some("line 5"));
     }
 }

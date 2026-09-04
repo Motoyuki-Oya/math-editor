@@ -137,6 +137,7 @@ pub fn is_word(c: char) -> bool {
 
 /// ファイルから来た行の姿。呼び出し元（保存形式の層）が、素のテキストだけの
 /// 行と、構造を含むため解析済みの行を区別して渡す。
+#[derive(Clone, Debug)]
 pub enum SourceLine {
     Plain(String),
     Parsed(Row),

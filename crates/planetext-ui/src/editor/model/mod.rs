@@ -30,6 +30,7 @@ pub struct DocumentModel {
     pub line_count: Option<usize>,
     pub counting: bool,
     pub slices: Vec<usize>,
+    pub modified_lines: std::collections::BTreeSet<usize>,
     pub cached_slice: Option<SliceModel>,
 }
 
@@ -42,6 +43,7 @@ impl DocumentModel {
             line_count: None,
             counting: false,
             slices: Vec::new(),
+            modified_lines: std::collections::BTreeSet::new(),
             cached_slice: None,
         }
     }
