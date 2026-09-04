@@ -689,7 +689,7 @@ impl Source {
         f: &mut dyn FnMut(usize, &str) -> bool,
     ) -> Result<bool, String> {
         self.check()?;
-        let (start, remaining_skip) = self.indexed_start(from, len, skip)?;
+        let (start, mut remaining_skip) = self.indexed_start(from, len, skip)?;
         self.file
             .seek(SeekFrom::Start(start as u64))
             .map_err(|e| e.to_string())?;
@@ -697,15 +697,82 @@ impl Source {
         let limited = (&self.file).take(available as u64);
         let mut reader = BufReader::with_capacity(CHUNK.min(available.max(1)), limited);
         let delimiter = self.delimiter();
-        let mut buffer = Vec::new();
+        let unit_bytes = self.encoding.unit_bytes();
+
         let mut ended_after_delimiter = false;
-        for line in 0..remaining_skip + take {
+        // 目的行までの skip はバッファ確保を一切行わず SIMD で一気に飛ばす
+        if remaining_skip > 0 {
+            if unit_bytes == 1 {
+                let delim_byte = delimiter[0];
+                loop {
+                    let chunk = reader.fill_buf().map_err(|e| e.to_string())?;
+                    if chunk.is_empty() {
+                        break;
+                    }
+                    let mut consumed = 0;
+                    let mut found = false;
+                    for pos in memchr::memchr_iter(delim_byte, chunk) {
+                        remaining_skip -= 1;
+                        if remaining_skip == 0 {
+                            consumed = pos + 1;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if found {
+                        reader.consume(consumed);
+                        ended_after_delimiter = true;
+                        break;
+                    }
+                    let chunk_len = chunk.len();
+                    reader.consume(chunk_len);
+                }
+            } else {
+                let delim_slice = delimiter.as_slice();
+                loop {
+                    let chunk = reader.fill_buf().map_err(|e| e.to_string())?;
+                    if chunk.is_empty() {
+                        break;
+                    }
+                    let mut consumed = 0;
+                    let mut found = false;
+                    let chunk_units = (chunk.len() / 2) * 2;
+                    for i in (0..chunk_units).step_by(2) {
+                        if &chunk[i..i + 2] == delim_slice {
+                            remaining_skip -= 1;
+                            if remaining_skip == 0 {
+                                consumed = i + 2;
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    if found {
+                        reader.consume(consumed);
+                        ended_after_delimiter = true;
+                        break;
+                    }
+                    let has_odd = chunk.len() > chunk_units;
+                    reader.consume(chunk_units);
+                    if has_odd {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 目的の take 行だけを bounded read で読み取って callback に渡す
+        let mut buffer = Vec::new();
+        for line in 0..take {
             let read = read_line_bounded(&mut reader, self.encoding, &delimiter, &mut buffer)?;
             if read == 0 {
                 let indexed_empty_tail = start == from.saturating_add(len) && remaining_skip == 0;
-                if (len == 0 || ended_after_delimiter || indexed_empty_tail)
-                    && line >= remaining_skip
-                    && !f(line - remaining_skip, "")
+                if remaining_skip == 0
+                    && (len == 0
+                        || ended_after_delimiter
+                        || indexed_empty_tail
+                        || self.ends_with_newline)
+                    && !f(line, "")
                 {
                     return Ok(false);
                 }
@@ -717,9 +784,7 @@ impl Source {
             {
                 buffer.truncate(buffer.len() - self.encoding.unit_bytes());
             }
-            if line >= remaining_skip
-                && !f(line - remaining_skip, &self.encoding.decode_line(&buffer))
-            {
+            if !f(line, &self.encoding.decode_line(&buffer)) {
                 return Ok(false);
             }
         }
@@ -804,7 +869,13 @@ impl Source {
         lines: usize,
     ) -> Result<usize, String> {
         self.check()?;
-        let (start, remaining) = self.indexed_start(from, len, lines)?;
+        if lines == 0 {
+            return Ok(0);
+        }
+        let (start, mut remaining) = self.indexed_start(from, len, lines)?;
+        if remaining == 0 {
+            return Ok((start - from).min(len));
+        }
         self.file
             .seek(SeekFrom::Start(start as u64))
             .map_err(|e| e.to_string())?;
@@ -812,14 +883,67 @@ impl Source {
         let limited = (&self.file).take(available as u64);
         let mut reader = BufReader::with_capacity(CHUNK.min(available.max(1)), limited);
         let delimiter = self.delimiter();
-        let mut buffer = Vec::new();
+        let unit_bytes = self.encoding.unit_bytes();
         let mut offset = start - from;
-        for _ in 0..remaining {
-            let read = read_line_bounded(&mut reader, self.encoding, &delimiter, &mut buffer)?;
-            if read == 0 {
-                break;
+
+        if unit_bytes == 1 {
+            let delim_byte = delimiter[0];
+            loop {
+                let chunk = reader.fill_buf().map_err(|e| e.to_string())?;
+                if chunk.is_empty() {
+                    break;
+                }
+                let mut consumed = 0;
+                let mut found = false;
+                for pos in memchr::memchr_iter(delim_byte, chunk) {
+                    remaining -= 1;
+                    if remaining == 0 {
+                        consumed = pos + 1;
+                        found = true;
+                        break;
+                    }
+                }
+                if found {
+                    offset += consumed;
+                    reader.consume(consumed);
+                    break;
+                }
+                let chunk_len = chunk.len();
+                offset += chunk_len;
+                reader.consume(chunk_len);
             }
-            offset += read;
+        } else {
+            let delim_slice = delimiter.as_slice();
+            loop {
+                let chunk = reader.fill_buf().map_err(|e| e.to_string())?;
+                if chunk.is_empty() {
+                    break;
+                }
+                let mut consumed = 0;
+                let mut found = false;
+                let chunk_units = (chunk.len() / 2) * 2;
+                for i in (0..chunk_units).step_by(2) {
+                    if &chunk[i..i + 2] == delim_slice {
+                        remaining -= 1;
+                        if remaining == 0 {
+                            consumed = i + 2;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if found {
+                    offset += consumed;
+                    reader.consume(consumed);
+                    break;
+                }
+                let has_odd = chunk.len() > chunk_units;
+                offset += chunk_units;
+                reader.consume(chunk_units);
+                if has_odd {
+                    break;
+                }
+            }
         }
         Ok(offset.min(len))
     }

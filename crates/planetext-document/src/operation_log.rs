@@ -267,6 +267,12 @@ impl OperationLog {
             .collect()
     }
 
+    pub(crate) fn has_active_bulk(&self) -> bool {
+        self.transactions[..self.head]
+            .iter()
+            .any(|tx| matches!(tx.kind, OperationKind::Bulk(_)))
+    }
+
     /// Undo: head を 1 つ戻し、巻き戻すべきトランザクションを返す
     pub(crate) fn undo_pop(&mut self) -> Option<&Transaction> {
         if self.head == 0 {

@@ -1831,7 +1831,10 @@ mod tests {
         // マージは既存トランザクションへ追記するだけで、公開済みの revision を
         // 書き換えない（保存済み checkpoint が破壊されない）。
         assert_eq!(rev1, rev2, "マージで公開 revision を上書きしない");
-        assert!(doc.log.validate_base(rev1).is_ok(), "公開済み revision は残る");
+        assert!(
+            doc.log.validate_base(rev1).is_ok(),
+            "公開済み revision は残る"
+        );
         assert!(
             doc.log.validate_base(saved_rev).is_ok(),
             "saved checkpoint は残る"
@@ -1859,27 +1862,6 @@ mod tests {
         // Redo 枝の revision を base にした編集は拒否される
         let result = doc.replace_with_base(undone_rev, 0, 1, vec!["z".into()], 2, "", "");
         assert!(result.is_err(), "Redo 枝の revision は受け付けない");
-        std::fs::remove_file(path).ok();
-    }
-
-    #[test]
-    fn dbg_bulk_save() {
-        let (mut doc, path) = disk_doc("dbg-bulk", &["foo a", "bar b", "foo c"]);
-        let base_rev = doc.revision();
-        let pattern = regex::RegexBuilder::new("foo").build().unwrap();
-        let op = crate::operation_log::BulkOperation::ReplaceAll {
-            from_line: 0, to_line: 3, query: "foo".to_string(),
-            replacement: "baz".to_string(), case_sensitive: true,
-            pattern: std::sync::Arc::new(pattern),
-        };
-        doc.apply_bulk_operation(base_rev, 1, op, "", "").unwrap();
-        eprintln!("before save: {:?}", all(&mut doc));
-        doc.save(&path).unwrap();
-        eprintln!("after save: {:?}", all(&mut doc));
-        eprintln!("head={} txkinds={:?}", doc.log.head, doc.log.transactions.iter().map(|t| (t.group, t.edits().len())).collect::<Vec<_>>());
-        for t in doc.log.transactions.iter() { for e in t.edits() { eprintln!("  edit from_line={} removed_lines={} inserted_lines={}", e.from_line, e.removed_lines, e.inserted_lines); } }
-        doc.undo().unwrap();
-        eprintln!("after undo: {:?}", all(&mut doc));
         std::fs::remove_file(path).ok();
     }
 
@@ -1916,6 +1898,43 @@ mod tests {
         // Redo で再適用されること
         doc.redo().unwrap();
         assert_eq!(all(&mut doc), vec!["baz a", "bar b", "baz c"]);
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 回帰: bulk 操作（すべて置換）の後に通常編集が入っても、
+    /// 後続の新規テキストへ過去の bulk 規則が勝手に適用されず、
+    /// Undo も各段階へ正しく戻ることを検証する。
+    #[test]
+    fn new_edits_after_bulk_are_not_transformed_retroactively() {
+        let (mut doc, path) = disk_doc("bulk-edit-seq", &["foo 1", "bar 2", "foo 3"]);
+        let base_rev = doc.revision();
+        let pattern = regex::RegexBuilder::new("foo").build().unwrap();
+        let op = crate::operation_log::BulkOperation::ReplaceAll {
+            from_line: 0,
+            to_line: 3,
+            query: "foo".to_string(),
+            replacement: "baz".to_string(),
+            case_sensitive: true,
+            pattern: std::sync::Arc::new(pattern),
+        };
+        doc.apply_bulk_operation(base_rev, 1, op, "", "").unwrap();
+        assert_eq!(all(&mut doc), vec!["baz 1", "bar 2", "baz 3"]);
+
+        // bulk 適用後に、範囲内に新たな "foo new" を通常挿入する
+        doc.replace(1, 1, vec!["foo new".to_string()], 2, "", "foo new")
+            .unwrap();
+
+        // 挿入された "foo new" は "baz new" に書き換わらずそのまま残ること
+        assert_eq!(all(&mut doc), vec!["baz 1", "foo new", "bar 2", "baz 3"]);
+
+        // 1回目の Undo で通常編集（foo new の挿入）が取り消されること
+        doc.undo().unwrap();
+        assert_eq!(all(&mut doc), vec!["baz 1", "bar 2", "baz 3"]);
+
+        // 2回目の Undo で bulk 操作自体が取り消されて初期状態に戻ること
+        doc.undo().unwrap();
+        assert_eq!(all(&mut doc), vec!["foo 1", "bar 2", "foo 3"]);
+
         std::fs::remove_file(path).ok();
     }
 
@@ -1984,5 +2003,28 @@ mod tests {
             .max()
             .unwrap_or(0);
         assert_eq!(max_needed_line, 1_000_000, "保留 Redo の位置を含むこと");
+    }
+
+    /// 回帰: 未走査（バックグラウンド走査完了前）の巨大ファイルで、
+    /// 起動直後に末尾付近の行を読み出しても（Ctrl+End相当）、
+    /// 1行ごとの読み捨てではなく SIMD による一括スキップで即座に届くことを検証する。
+    #[test]
+    fn reading_distant_lines_before_scan_completion_is_fast() {
+        let lines: Vec<String> = (0..STRIDE * 5).map(|i| format!("content {i}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (mut doc, path) = disk_doc("distant-lines", &refs);
+
+        // 走査完了前（pending_source がまだ残る状態）
+        assert_eq!(doc.line_count(), STRIDE * 5);
+        let read = doc.read(STRIDE * 4 + 10, 3).unwrap();
+        assert_eq!(
+            read,
+            vec![
+                format!("content {}", STRIDE * 4 + 10),
+                format!("content {}", STRIDE * 4 + 11),
+                format!("content {}", STRIDE * 4 + 12),
+            ]
+        );
+        std::fs::remove_file(path).ok();
     }
 }

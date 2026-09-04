@@ -177,7 +177,7 @@ impl Document {
     /// トランザクションを等価な splice へ変換する。このまま active に残すと、
     /// 変換後の行へ同じ規則が再適用され（foo→foofoo の二重化）、Undo も
     /// 効かなくなる。変換後は通常の編集として Undo/Redo・下書き化できる。
-    fn materialize_bulk_transactions(&mut self) -> Result<(), String> {
+    pub(crate) fn materialize_bulk_transactions(&mut self) -> Result<(), String> {
         use crate::operation_log::OperationKind;
         let targets: Vec<usize> = self.log.transactions[..self.log.head]
             .iter()
@@ -202,14 +202,10 @@ impl Document {
             let mut edits = Vec::new();
             match &bulk {
                 crate::operation_log::BulkOperation::AllLines {
-                    from_line,
-                    to_line,
-                    ..
+                    from_line, to_line, ..
                 }
                 | crate::operation_log::BulkOperation::ReplaceAll {
-                    from_line,
-                    to_line,
-                    ..
+                    from_line, to_line, ..
                 } => {
                     // 範囲内の各行を 1 編集として記録する。内容の変化有無で絞ると、
                     // たまたま元と同じ結果になった行が欠けて Undo で復元できない
@@ -219,8 +215,14 @@ impl Document {
                         if line_idx >= self.count {
                             break;
                         }
+                        let original = self.read_raw(line_idx, 1)?;
                         let current = self.read(line_idx, 1)?;
-                        edits.push(self.splice(line_idx, line_idx + 1, current)?);
+                        edits.push(self.splice_with_deleted(
+                            line_idx,
+                            line_idx + 1,
+                            current,
+                            original,
+                        )?);
                     }
                 }
             }
@@ -244,6 +246,9 @@ impl Document {
         out: &mut W,
         path: Option<&str>,
     ) -> Result<(), String> {
+        if self.log.has_active_bulk() {
+            self.materialize_bulk_transactions()?;
+        }
         if let Some(p) = path {
             writeln!(out, "// PLANETEXT_DRAFT_REF_V2")
                 .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;

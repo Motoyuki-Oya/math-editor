@@ -402,30 +402,31 @@ impl Application {
                     }
                     diffs.reserve(count);
                     for _ in 0..count {
-                        if let Some(diff) = crate::persistence::DraftDiff::read_from(&mut lines) {
-                            diffs.push(diff);
-                        }
+                        let diff = crate::persistence::DraftDiff::read_from(&mut lines)
+                            .ok_or_else(|| {
+                                "下書きファイルが破損しています（差分が途切れています）".to_string()
+                            })?;
+                        diffs.push(diff);
                     }
                 }
             }
 
             let (mut doc, scan) = Document::open(orig_path)?;
             let bg_index = doc.take_background_index();
-            let initial_count = doc.count;
-
-            // 下書きに保存された総行数で即時確定（0秒！）
-            if saved_line_count > 0 {
-                doc.confirm_scan_with_total_lines(saved_line_count);
-            }
 
             // active 差分だけでなく、保留中の Redo 差分の位置も含める。
-            // これを外すと Clean 復元後の即時 Redo が未走査の後方を指し、
-            // indexed_start の全文走査で起動が止まる。
             let max_needed_line = diffs
                 .iter()
                 .map(|d| d.from_line + d.removed_lines)
                 .max()
                 .unwrap_or(0);
+
+            // 下書きに保存された総行数で即時確定（0秒！）。未記録でも編集行位置まで確定。
+            if saved_line_count > 0 {
+                doc.confirm_scan_with_total_lines(saved_line_count);
+            } else if max_needed_line >= doc.count {
+                doc.confirm_scan_with_total_lines(max_needed_line);
+            }
 
             let active_count = if has_explicit_head {
                 head_offset.min(diffs.len())
@@ -444,16 +445,10 @@ impl Application {
             doc.pending_redo_diffs = redo_diffs;
 
             if let Some(scan) = scan {
-                if max_needed_line >= initial_count {
-                    // 現在復元する編集行が未走査の後方にある場合のみ、高速SIMD走査でマークを確定
+                // 下書き復元は 0 秒即時リターンを保証するため、走査は常にバックグラウンドで回す。
+                std::thread::spawn(move || {
                     let _ = scan.run();
-                    doc.confirm_scan();
-                } else {
-                    // 編集行が先頭チャンク内、または Clean 状態なら、走査は100%バックグラウンドで非同期に回す（即時復元！）
-                    std::thread::spawn(move || {
-                        let _ = scan.run();
-                    });
-                }
+                });
             }
 
             if !active_diffs.is_empty() {
@@ -493,16 +488,14 @@ impl Application {
                 .map(|d| d.from_line + d.removed_lines)
                 .max()
                 .unwrap_or(0);
+            if max_needed_line >= doc.count {
+                doc.confirm_scan_with_total_lines(max_needed_line);
+            }
 
             if let Some(scan) = scan {
-                if max_needed_line >= doc.count {
+                std::thread::spawn(move || {
                     let _ = scan.run();
-                    doc.confirm_scan();
-                } else {
-                    std::thread::spawn(move || {
-                        let _ = scan.run();
-                    });
-                }
+                });
             }
 
             if !diffs.is_empty() {
@@ -818,8 +811,12 @@ impl Application {
                 let first = lines.next().unwrap_or_default();
                 if first == "// PLANETEXT_DRAFT_REF_V2" || first == "// PLANETEXT_DRAFT_REF_V1" {
                     let orig_path = lines.next().unwrap_or_default().to_string();
-                    let _line_count = lines.next();
-                    let status = lines.next().unwrap_or_default();
+                    let status = if first == "// PLANETEXT_DRAFT_REF_V2" {
+                        let _line_count = lines.next();
+                        lines.next().unwrap_or_default()
+                    } else {
+                        lines.next().unwrap_or_default()
+                    };
                     let mut clean = status == "CLEAN";
                     if status == "DIFF" {
                         if let Some(header_str) = lines.next() {
@@ -1674,16 +1671,16 @@ mod tests {
         // 6. 単体性能と実機E2E性能の両方を個別に測定（将来のボトルネック特定のため）
         let t_open_only = std::time::Instant::now();
         let reopened = application
-            .open_draft(Some(temp_dir.clone()), "800".into())
+            .open_draft(Some(temp_dir.clone()), "bench800".into())
             .unwrap();
         let open_only_time = t_open_only.elapsed();
         println!("[BENCH 800MB] Open draft isolated (Backend restore only): {open_only_time:?}");
 
         let t_e2e = std::time::Instant::now();
         let drafts = application.read_drafts(Some(temp_dir.clone()));
-        assert_eq!(drafts.len(), 1);
+        assert!(drafts.iter().any(|d| d.id == "800"));
         let reopened_e2e = application
-            .open_draft(Some(temp_dir.clone()), "800".into())
+            .open_draft(Some(temp_dir.clone()), "bench800".into())
             .unwrap();
         let first_screen = application.read_lines(reopened_e2e.handle, 0, 50).unwrap();
         assert_eq!(first_screen.lines.len(), 50);

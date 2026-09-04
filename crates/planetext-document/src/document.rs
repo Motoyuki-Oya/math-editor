@@ -642,6 +642,85 @@ impl Document {
         Ok(lines)
     }
 
+    /// bulk 操作の動的評価を挟まず、ピースツリーに現在保持されている生の行を読み出す。
+    pub(crate) fn each_raw_line(
+        &mut self,
+        from: usize,
+        count: usize,
+        f: &mut dyn FnMut(usize, &str) -> bool,
+    ) -> Result<(), String> {
+        let to = from.saturating_add(count).min(self.count);
+        if from >= to {
+            return Ok(());
+        }
+        let mut error = None;
+        self.pieces
+            .for_each_line_range(from, to, &mut |start, piece, skip, take| match piece {
+                Piece::Edit {
+                    from,
+                    len,
+                    newlines,
+                    starts_newline,
+                    ends_newline,
+                    encoding,
+                    line_ending,
+                } => {
+                    let leading = usize::from(starts_newline)
+                        * EditBuffers::line_separator_len(encoding, line_ending);
+                    self.buffers.for_each_line(
+                        EditRange {
+                            from: from + leading,
+                            len: len - leading,
+                            lines: newlines + usize::from(!ends_newline)
+                                - usize::from(starts_newline),
+                            encoding,
+                            line_ending,
+                        },
+                        skip,
+                        take,
+                        &mut |i, text| {
+                            let line_idx = start + skip + i;
+                            f(line_idx, text)
+                        },
+                    )
+                }
+                Piece::Source { from, len, .. } => match self.source.as_mut() {
+                    Some(source) => {
+                        match source.for_each_range_line(from, len, skip, take, &mut |i, text| {
+                            let line_idx = start + skip + i;
+                            f(line_idx, text)
+                        }) {
+                            Ok(done) => done,
+                            Err(e) => {
+                                error = Some(e);
+                                false
+                            }
+                        }
+                    }
+                    None => {
+                        error = Some(
+                            "文書ストアのディスク参照が失われました。開き直してください"
+                                .to_string(),
+                        );
+                        false
+                    }
+                },
+            });
+        match error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn read_raw(&mut self, from: usize, count: usize) -> Result<Vec<String>, String> {
+        let mut lines = Vec::new();
+        self.each_raw_line(from, count, &mut |_, text| {
+            lines.push(text.to_string());
+            true
+        })?;
+        Ok(lines)
+    }
+
     pub(crate) fn read_tail(&mut self, count: usize) -> Result<Vec<String>, String> {
         let scan_done = self
             .source
@@ -688,6 +767,9 @@ impl Document {
         after: &str,
     ) -> Result<usize, String> {
         self.pending_redo_diffs.clear();
+        if self.log.has_active_bulk() {
+            self.materialize_bulk_transactions()?;
+        }
         self.log.validate_base(base_revision)?;
         let (actual_from, actual_to) = if base_revision == self.log.revision() {
             (from, to)
@@ -779,7 +861,7 @@ impl Document {
         Ok(self.count)
     }
 
-    fn splice_with_deleted(
+    pub(crate) fn splice_with_deleted(
         &mut self,
         from: usize,
         to: usize,
@@ -999,7 +1081,6 @@ impl Document {
             touched_from = touched_from.min(edit.from_line);
             let restored_lines = self.log.read_deleted(edit.removed);
             let inserted_lines = self.buffers.read_lines(edit.inserted);
-            eprintln!("DBG undo from_line={} restored={:?} inserted={:?}", edit.from_line, restored_lines, inserted_lines);
             self.apply_raw_splice(
                 edit.from_line,
                 edit.from_line + edit.inserted_lines,

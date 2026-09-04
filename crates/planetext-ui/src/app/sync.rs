@@ -39,6 +39,7 @@ enum Task {
         query: String,
         options: editor::SearchOptions,
         file_size: Option<usize>,
+        ticket: u64,
     },
 }
 
@@ -52,8 +53,9 @@ thread_local! {
     static FETCH_RANGES: RefCell<HashMap<usize, Range<usize>>> = RefCell::new(HashMap::new());
     /// 取り寄せが走っているタブ。
     static FETCH_BUSY: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
-    /// 検索が走っているタブ。完了するまで次の検索をブロックして負荷を抑制する。
-    static SEARCH_BUSY: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    /// 検索が走っているタブと最新チケット。世代管理により置換検索の誤解除を防ぐ。
+    static SEARCH_TICKETS: RefCell<HashMap<usize, u64>> = RefCell::new(HashMap::new());
+    static NEXT_TICKET: Cell<u64> = const { Cell::new(0) };
 }
 
 pub(super) fn install(shell: Shell) {
@@ -185,10 +187,12 @@ pub(super) fn find(
         return;
     };
     let id = tab.id.get_untracked();
-    if SEARCH_BUSY.with(|busy| busy.borrow().contains(&id)) {
+    let ticket = NEXT_TICKET.get().wrapping_add(1);
+    NEXT_TICKET.set(ticket);
+    if SEARCH_TICKETS.with(|t| t.borrow().contains_key(&id)) {
         cancel_running_search(tab);
     }
-    SEARCH_BUSY.with(|busy| busy.borrow_mut().push(id));
+    SEARCH_TICKETS.with(|t| t.borrow_mut().insert(id, ticket));
     shell.status.set("検索しています…".into());
     enqueue(
         tab,
@@ -197,6 +201,7 @@ pub(super) fn find(
             query,
             options,
             file_size,
+            ticket,
         },
     );
 }
@@ -217,8 +222,6 @@ pub(super) fn find_previous(
 
 fn cancel_running_search(tab: Tab) {
     let id = tab.id.get_untracked();
-    SEARCH_BUSY.with(|busy| busy.borrow_mut().retain(|other| *other != id));
-    SEARCH_BUSY.with(|busy| busy.borrow_mut().retain(|other| *other != id));
     QUEUES.with(|queues| {
         let mut queues = queues.borrow_mut();
         if let Some(queue) = queues.get_mut(&id) {
@@ -349,10 +352,16 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
             query,
             options,
             file_size,
+            ticket,
         } => {
             let result = find_far(shell, tab, pane, handle, &query, options, file_size).await;
             let id = tab.id.get_untracked();
-            SEARCH_BUSY.with(|busy| busy.borrow_mut().retain(|other| *other != id));
+            SEARCH_TICKETS.with(|t| {
+                let mut map = t.borrow_mut();
+                if map.get(&id) == Some(&ticket) {
+                    map.remove(&id);
+                }
+            });
             match result {
                 Ok(Some(true)) => shell.status.set("見つかりました".into()),
                 Ok(Some(false)) => shell.status.set("見つかりませんでした".into()),
