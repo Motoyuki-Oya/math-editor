@@ -183,3 +183,30 @@ impl Editor {
         self.cursors = cursors;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::editor::model::Editor;
+
+    #[test]
+    fn typing_consecutive_chars_shares_same_group() {
+        let mut editor = Editor::default();
+        editor.load_sparse(Some(1));
+        editor.feed(0, vec![crate::format::document::read_line("")]);
+        editor.cursors = vec![crate::editor::model::UnifiedCursor::caret(
+            crate::structure::text::Pos::new(0, 0),
+        )];
+
+        editor.insert_text("a");
+        let flush1 = editor.take_flush().unwrap();
+        assert_eq!(flush1.group, 1);
+
+        editor.insert_text("b");
+        let flush2 = editor.take_flush().unwrap();
+        assert_eq!(flush2.group, 1, "second char should share group 1");
+
+        editor.insert_text("c");
+        let flush3 = editor.take_flush().unwrap();
+        assert_eq!(flush3.group, 1, "third char should share group 1");
+    }
+}

@@ -2081,4 +2081,78 @@ mod tests {
         let panes = linked_panes(999);
         assert_eq!(panes, vec![999]);
     }
+
+    #[test]
+    fn linked_typing_consecutive_chars_group_check() {
+        let doc_id = 1111;
+        let doc = get_or_create_doc(doc_id);
+        doc.borrow_mut().load_sparse(Some(1));
+        doc.borrow_mut().feed(0, vec![document::read_line("")]);
+
+        let mut c1 = vec![UnifiedCursor::caret(Pos::new(0, 0))];
+        let mut c2 = vec![UnifiedCursor::caret(Pos::new(0, 0))];
+
+        // 1文字目 'a' (連動)
+        let was_grouping = doc.borrow_mut().begin_group();
+        {
+            let mut ed1 = Editor {
+                document: std::mem::take(&mut *doc.borrow_mut()),
+                cursors: std::mem::take(&mut c1),
+            };
+            ed1.insert_text("a");
+            *doc.borrow_mut() = ed1.document;
+            c1 = ed1.cursors;
+        }
+        {
+            let mut ed2 = Editor {
+                document: std::mem::take(&mut *doc.borrow_mut()),
+                cursors: std::mem::take(&mut c2),
+            };
+            ed2.insert_text("a");
+            *doc.borrow_mut() = ed2.document;
+            c2 = ed2.cursors;
+        }
+        doc.borrow_mut().end_group(was_grouping);
+
+        let mut ed_flush1 = Editor {
+            document: std::mem::take(&mut *doc.borrow_mut()),
+            cursors: vec![],
+        };
+        let flush1 = take_flush_of(&mut ed_flush1).unwrap();
+        *doc.borrow_mut() = ed_flush1.document;
+
+        // 2文字目 'b' (連動)
+        let was_grouping = doc.borrow_mut().begin_group();
+        {
+            let mut ed1 = Editor {
+                document: std::mem::take(&mut *doc.borrow_mut()),
+                cursors: std::mem::take(&mut c1),
+            };
+            ed1.insert_text("b");
+            assert_eq!(ed1.cursors[0].sel.head, Pos::new(0, 2));
+            *doc.borrow_mut() = ed1.document;
+        }
+        {
+            let mut ed2 = Editor {
+                document: std::mem::take(&mut *doc.borrow_mut()),
+                cursors: std::mem::take(&mut c2),
+            };
+            ed2.insert_text("b");
+            assert_eq!(ed2.cursors[0].sel.head, Pos::new(0, 2));
+            *doc.borrow_mut() = ed2.document;
+        }
+        doc.borrow_mut().end_group(was_grouping);
+
+        let mut ed_flush2 = Editor {
+            document: std::mem::take(&mut *doc.borrow_mut()),
+            cursors: vec![],
+        };
+        let flush2 = take_flush_of(&mut ed_flush2).unwrap();
+        *doc.borrow_mut() = ed_flush2.document;
+
+        assert_eq!(
+            flush1.group, flush2.group,
+            "consecutive typing across linked transaction must share group"
+        );
+    }
 }

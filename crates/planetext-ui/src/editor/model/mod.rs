@@ -73,7 +73,6 @@ impl Document {
         if !was_grouping {
             self.recorder.grouped = false;
         }
-        self.recorder.cut();
     }
 
     /// 文書の本体が巻き戻ったのに合わせる: 送られてきた置き換え差分（splices）を手元のテキストに
