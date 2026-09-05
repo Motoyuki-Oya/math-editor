@@ -430,6 +430,95 @@ fn read_line_bounded<R: BufRead>(
     }
 }
 
+/// 30MB 以上の巨大ファイルに対する並列走査のしきい値
+pub(crate) const PARALLEL_SEARCH_THRESHOLD: usize = 30 * 1024 * 1024;
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_raw_hit_helper(
+    abs_byte: usize,
+    abs_end_byte: usize,
+    mmap: &[u8],
+    marks: &[u64],
+    delimiter: &[u8],
+    encoding: FileEncoding,
+    fixed_char_count: Option<usize>,
+    encoded_marker: &[u8],
+) -> crate::search::RawHit {
+    let mark_idx = marks
+        .partition_point(|&mark| mark <= abs_byte as u64)
+        .saturating_sub(1);
+    let mark_byte = marks.get(mark_idx).copied().unwrap_or(0) as usize;
+    let slice_to_count = &mmap[mark_byte..abs_byte];
+
+    let line_in_mark = if delimiter.len() == 1 {
+        memchr::memchr_iter(delimiter[0], slice_to_count).count()
+    } else {
+        memchr::memmem::find_iter(slice_to_count, delimiter).count()
+    };
+    let line = mark_idx * STRIDE + line_in_mark;
+
+    // 行頭バイト位置
+    let line_start_byte = if line_in_mark == 0 {
+        mark_byte
+    } else if delimiter.len() == 1 {
+        let last_delim = memchr::memrchr(delimiter[0], slice_to_count).unwrap_or(0);
+        mark_byte + last_delim + delimiter.len()
+    } else {
+        let mut last = 0;
+        for pos in memchr::memmem::find_iter(slice_to_count, delimiter) {
+            last = pos;
+        }
+        mark_byte + last + delimiter.len()
+    };
+
+    // 行頭から一致位置までの列（文字数）
+    let col_bytes = abs_byte.saturating_sub(line_start_byte);
+    let col_slice = &mmap[line_start_byte..line_start_byte + col_bytes];
+    let col = encoding.decode_line(col_slice).chars().count();
+
+    // 一致箇所の文字数
+    let match_chars = if let Some(fc) = fixed_char_count {
+        fc
+    } else {
+        let match_slice = &mmap[abs_byte..abs_end_byte];
+        encoding.decode_line(match_slice).chars().count()
+    };
+
+    // 行末バイト位置
+    let rest_slice = &mmap[abs_byte..];
+    let line_end_byte = if delimiter.len() == 1 {
+        memchr::memchr(delimiter[0], rest_slice)
+            .map(|pos| abs_byte + pos)
+            .unwrap_or(mmap.len())
+    } else {
+        memchr::memmem::find_iter(rest_slice, delimiter)
+            .next()
+            .map(|pos| abs_byte + pos)
+            .unwrap_or(mmap.len())
+    };
+    let whole_line_slice = &mmap[line_start_byte..line_end_byte];
+    let has_marker = if !encoded_marker.is_empty() {
+        if encoded_marker.len() == 1 {
+            memchr::memchr(encoded_marker[0], whole_line_slice).is_some()
+        } else {
+            memchr::memmem::find_iter(whole_line_slice, encoded_marker).next().is_some()
+        }
+    } else {
+        false
+    };
+
+    crate::search::RawHit {
+        hit: crate::search::ScanHit {
+            line,
+            notation: has_marker,
+            start: col,
+            end: col + match_chars,
+        },
+        start_byte: abs_byte,
+        end_byte: abs_end_byte,
+    }
+}
+
 impl Source {
     /// 30MB 以上の巨大ファイルの検索やインデックス構築において、
     /// 一時的なゼロコピー生バイト走査を行うための mmap を取得する。
@@ -448,13 +537,14 @@ impl Source {
     /// ファイルサイズにかかわらず、mmap 生バイト列に対する直接走査を行い、
     /// 一致箇所のみ O(log N) マーク二分探索で行・列番号を算出する超高速走査。
     /// DocumentMatcher trait により、リテラル・正規表現・bi-gram ブロック刈り込みを完全統一。
+    /// 30MB 以上のファイルでは 2〜4 スレッドに自動分散して並列実行する。
     pub(crate) fn scan_matches(
         &self,
         matcher: &dyn crate::search::DocumentMatcher,
         search_index: Option<&crate::search_index::SearchIndex>,
         marker: char,
         limit: usize,
-        cancelled: &dyn Fn() -> bool,
+        cancelled: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<Vec<crate::search::RawHit>, String> {
         let mmap = self.mmap()?;
         let content_offset = self.content_offset as usize;
@@ -470,104 +560,153 @@ impl Source {
             Vec::new()
         };
         let fixed_char_count = matcher.fixed_char_count();
+        let marks = self.index.state.lock().unwrap().marks.clone();
 
-        let raw_matches = matcher.find_in_bytes(haystack, encoding);
+        let override_threads = std::env::var("PLANETEXT_SEARCH_THREADS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok());
+        let available = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let num_threads = override_threads.unwrap_or_else(|| available.clamp(2, 4));
 
-        let mut hits = Vec::new();
-        let mut count = 0;
-        for (start, end) in raw_matches {
-            count += 1;
-            if count % 256 == 0 && cancelled() {
-                return Ok(Vec::new());
-            }
-            if hits.len() >= limit {
-                break;
-            }
-            let abs_byte = content_offset + start;
-            let abs_end_byte = content_offset + end;
-
-            // bi-gram 索引が存在する場合、ブロック刈り込みをチェック
-            if let Some(index) = search_index {
-                let block = abs_byte / crate::search_index::INDEX_BLOCK_BYTES;
-                if !matcher.may_contain_in_block(index, block) {
-                    continue;
+        if haystack.len() < PARALLEL_SEARCH_THRESHOLD || num_threads <= 1 {
+            // シングルスレッド走査
+            let raw_matches = matcher.find_in_bytes(haystack, encoding);
+            let mut hits = Vec::new();
+            let mut count = 0;
+            for (start, end) in raw_matches {
+                count += 1;
+                if count % 256 == 0 && cancelled() {
+                    return Ok(Vec::new());
                 }
+                if hits.len() >= limit {
+                    break;
+                }
+                let abs_byte = content_offset + start;
+                let abs_end_byte = content_offset + end;
+
+                // bi-gram 索引が存在する場合、ブロック刈り込みをチェック
+                if let Some(index) = search_index {
+                    let block = abs_byte / crate::search_index::INDEX_BLOCK_BYTES;
+                    if !matcher.may_contain_in_block(index, block) {
+                        continue;
+                    }
+                }
+
+                hits.push(resolve_raw_hit_helper(
+                    abs_byte,
+                    abs_end_byte,
+                    &mmap,
+                    &marks,
+                    &delimiter,
+                    encoding,
+                    fixed_char_count,
+                    &encoded_marker,
+                ));
             }
-
-            let (mark_idx, mark_byte) = self.index.mark_before_offset(abs_byte as u64);
-            let mark_byte = mark_byte as usize;
-            let slice_to_count = &mmap[mark_byte..abs_byte];
-
-            let line_in_mark = if delimiter.len() == 1 {
-                memchr::memchr_iter(delimiter[0], slice_to_count).count()
-            } else {
-                memchr::memmem::find_iter(slice_to_count, &delimiter).count()
-            };
-            let line = mark_idx * STRIDE + line_in_mark;
-
-            // 行頭バイト位置
-            let line_start_byte = if line_in_mark == 0 {
-                mark_byte
-            } else if delimiter.len() == 1 {
-                let last_delim = memchr::memrchr(delimiter[0], slice_to_count).unwrap_or(0);
-                mark_byte + last_delim + delimiter.len()
-            } else {
-                let mut last = 0;
-                for pos in memchr::memmem::find_iter(slice_to_count, &delimiter) {
-                    last = pos;
-                }
-                mark_byte + last + delimiter.len()
-            };
-
-            // 行頭から一致位置までの列（文字数）
-            let col_bytes = abs_byte.saturating_sub(line_start_byte);
-            let col_slice = &mmap[line_start_byte..line_start_byte + col_bytes];
-            let col = encoding.decode_line(col_slice).chars().count();
-
-            // 一致箇所の文字数
-            let match_chars = if let Some(fc) = fixed_char_count {
-                fc
-            } else {
-                let match_slice = &mmap[abs_byte..abs_end_byte];
-                encoding.decode_line(match_slice).chars().count()
-            };
-
-            // 行末バイト位置
-            let rest_slice = &mmap[abs_byte..];
-            let line_end_byte = if delimiter.len() == 1 {
-                memchr::memchr(delimiter[0], rest_slice)
-                    .map(|pos| abs_byte + pos)
-                    .unwrap_or(mmap.len())
-            } else {
-                memchr::memmem::find_iter(rest_slice, &delimiter)
-                    .next()
-                    .map(|pos| abs_byte + pos)
-                    .unwrap_or(mmap.len())
-            };
-            let whole_line_slice = &mmap[line_start_byte..line_end_byte];
-            let has_marker = if !encoded_marker.is_empty() {
-                if encoded_marker.len() == 1 {
-                    memchr::memchr(encoded_marker[0], whole_line_slice).is_some()
-                } else {
-                    memchr::memmem::find_iter(whole_line_slice, &encoded_marker).next().is_some()
-                }
-            } else {
-                false
-            };
-
-            hits.push(crate::search::RawHit {
-                hit: crate::search::ScanHit {
-                    line,
-                    notation: has_marker,
-                    start: col,
-                    end: col + match_chars,
-                },
-                start_byte: abs_byte,
-                end_byte: abs_end_byte,
-            });
+            return Ok(hits);
         }
 
-        Ok(hits)
+        // 2〜4スレッド並列走査
+        let chunk_size = haystack.len() / num_threads;
+        let mut chunk_ranges: Vec<(usize, usize)> = Vec::with_capacity(num_threads);
+        let mut start = 0;
+        for k in 1..num_threads {
+            let ideal_end = k * chunk_size;
+            let split = if ideal_end < haystack.len() {
+                if delimiter.len() == 1 {
+                    memchr::memchr(delimiter[0], &haystack[ideal_end..])
+                        .map(|p| ideal_end + p + 1)
+                        .unwrap_or(haystack.len())
+                } else {
+                    memchr::memmem::find(&haystack[ideal_end..], &delimiter)
+                        .map(|p| ideal_end + p + delimiter.len())
+                        .unwrap_or(haystack.len())
+                }
+            } else {
+                haystack.len()
+            };
+            if split > start {
+                chunk_ranges.push((start, split));
+                start = split;
+            }
+        }
+        if start < haystack.len() {
+            chunk_ranges.push((start, haystack.len()));
+        }
+
+        let cancel_flag = std::sync::atomic::AtomicBool::new(false);
+        let thread_results: Vec<Vec<crate::search::RawHit>> = std::thread::scope(|s| {
+            let mut handles = Vec::with_capacity(chunk_ranges.len());
+            for &(c_start, c_end) in &chunk_ranges {
+                let chunk_slice = &haystack[c_start..c_end];
+                let chunk_offset = content_offset + c_start;
+                let cancel_ref = &cancel_flag;
+                let marks_ref = &marks;
+                let delim_ref = &delimiter;
+                let enc_marker_ref = &encoded_marker;
+                let mmap_ref = &mmap;
+
+                handles.push(s.spawn(move || {
+                    let raw_matches = matcher.find_in_bytes(chunk_slice, encoding);
+                    let mut chunk_hits = Vec::new();
+                    let mut count = 0;
+                    for (rel_start, rel_end) in raw_matches {
+                        count += 1;
+                        if count % 256 == 0 {
+                            if cancel_ref.load(std::sync::atomic::Ordering::Relaxed) || cancelled() {
+                                cancel_ref.store(true, std::sync::atomic::Ordering::Relaxed);
+                                return Vec::new();
+                            }
+                        }
+                        if chunk_hits.len() >= limit {
+                            break;
+                        }
+                        let abs_byte = chunk_offset + rel_start;
+                        let abs_end_byte = chunk_offset + rel_end;
+
+                        if let Some(index) = search_index {
+                            let block = abs_byte / crate::search_index::INDEX_BLOCK_BYTES;
+                            if !matcher.may_contain_in_block(index, block) {
+                                continue;
+                            }
+                        }
+
+                        chunk_hits.push(resolve_raw_hit_helper(
+                            abs_byte,
+                            abs_end_byte,
+                            mmap_ref,
+                            marks_ref,
+                            delim_ref,
+                            encoding,
+                            fixed_char_count,
+                            enc_marker_ref,
+                        ));
+                    }
+                    chunk_hits
+                }));
+            }
+
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_default())
+                .collect()
+        });
+
+        if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) || cancelled() {
+            return Ok(Vec::new());
+        }
+
+        let mut total_hits = Vec::new();
+        for ch in thread_results {
+            total_hits.extend(ch);
+            if total_hits.len() >= limit {
+                total_hits.truncate(limit);
+                break;
+            }
+        }
+        Ok(total_hits)
     }
 
     #[allow(dead_code)]

@@ -243,3 +243,127 @@ fn bench_800mb_japanese_and_prev() {
     app.close_document(handle);
 }
 
+#[test]
+#[ignore]
+fn bench_parallel_comparison_800mb() {
+    let path = "C:\\workspace\\test-800mb.txt";
+    if !Path::new(path).exists() {
+        println!("File {path} does not exist, skipping.");
+        return;
+    }
+
+    let app = Application::default();
+    println!("Opening document: {path}...");
+    let opened = app.open_document(path.to_string()).expect("Failed to open");
+    let handle = opened.handle;
+
+    let finish_job = app.finish_document(handle).expect("finish_document failed");
+    let total_lines = loop {
+        if let Some(count) = finish_job.poll().expect("poll failed") {
+            break count;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+
+    let thread_counts = [1, 2, 4, 8];
+
+    println!("\n=======================================================");
+    println!("[PARALLEL BENCHMARK 800MB] 800MB (~16,000,000 lines)");
+    println!("=======================================================");
+
+    // 1. リテラル検索（末尾ヒット・800MB全文走査）
+    // 末尾の cccquick を対象としつつ、キャッシュ回避のために異なるクエリを使用
+    // ※ 800MBファイル内には "cccquick" 以外に "regular benchmark content line" などが存在
+    println!("\n--- 1. Literal Search (Worst-Case 100% Scan: 0 hits) ---");
+    for &th in &thread_counts {
+        std::env::set_var("PLANETEXT_SEARCH_THREADS", th.to_string());
+        let query = format!("nonexistent_kw_800mb_th_{th}");
+        let t0 = Instant::now();
+        let job = app.prepare_search(
+            handle,
+            query,
+            false,
+            true,
+            '\0',
+            0,
+            total_lines,
+            None,
+            true,
+        ).unwrap();
+        let page = job.run().unwrap();
+        let elapsed = t0.elapsed();
+        println!("Threads = {:>2} | Elapsed = {:>8.2?} | Hits = {}", th, elapsed, page.hits.len());
+        assert_eq!(page.hits.len(), 0);
+    }
+
+    // 2. リテラル検索（大文字小文字無視・800MB全文走査）
+    println!("\n--- 2. Literal Search (Case-Insensitive, Worst-Case 100% Scan) ---");
+    for &th in &thread_counts {
+        std::env::set_var("PLANETEXT_SEARCH_THREADS", th.to_string());
+        let query = format!("NONEXISTENT_CI_800MB_TH_{th}");
+        let t0 = Instant::now();
+        let job = app.prepare_search(
+            handle,
+            query,
+            false,
+            false,
+            '\0',
+            0,
+            total_lines,
+            None,
+            true,
+        ).unwrap();
+        let page = job.run().unwrap();
+        let elapsed = t0.elapsed();
+        println!("Threads = {:>2} | Elapsed = {:>8.2?} | Hits = {}", th, elapsed, page.hits.len());
+        assert_eq!(page.hits.len(), 0);
+    }
+
+    // 3. 正規表現検索（800MB全文走査・末尾付近到達）
+    println!("\n--- 3. Regex Search (Case-Sensitive, 800MB Full Scan) ---");
+    for &th in &thread_counts {
+        std::env::set_var("PLANETEXT_SEARCH_THREADS", th.to_string());
+        let query = format!(r"cccquick_dummy_{th}_[0-9]+");
+        let t0 = Instant::now();
+        let job = app.prepare_search(
+            handle,
+            query,
+            true,
+            true,
+            '\0',
+            0,
+            total_lines,
+            None,
+            true,
+        ).unwrap();
+        let page = job.run().unwrap();
+        let elapsed = t0.elapsed();
+        println!("Threads = {:>2} | Elapsed = {:>8.2?} | Hits = {}", th, elapsed, page.hits.len());
+    }
+
+    // 4. 正規表現検索（大文字小文字無視・800MB全文走査）
+    println!("\n--- 4. Regex Search (Case-Insensitive, 800MB Full Scan) ---");
+    for &th in &thread_counts {
+        std::env::set_var("PLANETEXT_SEARCH_THREADS", th.to_string());
+        let query = format!(r"CCCQUICK_DUMMY_{th}_[0-9]+");
+        let t0 = Instant::now();
+        let job = app.prepare_search(
+            handle,
+            query,
+            true,
+            false,
+            '\0',
+            0,
+            total_lines,
+            None,
+            true,
+        ).unwrap();
+        let page = job.run().unwrap();
+        let elapsed = t0.elapsed();
+        println!("Threads = {:>2} | Elapsed = {:>8.2?} | Hits = {}", th, elapsed, page.hits.len());
+    }
+
+    app.close_document(handle);
+}
+
+

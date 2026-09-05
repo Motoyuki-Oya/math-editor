@@ -167,3 +167,167 @@ fn bench_search_50mb() {
     app.close_document(handle);
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn bench_parallel_comparison() {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_dir = std::env::temp_dir().join(format!("bench_parallel_{timestamp}"));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let file_path = temp_dir.join("test-50mb-par.txt");
+
+    let total_lines = 1_000_000;
+    {
+        let file = File::create(&file_path).unwrap();
+        let mut writer = BufWriter::with_capacity(1024 * 1024, file);
+        for i in 0..total_lines {
+            if i == 999_990 {
+                writer.write_all(b"marker line at end target_kw_th1 target_kw_th2 target_kw_th4 target_kw_th8\n").unwrap();
+            } else if i == 999_991 {
+                writer.write_all(b"marker line regex regex_pat_th1_end regex_pat_th2_end regex_pat_th4_end regex_pat_th8_end\n").unwrap();
+            } else {
+                writer.write_all(b"regular benchmark content line for fifty megabytes text test\n").unwrap();
+            }
+        }
+        writer.flush().unwrap();
+    }
+
+    let file_size = std::fs::metadata(&file_path).unwrap().len();
+    println!("\n=======================================================");
+    println!("[PARALLEL BENCHMARK] 50MB ({file_size} bytes, {total_lines} lines)");
+    println!("=======================================================");
+
+    let app = Application::default();
+    let opened = app.open_document(file_path.to_str().unwrap().to_string()).unwrap();
+    let handle = opened.handle;
+
+    let finish_job = app.finish_document(handle).unwrap();
+    let scanned_lines = loop {
+        if let Some(count) = finish_job.poll().unwrap() {
+            break count;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+
+    let thread_counts = [1, 2, 4, 8];
+
+    // 1. リテラル検索（末尾ヒット・全文走査）
+    println!("\n--- 1. Literal Search (Case-Sensitive, Full File Scan) ---");
+    for &th in &thread_counts {
+        std::env::set_var("PLANETEXT_SEARCH_THREADS", th.to_string());
+        let query = format!("target_kw_th{th}");
+        let t0 = Instant::now();
+        let job = app.prepare_search(
+            handle,
+            query,
+            false,
+            true,
+            '\0',
+            0,
+            scanned_lines,
+            None,
+            true,
+        ).unwrap();
+        let page = job.run().unwrap();
+        let elapsed = t0.elapsed();
+        println!("Threads = {:>2} | Elapsed = {:>8.2?} | Hits = {}", th, elapsed, page.hits.len());
+        assert_eq!(page.hits.len(), 1);
+    }
+
+    // 2. リテラル検索（大文字小文字無視・全文走査）
+    println!("\n--- 2. Literal Search (Case-Insensitive, Full File Scan) ---");
+    for &th in &thread_counts {
+        std::env::set_var("PLANETEXT_SEARCH_THREADS", th.to_string());
+        let query = format!("TARGET_KW_TH{th}");
+        let t0 = Instant::now();
+        let job = app.prepare_search(
+            handle,
+            query,
+            false,
+            false,
+            '\0',
+            0,
+            scanned_lines,
+            None,
+            true,
+        ).unwrap();
+        let page = job.run().unwrap();
+        let elapsed = t0.elapsed();
+        println!("Threads = {:>2} | Elapsed = {:>8.2?} | Hits = {}", th, elapsed, page.hits.len());
+        assert_eq!(page.hits.len(), 1);
+    }
+
+    // 3. 正規表現検索（全文走査）
+    println!("\n--- 3. Regex Search (Case-Sensitive, Full File Scan) ---");
+    for &th in &thread_counts {
+        std::env::set_var("PLANETEXT_SEARCH_THREADS", th.to_string());
+        let query = format!(r"regex_pat_th{th}_[a-z]+");
+        let t0 = Instant::now();
+        let job = app.prepare_search(
+            handle,
+            query,
+            true,
+            true,
+            '\0',
+            0,
+            scanned_lines,
+            None,
+            true,
+        ).unwrap();
+        let page = job.run().unwrap();
+        let elapsed = t0.elapsed();
+        println!("Threads = {:>2} | Elapsed = {:>8.2?} | Hits = {}", th, elapsed, page.hits.len());
+        assert_eq!(page.hits.len(), 1);
+    }
+
+    // 4. 正規表現検索（大文字小文字無視・全文走査）
+    println!("\n--- 4. Regex Search (Case-Insensitive, Full File Scan) ---");
+    for &th in &thread_counts {
+        std::env::set_var("PLANETEXT_SEARCH_THREADS", th.to_string());
+        let query = format!(r"REGEX_PAT_TH{th}_[a-z]+");
+        let t0 = Instant::now();
+        let job = app.prepare_search(
+            handle,
+            query,
+            true,
+            false,
+            '\0',
+            0,
+            scanned_lines,
+            None,
+            true,
+        ).unwrap();
+        let page = job.run().unwrap();
+        let elapsed = t0.elapsed();
+        println!("Threads = {:>2} | Elapsed = {:>8.2?} | Hits = {}", th, elapsed, page.hits.len());
+        assert_eq!(page.hits.len(), 1);
+    }
+
+    // 5. ミスマッチ走査（完全なワーストケース：0件ヒットの全バイト精査）
+    println!("\n--- 5. Worst-Case Miss Scan (0 hits, 100% Haystack Traversal) ---");
+    for &th in &thread_counts {
+        std::env::set_var("PLANETEXT_SEARCH_THREADS", th.to_string());
+        let query = format!("absolutely_nonexistent_token_threads_{th}");
+        let t0 = Instant::now();
+        let job = app.prepare_search(
+            handle,
+            query,
+            false,
+            true,
+            '\0',
+            0,
+            scanned_lines,
+            None,
+            true,
+        ).unwrap();
+        let page = job.run().unwrap();
+        let elapsed = t0.elapsed();
+        println!("Threads = {:>2} | Elapsed = {:>8.2?} | Hits = {}", th, elapsed, page.hits.len());
+        assert_eq!(page.hits.len(), 0);
+    }
+
+    app.close_document(handle);
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

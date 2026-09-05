@@ -62,7 +62,21 @@ impl Bigram {
     }
 
     pub(crate) fn from_query(query: &str, encoding: FileEncoding) -> Vec<Self> {
-        let lower_query = query.to_lowercase();
+        let mut clean = String::with_capacity(query.len());
+        let mut it = query.chars().peekable();
+        while let Some(c) = it.next() {
+            if c == '\\' {
+                if let Some(&next) = it.peek() {
+                    if next.is_ascii_punctuation() {
+                        clean.push(next);
+                        it.next();
+                        continue;
+                    }
+                }
+            }
+            clean.push(c);
+        }
+        let lower_query = clean.to_lowercase();
         let chars: Vec<_> = lower_query.chars().collect();
         chars
             .windows(2)

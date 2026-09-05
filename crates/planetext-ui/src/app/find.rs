@@ -381,6 +381,31 @@ fn update_preview(
             if let Ok(count) = result {
                 estimated_count.set(Some(count));
             }
+        } else {
+            return;
+        }
+
+        // バックグラウンドで全文並列走査を実行し、確定総数へ随時更新する。
+        let page = crate::framework::search_document(
+            handle,
+            &query,
+            options.regex,
+            options.case_sensitive,
+            crate::format::document::NOTATION_MARK,
+            0,
+            0,
+            None,
+            true,
+        )
+        .await;
+        if generation.get_untracked() == current {
+            if let Ok(page) = page {
+                if !page.cancelled {
+                    if let Some(total) = page.total_matches {
+                        estimated_count.set(Some(total));
+                    }
+                }
+            }
         }
     });
 }

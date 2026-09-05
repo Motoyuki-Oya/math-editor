@@ -420,6 +420,45 @@ pub(crate) trait DocumentMatcher: std::fmt::Debug + Send + Sync {
 
     /// 大小文字区別
     fn case_sensitive(&self) -> bool;
+
+    /// 生バイト列内の一致件数を直接カウントする（サンプリングや高速推定用）
+    fn count_in_bytes(&self, bytes: &[u8], encoding: FileEncoding) -> usize {
+        self.find_in_bytes(bytes, encoding).count()
+    }
+
+    /// 文字列内の一致件数を直接カウントする
+    fn count_in_str(&self, text: &str) -> usize {
+        self.find_in_str(text).count()
+    }
+
+    /// mmap 生バイト列の全域（0〜EOF）から均等な窓（64窓）をサンプリングし、
+    /// ファイル全体の一致件数を高精度かつ高速に推定する。
+    fn estimate_from_bytes(&self, haystack: &[u8], encoding: FileEncoding) -> usize {
+        const WINDOWS: usize = 64;
+        const WINDOW_BYTES: usize = 32 * 1024; // 32KB
+        let total_bytes = haystack.len();
+        if total_bytes == 0 {
+            return 0;
+        }
+        if total_bytes <= WINDOW_BYTES {
+            return self.count_in_bytes(haystack, encoding);
+        }
+        let step = total_bytes.div_ceil(WINDOWS).max(WINDOW_BYTES);
+        let take = WINDOW_BYTES;
+        let mut sample_hits = 0;
+        let mut sampled_bytes = 0;
+        for from in (0..total_bytes).step_by(step) {
+            let count = take.min(total_bytes - from);
+            let window = &haystack[from..from + count];
+            sample_hits += self.count_in_bytes(window, encoding);
+            sampled_bytes += count;
+        }
+        if sampled_bytes == 0 {
+            return 0;
+        }
+        ((sample_hits as u128 * total_bytes as u128 / sampled_bytes as u128) as usize)
+            .min(total_bytes)
+    }
 }
 
 #[derive(Debug)]
@@ -542,6 +581,45 @@ impl DocumentMatcher for LiteralMatcher {
     fn case_sensitive(&self) -> bool {
         self.case_sensitive
     }
+
+    fn count_in_bytes(&self, bytes: &[u8], encoding: FileEncoding) -> usize {
+        let encoded_query = encoding.encode_str(&self.query);
+        let unit = encoding.unit_bytes();
+        let query_len = encoded_query.len();
+        if query_len == 0 {
+            return 0;
+        }
+
+        let has_casing = self.query.chars().any(|c| {
+            c.is_alphabetic()
+                && (c.to_lowercase().collect::<String>() != c.to_uppercase().collect::<String>())
+        });
+
+        if self.case_sensitive || !has_casing {
+            memchr::memmem::find_iter(bytes, &encoded_query)
+                .filter(|&pos| unit == 1 || pos.is_multiple_of(unit))
+                .count()
+        } else if unit == 1 {
+            literal_positions(bytes, &encoded_query, false).len()
+        } else if let Ok(re) = regex::bytes::RegexBuilder::new(&regex::escape(&self.query))
+            .case_insensitive(true)
+            .build()
+        {
+            re.find_iter(bytes)
+                .filter(|m| unit == 1 || m.start().is_multiple_of(unit))
+                .count()
+        } else {
+            0
+        }
+    }
+
+    fn count_in_str(&self, text: &str) -> usize {
+        if self.case_sensitive {
+            text.match_indices(&self.query).count()
+        } else {
+            self.pattern.find_iter(text).count()
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -615,6 +693,23 @@ impl DocumentMatcher for RegexMatcher {
     fn case_sensitive(&self) -> bool {
         self.case_sensitive
     }
+
+    fn count_in_bytes(&self, bytes: &[u8], encoding: FileEncoding) -> usize {
+        if matches!(encoding, FileEncoding::Utf8 | FileEncoding::Utf8Bom) {
+            if let Some(ref re) = self.bytes_regex {
+                return re.find_iter(bytes).count();
+            }
+        }
+        0
+    }
+
+    fn count_in_str(&self, text: &str) -> usize {
+        self.pattern.find_iter(text).count()
+    }
+
+    fn estimate_with_index(&self, index: &crate::search_index::SearchIndex) -> Option<usize> {
+        index.estimate_matches(&self.query)
+    }
 }
 
 impl DocumentMatcher for regex::Regex {
@@ -655,6 +750,23 @@ impl DocumentMatcher for regex::Regex {
 
     fn case_sensitive(&self) -> bool {
         true
+    }
+
+    fn count_in_bytes(&self, bytes: &[u8], encoding: FileEncoding) -> usize {
+        if matches!(encoding, FileEncoding::Utf8 | FileEncoding::Utf8Bom) {
+            if let Ok(re) = regex::bytes::RegexBuilder::new(self.as_str()).build() {
+                return re.find_iter(bytes).count();
+            }
+        }
+        0
+    }
+
+    fn count_in_str(&self, text: &str) -> usize {
+        self.find_iter(text).count()
+    }
+
+    fn estimate_with_index(&self, index: &crate::search_index::SearchIndex) -> Option<usize> {
+        index.estimate_matches(self.as_str())
     }
 }
 
@@ -716,7 +828,7 @@ impl Document {
         &mut self,
         matcher: &dyn DocumentMatcher,
         marker: char,
-        cancelled: &dyn Fn() -> bool,
+        cancelled: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<Vec<ScanHit>, String> {
         let is_clean = self.is_clean();
         let mut all_hits = Vec::new();
@@ -823,7 +935,7 @@ impl Document {
     pub(crate) fn search_candidates(
         &mut self,
         spec: SearchSpec<'_>,
-        cancelled: &dyn Fn() -> bool,
+        cancelled: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<SearchCandidates, String> {
         let from = spec.from;
         if cancelled() {
@@ -993,6 +1105,17 @@ impl Document {
             }
         }
 
+        if let Some(ref source) = self.source {
+            if self.is_clean() {
+                if let Ok(mmap) = source.mmap() {
+                    let offset = source.content_offset as usize;
+                    if offset < mmap.len() {
+                        return Ok(matcher.estimate_from_bytes(&mmap[offset..], source.encoding));
+                    }
+                }
+            }
+        }
+
         let effective_count = self.estimated_line_count();
 
         const WINDOWS: usize = 64;
@@ -1001,11 +1124,10 @@ impl Document {
         let take = LINES_PER_WINDOW.min(step);
         let mut hits = 0;
         let mut sampled = 0;
-        let pattern = matcher.pattern();
         for from in (0..self.line_count()).step_by(step) {
             let count = take.min(self.line_count() - from);
             self.each_line(from, count, &mut |_, line| {
-                hits += pattern.find_iter(line).count();
+                hits += matcher.count_in_str(line);
                 sampled += 1;
                 true
             })?;
