@@ -1,6 +1,5 @@
 //! 検索パターンの選択と一致処理を提供します。
 
-use memchr::memmem::Finder;
 use regex::Regex;
 use unicode_normalization::UnicodeNormalization;
 
@@ -32,7 +31,7 @@ pub(super) struct LiteralMatcher {
 
 #[derive(Debug)]
 struct PatternVariant {
-    finder: Finder<'static>,
+    bytes: Box<[u8]>,
     char_count: usize,
     byte_len: usize,
 }
@@ -57,10 +56,9 @@ impl LiteralMatcher {
             for s in &variant_strings {
                 let char_count = s.chars().count();
                 let byte_len = s.len();
-                let leaked_bytes: &'static [u8] =
-                    Box::leak(s.as_bytes().to_vec().into_boxed_slice());
+                let bytes = s.as_bytes().to_vec().into_boxed_slice();
                 variants.push(PatternVariant {
-                    finder: Finder::new(leaked_bytes),
+                    bytes,
                     char_count,
                     byte_len,
                 });
@@ -98,7 +96,7 @@ impl LiteralMatcher {
         if self.variants.len() == 1 {
             let v = &self.variants[0];
             let mut found = Vec::new();
-            for byte_pos in v.finder.find_iter(run.as_bytes()) {
+            for byte_pos in memchr::memmem::find_iter(run.as_bytes(), &v.bytes) {
                 let from = run[..byte_pos].chars().count();
                 let to = from + v.char_count;
                 let matched_text = run[byte_pos..byte_pos + v.byte_len].to_string();
@@ -110,7 +108,7 @@ impl LiteralMatcher {
         // 複数パターンの場合（NFC / NFD 展開）
         let mut matches_raw: Vec<(usize, usize, usize)> = Vec::new(); // (byte_pos, byte_len, char_count)
         for v in &self.variants {
-            for byte_pos in v.finder.find_iter(run.as_bytes()) {
+            for byte_pos in memchr::memmem::find_iter(run.as_bytes(), &v.bytes) {
                 matches_raw.push((byte_pos, v.byte_len, v.char_count));
             }
         }
@@ -325,7 +323,7 @@ mod tests {
 
         let query_nfc: String = query.nfc().collect();
         let query_char_count = query_nfc.chars().count();
-        let finder = Finder::new(query_nfc.as_bytes());
+        let finder = memchr::memmem::Finder::new(query_nfc.as_bytes());
 
         let t0 = Instant::now();
         let mut count1 = 0;
@@ -383,7 +381,7 @@ mod tests {
         let t2 = Instant::now();
         let mut buffer_count = 0;
         for v in &matcher.variants {
-            for byte_pos in v.finder.find_iter(bytes) {
+            for byte_pos in memchr::memmem::find_iter(bytes, &v.bytes) {
                 buffer_count += 1;
                 let _ = byte_pos;
             }

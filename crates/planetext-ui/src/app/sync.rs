@@ -17,8 +17,6 @@ use super::shell::{Shell, Tab};
 use crate::editor;
 use crate::framework;
 
-/// 一度に取り寄せる行数。見えている窓と少しの余白が 1 回で届く程度。
-const CHUNK_LINES: usize = 20_000;
 const TAIL_LINES: usize = 200;
 
 enum Task {
@@ -39,7 +37,7 @@ enum Task {
         query: String,
         options: editor::SearchOptions,
         file_size: Option<usize>,
-        ticket: u64,
+        forward: bool,
     },
 }
 
@@ -49,13 +47,10 @@ thread_local! {
     static QUEUES: RefCell<HashMap<usize, VecDeque<(Tab, Task)>>> = RefCell::new(HashMap::new());
     /// 列が走っているタブ。二重に走らせない。
     static BUSY: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
-    /// 取り寄せ中（行描画）の範囲。重い検索タスクに巻き込まれず最優先で描画する。
+    /// ペインごとの取り寄せ中範囲（スライス単位）。
     static FETCH_RANGES: RefCell<HashMap<usize, Range<usize>>> = RefCell::new(HashMap::new());
-    /// 取り寄せが走っているタブ。
+    /// 取り寄せが走っているペイン。
     static FETCH_BUSY: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
-    /// 検索が走っているタブと最新チケット。世代管理により置換検索の誤解除を防ぐ。
-    static SEARCH_TICKETS: RefCell<HashMap<usize, u64>> = RefCell::new(HashMap::new());
-    static NEXT_TICKET: Cell<u64> = const { Cell::new(0) };
 }
 
 pub(super) fn install(shell: Shell) {
@@ -84,31 +79,30 @@ fn fetch(shell: Shell, editor_pane: usize, range: Range<usize>) {
     let Some(tab) = shell.tab_of(editor_pane) else {
         return;
     };
-    let id = tab.id.get_untracked();
     FETCH_RANGES.with(|ranges| {
         let mut ranges = ranges.borrow_mut();
-        let current = ranges.entry(id).or_insert_with(|| range.clone());
+        let current = ranges.entry(editor_pane).or_insert_with(|| range.clone());
         if range.start <= current.end && current.start <= range.end {
             *current = current.start.min(range.start)..current.end.max(range.end);
         } else {
             *current = range;
         }
     });
-    let busy = FETCH_BUSY.with(|busy| busy.borrow().contains(&id));
+    let busy = FETCH_BUSY.with(|busy| busy.borrow().contains(&editor_pane));
     if busy {
         return;
     }
-    FETCH_BUSY.with(|busy| busy.borrow_mut().push(id));
+    FETCH_BUSY.with(|busy| busy.borrow_mut().push(editor_pane));
     spawn_local(async move {
-        run_fetch(shell, tab).await;
-        FETCH_BUSY.with(|busy| busy.borrow_mut().retain(|other| *other != id));
+        run_fetch(shell, tab, editor_pane).await;
+        FETCH_BUSY.with(|busy| busy.borrow_mut().retain(|other| *other != editor_pane));
     });
 }
 
-async fn run_fetch(shell: Shell, tab: Tab) {
-    let id = tab.id.get_untracked();
+async fn run_fetch(_shell: Shell, tab: Tab, editor_pane: usize) {
+    let doc_id = tab.id.get_untracked();
     loop {
-        let range = FETCH_RANGES.with(|ranges| ranges.borrow_mut().remove(&id));
+        let range = FETCH_RANGES.with(|ranges| ranges.borrow_mut().remove(&editor_pane));
         let Some(range) = range else {
             break;
         };
@@ -118,24 +112,23 @@ async fn run_fetch(shell: Shell, tab: Tab) {
         let Some(handle) = handle_of(tab).await else {
             break;
         };
-        let count = range.len().min(CHUNK_LINES);
+        let count = range.len();
         let Ok(read_res) = framework::read_lines(handle, range.start, count).await else {
             break;
         };
-        if !read_res.lines.is_empty() {
-            shell.feed(tab, read_res.from, &read_res.lines);
+        let known_revision = editor::get_or_create_doc_model(doc_id)
+            .borrow()
+            .known_revision;
+        if read_res.revision < known_revision {
+            // 編集前の古い revision の応答は行番号がずれているため破棄
+            continue;
         }
-        let rest = read_res.from + read_res.lines.len()..range.end;
-        if !rest.is_empty() && !read_res.lines.is_empty() {
-            FETCH_RANGES.with(|ranges| {
-                let mut ranges = ranges.borrow_mut();
-                let current = ranges.entry(id).or_insert_with(|| rest.clone());
-                if rest.start <= current.end && current.start <= rest.end {
-                    *current = current.start.min(rest.start)..current.end.max(rest.end);
-                } else {
-                    *current = rest;
-                }
-            });
+        if read_res.revision > known_revision {
+            let doc_model = editor::get_or_create_doc_model(doc_id);
+            doc_model.borrow_mut().known_revision = read_res.revision;
+        }
+        if !read_res.lines.is_empty() {
+            editor::feed_pane(editor_pane, read_res.from, &read_res.lines);
         }
     }
 }
@@ -145,21 +138,19 @@ pub(super) fn flush(shell: Shell, editor_pane: usize) {
     let Some(batch) = editor::take_flush(editor_pane) else {
         return;
     };
+    editor::apply_flush_to_other_panes(editor_pane, &batch);
     let Some(tab) = shell.tab_of(editor_pane) else {
         return;
     };
-    cancel_running_search(tab);
     enqueue(tab, Task::Edits(batch));
 }
 
 pub(super) fn undo(shell: Shell, redo: bool) {
     let tab = shell.tab_untracked();
-    cancel_running_search(tab);
     enqueue(tab, Task::Undo { redo });
 }
 
 pub(super) fn save(tab: Tab, path: String) {
-    cancel_running_search(tab);
     enqueue(tab, Task::Save { path });
 }
 
@@ -168,7 +159,6 @@ pub(super) fn draft(tab: Tab) {
 }
 
 /// 次を検索。手元に届いている行にあればその場で即座にジャンプ、そうでなければ本体の走査で。
-/// すでに検索が走っている間は重複実行をブロックし、負荷を抑制する。
 pub(super) fn find(
     shell: Shell,
     pane: usize,
@@ -176,23 +166,29 @@ pub(super) fn find(
     options: editor::SearchOptions,
     file_size: Option<usize>,
 ) {
-    if editor::find_next_resident(&query, options, file_size) {
+    if editor::find_next_resident_pane(pane, &query, options, file_size) {
+        if let Some(pane_obj) = shell.pane_for_editor(pane) {
+            let total = pane_obj.search_status.get_untracked().1;
+            let num = editor::current_match_number_pane(pane, &query, options, total.unwrap_or(0));
+            pane_obj.search_status.set((num, total));
+        }
         return;
     }
     if editor::fully_resident() {
-        editor::find_next(&query, options, file_size);
+        if editor::find_next_pane(pane, &query, options, file_size) {
+            if let Some(pane_obj) = shell.pane_for_editor(pane) {
+                let total = pane_obj.search_status.get_untracked().1;
+                let num =
+                    editor::current_match_number_pane(pane, &query, options, total.unwrap_or(0));
+                pane_obj.search_status.set((num, total));
+            }
+        }
         return;
     }
     let Some(tab) = shell.tab_of(pane) else {
         return;
     };
-    let id = tab.id.get_untracked();
-    let ticket = NEXT_TICKET.get().wrapping_add(1);
-    NEXT_TICKET.set(ticket);
-    if SEARCH_TICKETS.with(|t| t.borrow().contains_key(&id)) {
-        cancel_running_search(tab);
-    }
-    SEARCH_TICKETS.with(|t| t.borrow_mut().insert(id, ticket));
+    drop_pending_find(tab);
     shell.status.set("検索しています…".into());
     enqueue(
         tab,
@@ -201,26 +197,56 @@ pub(super) fn find(
             query,
             options,
             file_size,
-            ticket,
+            forward: true,
         },
     );
 }
 
-/// 前を検索。手元に届いている行にあればその場で即座にジャンプ、そうでなければ全体から。
+/// 前を検索。手元に届いている行にあればその場で即座にジャンプ、そうでなければ本体の走査で。
 pub(super) fn find_previous(
-    _shell: Shell,
-    _pane: usize,
+    shell: Shell,
+    pane: usize,
     query: String,
     options: editor::SearchOptions,
     file_size: Option<usize>,
 ) {
-    if editor::find_previous_resident(&query, options, file_size) {
+    if editor::find_previous_resident_pane(pane, &query, options, file_size) {
+        if let Some(pane_obj) = shell.pane_for_editor(pane) {
+            let total = pane_obj.search_status.get_untracked().1;
+            let num = editor::current_match_number_pane(pane, &query, options, total.unwrap_or(0));
+            pane_obj.search_status.set((num, total));
+        }
         return;
     }
-    editor::find_previous(&query, options, file_size);
+    if editor::fully_resident() {
+        if editor::find_previous_pane(pane, &query, options, file_size) {
+            if let Some(pane_obj) = shell.pane_for_editor(pane) {
+                let total = pane_obj.search_status.get_untracked().1;
+                let num =
+                    editor::current_match_number_pane(pane, &query, options, total.unwrap_or(0));
+                pane_obj.search_status.set((num, total));
+            }
+        }
+        return;
+    }
+    let Some(tab) = shell.tab_of(pane) else {
+        return;
+    };
+    drop_pending_find(tab);
+    shell.status.set("検索しています…".into());
+    enqueue(
+        tab,
+        Task::Find {
+            pane,
+            query,
+            options,
+            file_size,
+            forward: false,
+        },
+    );
 }
 
-fn cancel_running_search(tab: Tab) {
+fn drop_pending_find(tab: Tab) {
     let id = tab.id.get_untracked();
     QUEUES.with(|queues| {
         let mut queues = queues.borrow_mut();
@@ -228,9 +254,6 @@ fn cancel_running_search(tab: Tab) {
             queue.retain(|(_, task)| !matches!(task, Task::Find { .. }));
         }
     });
-    if let Some(handle) = tab.doc.get_untracked() {
-        spawn_local(async move { framework::cancel_search(handle).await });
-    }
 }
 
 fn enqueue(tab: Tab, task: Task) {
@@ -288,8 +311,9 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
             Err(error) => shell.status.set(error),
         },
         Task::Edits(batch) => {
+            let mut latest_revision = None;
             for edit in &batch.edits {
-                if framework::replace_lines(
+                match framework::replace_lines(
                     handle,
                     edit.from,
                     edit.to,
@@ -300,25 +324,31 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
                     None,
                 )
                 .await
-                .is_err()
                 {
-                    return false;
+                    Ok(applied) => latest_revision = Some(applied.revision),
+                    Err(_) => return false,
                 }
+            }
+            if let Some(rev) = latest_revision {
+                let doc_id = tab.id.get_untracked();
+                let doc_model = editor::get_or_create_doc_model(doc_id);
+                doc_model.borrow_mut().known_revision = rev;
             }
         }
         Task::Undo { redo } => {
             if let Some(restored) = framework::undo_lines(handle, redo).await {
+                let doc_id = tab.id.get_untracked();
+                let doc_model = editor::get_or_create_doc_model(doc_id);
+                doc_model.borrow_mut().known_revision = restored.revision;
+
                 shell.apply_restored(
                     tab,
                     &restored.state,
                     restored.touched_from,
                     restored.line_count,
+                    &restored.splices,
                 );
-                let doc_id = tab.id.get_untracked();
-                let doc_ref = editor::get_or_create_doc(doc_id);
-                doc_ref
-                    .borrow_mut()
-                    .set_modified_lines(restored.modified_lines);
+                editor::set_doc_modified_lines(doc_id, restored.modified_lines);
                 if restored.clean {
                     shell.mark_clean_tab(tab);
                 } else {
@@ -352,16 +382,12 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
             query,
             options,
             file_size,
-            ticket,
+            forward,
         } => {
-            let result = find_far(shell, tab, pane, handle, &query, options, file_size).await;
-            let id = tab.id.get_untracked();
-            SEARCH_TICKETS.with(|t| {
-                let mut map = t.borrow_mut();
-                if map.get(&id) == Some(&ticket) {
-                    map.remove(&id);
-                }
-            });
+            let result = find_far(
+                shell, tab, pane, handle, &query, options, file_size, forward,
+            )
+            .await;
             match result {
                 Ok(Some(true)) => shell.status.set("見つかりました".into()),
                 Ok(Some(false)) => shell.status.set("見つかりませんでした".into()),
@@ -373,9 +399,9 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
     true
 }
 
-/// 文書の本体を走査して次の一致へ跳ぶ。空のページはnative内で読み進め、
-/// 記法を含む候補だけ必要に応じて手元で確認する。
+/// 文書の本体を走査して次／前の一致へ跳ぶ。
 /// `None` は新しい検索や編集によるキャンセル。
+#[allow(clippy::too_many_arguments)]
 async fn find_far(
     shell: Shell,
     tab: Tab,
@@ -384,58 +410,54 @@ async fn find_far(
     query: &str,
     options: editor::SearchOptions,
     file_size: Option<usize>,
+    forward: bool,
 ) -> Result<Option<bool>, String> {
     use crate::format::document;
-    use crate::structure::text::Pos;
-    let Some((after, line_count)) = editor::far_search_start() else {
+    let Some((after, line_count)) = editor::far_search_start_pane(pane, forward) else {
         return Ok(Some(false));
     };
     let start_line = after.0.line;
-    // 一巡り: 出発点の行から末尾まで、その後は先頭から出発点の行まで。
-    let passes: [(usize, usize, Option<&editor::search::Key>); 2] = [
-        (start_line, line_count, Some(&after)),
-        (0, (start_line + 1).min(line_count), None),
-    ];
-    for (mut from, end, filter) in passes {
-        let mut after_col = filter.map(|after| after.0.col);
-        while from < end {
-            let page = framework::search_document(
-                handle,
-                query,
-                options.regex,
-                options.case_sensitive,
-                document::NOTATION_MARK,
-                from,
-                end,
-                after_col,
-            )
-            .await?;
-            if page.cancelled {
-                return Ok(None);
-            }
-            for hit in &page.hits {
-                if hit.notation {
-                    let lines = framework::read_lines(handle, hit.line, 1).await?;
-                    shell.feed(tab, hit.line, &lines);
-                    if editor::find_far_in_line(pane, hit.line, query, options, file_size, filter) {
-                        return Ok(Some(true));
-                    }
-                } else {
-                    let key = (Pos::new(hit.line, hit.start), None);
-                    if filter.is_none_or(|after| &key >= after)
-                        && editor::apply_far_match(pane, hit.line, hit.start, hit.end)
-                    {
-                        return Ok(Some(true));
+    let after_col = Some(after.0.col);
+
+    let page = framework::search_document(
+        handle,
+        query,
+        options.regex,
+        options.case_sensitive,
+        document::NOTATION_MARK,
+        start_line,
+        line_count,
+        after_col,
+        forward,
+    )
+    .await?;
+
+    if page.cancelled {
+        return Ok(None);
+    }
+
+    for hit in &page.hits {
+        let lines = framework::read_lines(handle, hit.line, 1).await?;
+        shell.feed(tab, hit.line, &lines);
+        if hit.notation {
+            if editor::find_far_in_line(pane, hit.line, query, options, file_size, None) {
+                if let Some(pane_obj) = shell.pane_for_editor(pane) {
+                    if let Some(cur) = page.current_index {
+                        pane_obj.search_status.set((cur, page.total_matches));
                     }
                 }
+                return Ok(Some(true));
             }
-            if page.scanned_to <= from {
-                break;
+        } else if editor::apply_far_match(pane, hit.line, hit.start, hit.end) {
+            if let Some(pane_obj) = shell.pane_for_editor(pane) {
+                if let Some(cur) = page.current_index {
+                    pane_obj.search_status.set((cur, page.total_matches));
+                }
             }
-            from = page.scanned_to;
-            after_col = None;
+            return Ok(Some(true));
         }
     }
+
     Ok(Some(false))
 }
 

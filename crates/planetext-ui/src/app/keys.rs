@@ -32,6 +32,10 @@ pub(super) fn install_shortcuts(shell: Shell) {
             if event.key() == "F3" {
                 event.prevent_default();
             }
+            if event.alt_key() && event.key().to_lowercase() == "z" {
+                event.prevent_default();
+                menu::choose(shell, "show_whitespace", menu::From::Key);
+            }
             return;
         }
         let shift = event.shift_key();
@@ -55,6 +59,10 @@ pub(super) fn install_shortcuts(shell: Shell) {
             ("m", _) => Some("insert_structure"),
             ("z", false) => Some("undo"),
             ("z", true) | ("y", _) => Some("redo"),
+            ("a", _) => Some("select_all"),
+            ("=" | "+", _) => Some("zoom_in"),
+            ("-", _) => Some("zoom_out"),
+            ("0", _) => Some("zoom_reset"),
             (",", _) => Some("preferences"),
             _ => None,
         };

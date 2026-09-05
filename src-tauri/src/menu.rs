@@ -37,10 +37,38 @@ pub fn sync_view_menu(
 /// メニュー バーを作成し、選択された内容をフロントエンドに送信し始めます。
 pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let item = |id: &str, text: &str, accelerator: Option<&str>| {
-        MenuItem::with_id(app, id, text, true, accelerator)
+        #[cfg(not(target_os = "macos"))]
+        {
+            let label = match accelerator {
+                Some(acc) => {
+                    let key = acc.replace("CmdOrCtrl+", "Ctrl+").replace("Cmd+", "Ctrl+");
+                    format!("{text}\t{key}")
+                }
+                None => text.to_string(),
+            };
+            MenuItem::with_id(app, id, &label, true, None::<&str>)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            MenuItem::with_id(app, id, text, true, accelerator)
+        }
     };
     let check = |id: &str, text: &str, accelerator: Option<&str>| {
-        CheckMenuItem::with_id(app, id, text, true, false, accelerator)
+        #[cfg(not(target_os = "macos"))]
+        {
+            let label = match accelerator {
+                Some(acc) => {
+                    let key = acc.replace("CmdOrCtrl+", "Ctrl+").replace("Cmd+", "Ctrl+");
+                    format!("{text}\t{key}")
+                }
+                None => text.to_string(),
+            };
+            CheckMenuItem::with_id(app, id, &label, true, false, None::<&str>)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            CheckMenuItem::with_id(app, id, text, true, false, accelerator)
+        }
     };
     let separator = || PredefinedMenuItem::separator(app);
 

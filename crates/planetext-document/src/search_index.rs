@@ -7,7 +7,7 @@ use std::sync::{Arc, RwLock};
 use crate::source::{FileEncoding, Source};
 
 pub(crate) const INDEX_BLOCK_BYTES: usize = 512 * 1024;
-pub(crate) const BIGRAM_INDEX_THRESHOLD: usize = 10_000_000;
+pub(crate) const BIGRAM_INDEX_THRESHOLD: usize = 30 * 1024 * 1024;
 pub(crate) type BlockId = usize;
 
 /// エンコーディングに依存したバイト列による bi-gram。
@@ -17,13 +17,67 @@ pub(crate) struct Bigram(pub(crate) Vec<u8>);
 
 impl Bigram {
     pub(crate) fn new(first: char, second: char, encoding: FileEncoding) -> Option<Self> {
-        let mut bytes = encoding.encode_str(&first.to_string());
-        bytes.extend_from_slice(&encoding.encode_str(&second.to_string()));
-        (!bytes.is_empty()).then_some(Self(bytes))
+        let first = first.to_lowercase().next().unwrap_or(first);
+        let second = second.to_lowercase().next().unwrap_or(second);
+        match encoding {
+            FileEncoding::Utf8 | FileEncoding::Utf8Bom => {
+                let mut bytes = Vec::with_capacity(first.len_utf8() + second.len_utf8());
+                let mut buf = [0u8; 4];
+                bytes.extend_from_slice(first.encode_utf8(&mut buf).as_bytes());
+                bytes.extend_from_slice(second.encode_utf8(&mut buf).as_bytes());
+                Some(Self(bytes))
+            }
+            FileEncoding::Utf16Le => {
+                let mut bytes = Vec::with_capacity(8);
+                let mut buf = [0u16; 2];
+                for u in first.encode_utf16(&mut buf) {
+                    bytes.extend_from_slice(&u.to_le_bytes());
+                }
+                for u in second.encode_utf16(&mut buf) {
+                    bytes.extend_from_slice(&u.to_le_bytes());
+                }
+                Some(Self(bytes))
+            }
+            FileEncoding::Utf16Be => {
+                let mut bytes = Vec::with_capacity(8);
+                let mut buf = [0u16; 2];
+                for u in first.encode_utf16(&mut buf) {
+                    bytes.extend_from_slice(&u.to_be_bytes());
+                }
+                for u in second.encode_utf16(&mut buf) {
+                    bytes.extend_from_slice(&u.to_be_bytes());
+                }
+                Some(Self(bytes))
+            }
+            _ => {
+                let mut buf1 = [0u8; 4];
+                let mut buf2 = [0u8; 4];
+                let s1 = first.encode_utf8(&mut buf1);
+                let s2 = second.encode_utf8(&mut buf2);
+                let mut bytes = encoding.encode_str(s1);
+                bytes.extend_from_slice(&encoding.encode_str(s2));
+                (!bytes.is_empty()).then_some(Self(bytes))
+            }
+        }
     }
 
     pub(crate) fn from_query(query: &str, encoding: FileEncoding) -> Vec<Self> {
-        let chars: Vec<_> = query.chars().collect();
+        let mut clean = String::with_capacity(query.len());
+        let mut it = query.chars().peekable();
+        while let Some(c) = it.next() {
+            if c == '\\' {
+                if let Some(&next) = it.peek() {
+                    if next.is_ascii_punctuation() {
+                        clean.push(next);
+                        it.next();
+                        continue;
+                    }
+                }
+            }
+            clean.push(c);
+        }
+        let lower_query = clean.to_lowercase();
+        let chars: Vec<_> = lower_query.chars().collect();
         chars
             .windows(2)
             .filter_map(|w| Self::new(w[0], w[1], encoding))
@@ -170,6 +224,11 @@ impl SearchIndex {
         }
     }
 
+    pub(crate) fn progress(&self) -> (usize, usize) {
+        let state = self.state.read().unwrap();
+        (state.block_indices.len(), state.total_blocks)
+    }
+
     pub(crate) fn extract_block_bigrams(
         bytes: &[u8],
         read_start: usize,
@@ -183,7 +242,15 @@ impl SearchIndex {
         let mut current_offset = read_start;
 
         for ch in text.chars() {
-            let ch_len = encoding.encode_str(&ch.to_string()).len();
+            let ch_len = match encoding {
+                FileEncoding::Utf8 | FileEncoding::Utf8Bom => ch.len_utf8(),
+                FileEncoding::Utf16Le | FileEncoding::Utf16Be => ch.len_utf16() * 2,
+                _ => {
+                    let mut buf = [0u8; 4];
+                    let s = ch.encode_utf8(&mut buf);
+                    encoding.encode_str(s).len()
+                }
+            };
             if let Some(prev) = previous {
                 // 境界またぎ bi-gram は終了側ブロックに所属
                 if current_offset >= start_byte && current_offset < end_byte {
@@ -227,6 +294,17 @@ impl SearchIndex {
         let mut state = self.state.write().unwrap();
         state.block_indices.insert(block, counts);
         Ok(())
+    }
+
+    /// 指定バイト位置が含まれるブロックの索引をオンデマンドに同期構築する。
+    /// 末尾ジャンプ（read_tail）など、ユーザーが局所的にアクセスした際に発動する。
+    pub(crate) fn ensure_block_at_byte(
+        &self,
+        byte: usize,
+        source: &mut Source,
+    ) -> Result<(), String> {
+        let block = byte / INDEX_BLOCK_BYTES;
+        self.ensure_block(block, source)
     }
 
     /// 全ブロックを同期構築する（主に単体テスト用）
@@ -327,6 +405,10 @@ mod tests {
     fn bigram_creation_and_query_extraction() {
         let bigrams = Bigram::from_query("hello", FileEncoding::Utf8);
         assert_eq!(bigrams.len(), 4);
+
+        // 大文字小文字を問わず同一の lowercase Bigram が得られること
+        let bigrams_upper = Bigram::from_query("HeLLo", FileEncoding::Utf8);
+        assert_eq!(bigrams, bigrams_upper);
     }
 
     #[test]

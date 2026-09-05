@@ -308,6 +308,18 @@ impl ScanIndex {
             state = self.cv.wait(state).unwrap();
         }
     }
+
+    /// 指定バイト位置の直前にあるマークの (マークインデックス, マークバイト位置) を二分探索で瞬時に返す。
+    /// マークインデックス * STRIDE がそのマーク時点での行番号となる。
+    #[allow(dead_code)]
+    pub(crate) fn mark_before_offset(&self, byte_offset: u64) -> (usize, u64) {
+        let state = self.state.lock().unwrap();
+        let idx = state
+            .marks
+            .partition_point(|&mark| mark <= byte_offset)
+            .saturating_sub(1);
+        (idx, state.marks.get(idx).copied().unwrap_or(0))
+    }
 }
 
 /// 開いたファイル。行の中身はここから seek で読む。
@@ -418,7 +430,371 @@ fn read_line_bounded<R: BufRead>(
     }
 }
 
+/// 30MB 以上の巨大ファイルに対する並列走査のしきい値
+pub(crate) const PARALLEL_SEARCH_THRESHOLD: usize = 30 * 1024 * 1024;
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_raw_hit_helper(
+    abs_byte: usize,
+    abs_end_byte: usize,
+    mmap: &[u8],
+    marks: &[u64],
+    delimiter: &[u8],
+    encoding: FileEncoding,
+    fixed_char_count: Option<usize>,
+    encoded_marker: &[u8],
+) -> crate::search::RawHit {
+    let mark_idx = marks
+        .partition_point(|&mark| mark <= abs_byte as u64)
+        .saturating_sub(1);
+    let mark_byte = marks.get(mark_idx).copied().unwrap_or(0) as usize;
+    let slice_to_count = &mmap[mark_byte..abs_byte];
+
+    let line_in_mark = if delimiter.len() == 1 {
+        memchr::memchr_iter(delimiter[0], slice_to_count).count()
+    } else {
+        memchr::memmem::find_iter(slice_to_count, delimiter).count()
+    };
+    let line = mark_idx * STRIDE + line_in_mark;
+
+    // 行頭バイト位置
+    let line_start_byte = if line_in_mark == 0 {
+        mark_byte
+    } else if delimiter.len() == 1 {
+        let last_delim = memchr::memrchr(delimiter[0], slice_to_count).unwrap_or(0);
+        mark_byte + last_delim + delimiter.len()
+    } else {
+        let mut last = 0;
+        for pos in memchr::memmem::find_iter(slice_to_count, delimiter) {
+            last = pos;
+        }
+        mark_byte + last + delimiter.len()
+    };
+
+    // 行頭から一致位置までの列（文字数）
+    let col_bytes = abs_byte.saturating_sub(line_start_byte);
+    let col_slice = &mmap[line_start_byte..line_start_byte + col_bytes];
+    let col = encoding.decode_line(col_slice).chars().count();
+
+    // 一致箇所の文字数
+    let match_chars = if let Some(fc) = fixed_char_count {
+        fc
+    } else {
+        let match_slice = &mmap[abs_byte..abs_end_byte];
+        encoding.decode_line(match_slice).chars().count()
+    };
+
+    // 行末バイト位置
+    let rest_slice = &mmap[abs_byte..];
+    let line_end_byte = if delimiter.len() == 1 {
+        memchr::memchr(delimiter[0], rest_slice)
+            .map(|pos| abs_byte + pos)
+            .unwrap_or(mmap.len())
+    } else {
+        memchr::memmem::find_iter(rest_slice, delimiter)
+            .next()
+            .map(|pos| abs_byte + pos)
+            .unwrap_or(mmap.len())
+    };
+    let whole_line_slice = &mmap[line_start_byte..line_end_byte];
+    let has_marker = if !encoded_marker.is_empty() {
+        if encoded_marker.len() == 1 {
+            memchr::memchr(encoded_marker[0], whole_line_slice).is_some()
+        } else {
+            memchr::memmem::find_iter(whole_line_slice, encoded_marker)
+                .next()
+                .is_some()
+        }
+    } else {
+        false
+    };
+
+    crate::search::RawHit {
+        hit: crate::search::ScanHit {
+            line,
+            notation: has_marker,
+            start: col,
+            end: col + match_chars,
+        },
+        start_byte: abs_byte,
+        end_byte: abs_end_byte,
+    }
+}
+
 impl Source {
+    /// 30MB 以上の巨大ファイルの検索やインデックス構築において、
+    /// 一時的なゼロコピー生バイト走査を行うための mmap を取得する。
+    /// Advice::Sequential を指示し、OS に最大先読み（Prefetch）を指示する。
+    pub(crate) fn mmap(&self) -> Result<memmap2::Mmap, String> {
+        let mmap = unsafe {
+            memmap2::MmapOptions::new()
+                .map(&self.file)
+                .map_err(|e| format!("メモリマップに失敗しました: {e}"))?
+        };
+        #[cfg(unix)]
+        let _ = mmap.advise(memmap2::Advice::Sequential);
+        Ok(mmap)
+    }
+
+    /// ファイルサイズにかかわらず、mmap 生バイト列に対する直接走査を行い、
+    /// 一致箇所のみ O(log N) マーク二分探索で行・列番号を算出する超高速走査。
+    /// DocumentMatcher trait により、リテラル・正規表現・bi-gram ブロック刈り込みを完全統一。
+    /// 30MB 以上のファイルでは 2〜4 スレッドに自動分散して並列実行する。
+    pub(crate) fn scan_matches(
+        &self,
+        matcher: &dyn crate::search::DocumentMatcher,
+        search_index: Option<&crate::search_index::SearchIndex>,
+        marker: char,
+        limit: usize,
+        cancelled: &(dyn Fn() -> bool + Send + Sync),
+        progress: Option<&crate::search::SearchProgressTracker>,
+    ) -> Result<Vec<crate::search::RawHit>, String> {
+        let mmap = self.mmap()?;
+        let content_offset = self.content_offset as usize;
+        if content_offset >= mmap.len() {
+            return Ok(Vec::new());
+        }
+        let haystack = &mmap[content_offset..];
+        let encoding = self.encoding;
+        let delimiter = self.delimiter();
+        let encoded_marker = if marker != '\0' {
+            encoding.encode_str(&marker.to_string())
+        } else {
+            Vec::new()
+        };
+        let fixed_char_count = matcher.fixed_char_count();
+        let marks = self.index.state.lock().unwrap().marks.clone();
+
+        if let Some(p) = progress {
+            p.total_bytes
+                .store(haystack.len(), std::sync::atomic::Ordering::Relaxed);
+            p.scanned_bytes
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            p.matches_found
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            p.done.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        // リテラル検索はメモリ帯域競合を防ぐため最大2スレッド、正規表現はCPUバウンドのため最大4スレッド
+        let is_regex = matcher.literal().is_none();
+        let default_max = if is_regex { 4 } else { 2 };
+        let override_threads = std::env::var("PLANETEXT_SEARCH_THREADS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok());
+        let available = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let num_threads = override_threads.unwrap_or_else(|| available.clamp(1, default_max));
+
+        if haystack.len() < PARALLEL_SEARCH_THRESHOLD || num_threads <= 1 {
+            // シングルスレッド走査
+            let raw_matches = matcher.find_in_bytes(haystack, encoding);
+            let mut hits = Vec::new();
+            let mut count = 0;
+            for (start, end) in raw_matches {
+                count += 1;
+                if count % 256 == 0 {
+                    if cancelled() {
+                        return Ok(Vec::new());
+                    }
+                    if let Some(p) = progress {
+                        p.scanned_bytes
+                            .store(start, std::sync::atomic::Ordering::Relaxed);
+                        p.matches_found
+                            .store(hits.len(), std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                if hits.len() >= limit {
+                    break;
+                }
+                let abs_byte = content_offset + start;
+                let abs_end_byte = content_offset + end;
+
+                // bi-gram 索引が存在する場合、ブロック刈り込みをチェック
+                if let Some(index) = search_index {
+                    let block = abs_byte / crate::search_index::INDEX_BLOCK_BYTES;
+                    if !matcher.may_contain_in_block(index, block) {
+                        continue;
+                    }
+                }
+
+                hits.push(resolve_raw_hit_helper(
+                    abs_byte,
+                    abs_end_byte,
+                    &mmap,
+                    &marks,
+                    &delimiter,
+                    encoding,
+                    fixed_char_count,
+                    &encoded_marker,
+                ));
+            }
+            if let Some(p) = progress {
+                p.scanned_bytes
+                    .store(haystack.len(), std::sync::atomic::Ordering::Relaxed);
+                p.matches_found
+                    .store(hits.len(), std::sync::atomic::Ordering::Relaxed);
+                p.done.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            return Ok(hits);
+        }
+
+        // マルチスレッド並列走査
+        let chunk_size = haystack.len() / num_threads;
+        let mut chunk_ranges: Vec<(usize, usize)> = Vec::with_capacity(num_threads);
+        let mut start = 0;
+        for k in 1..num_threads {
+            let ideal_end = k * chunk_size;
+            let split = if ideal_end < haystack.len() {
+                if delimiter.len() == 1 {
+                    memchr::memchr(delimiter[0], &haystack[ideal_end..])
+                        .map(|p| ideal_end + p + 1)
+                        .unwrap_or(haystack.len())
+                } else {
+                    memchr::memmem::find(&haystack[ideal_end..], &delimiter)
+                        .map(|p| ideal_end + p + delimiter.len())
+                        .unwrap_or(haystack.len())
+                }
+            } else {
+                haystack.len()
+            };
+            if split > start {
+                chunk_ranges.push((start, split));
+                start = split;
+            }
+        }
+        if start < haystack.len() {
+            chunk_ranges.push((start, haystack.len()));
+        }
+
+        let cancel_flag = std::sync::atomic::AtomicBool::new(false);
+        let thread_results: Vec<Vec<crate::search::RawHit>> = std::thread::scope(|s| {
+            let mut handles = Vec::with_capacity(chunk_ranges.len());
+            for &(c_start, c_end) in &chunk_ranges {
+                let chunk_slice = &haystack[c_start..c_end];
+                let chunk_offset = content_offset + c_start;
+                let cancel_ref = &cancel_flag;
+                let marks_ref = &marks;
+                let delim_ref = &delimiter;
+                let enc_marker_ref = &encoded_marker;
+                let mmap_ref = &mmap;
+                let progress_ref = progress;
+
+                handles.push(s.spawn(move || {
+                    const SUB_CHUNK_SIZE: usize = 2 * 1024 * 1024; // 2MB サブブロックで行境界分割
+                    let mut chunk_hits = Vec::new();
+                    let mut sub_start = 0;
+
+                    while sub_start < chunk_slice.len() {
+                        if cancel_ref.load(std::sync::atomic::Ordering::Relaxed) || cancelled() {
+                            cancel_ref.store(true, std::sync::atomic::Ordering::Relaxed);
+                            return Vec::new();
+                        }
+                        let ideal_sub_end = (sub_start + SUB_CHUNK_SIZE).min(chunk_slice.len());
+                        let sub_end = if ideal_sub_end < chunk_slice.len() {
+                            if delim_ref.len() == 1 {
+                                memchr::memchr(delim_ref[0], &chunk_slice[ideal_sub_end..])
+                                    .map(|p| ideal_sub_end + p + 1)
+                                    .unwrap_or(chunk_slice.len())
+                            } else {
+                                memchr::memmem::find(&chunk_slice[ideal_sub_end..], delim_ref)
+                                    .map(|p| ideal_sub_end + p + delim_ref.len())
+                                    .unwrap_or(chunk_slice.len())
+                            }
+                        } else {
+                            chunk_slice.len()
+                        };
+
+                        let sub_slice = &chunk_slice[sub_start..sub_end];
+                        let sub_offset = chunk_offset + sub_start;
+                        let sub_matches = matcher.find_in_bytes(sub_slice, encoding);
+                        let mut sub_hit_count = 0;
+
+                        for (rel_start, rel_end) in sub_matches {
+                            if chunk_hits.len() >= limit {
+                                break;
+                            }
+                            let abs_byte = sub_offset + rel_start;
+                            let abs_end_byte = sub_offset + rel_end;
+
+                            if let Some(index) = search_index {
+                                let block = abs_byte / crate::search_index::INDEX_BLOCK_BYTES;
+                                if !matcher.may_contain_in_block(index, block) {
+                                    continue;
+                                }
+                            }
+
+                            chunk_hits.push(resolve_raw_hit_helper(
+                                abs_byte,
+                                abs_end_byte,
+                                mmap_ref,
+                                marks_ref,
+                                delim_ref,
+                                encoding,
+                                fixed_char_count,
+                                enc_marker_ref,
+                            ));
+                            sub_hit_count += 1;
+                        }
+
+                        if let Some(p) = progress_ref {
+                            p.scanned_bytes
+                                .fetch_add(sub_slice.len(), std::sync::atomic::Ordering::Relaxed);
+                            p.matches_found
+                                .fetch_add(sub_hit_count, std::sync::atomic::Ordering::Relaxed);
+                        }
+
+                        if chunk_hits.len() >= limit {
+                            break;
+                        }
+                        sub_start = sub_end;
+                    }
+
+                    chunk_hits
+                }));
+            }
+
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_default())
+                .collect()
+        });
+
+        if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) || cancelled() {
+            return Ok(Vec::new());
+        }
+
+        let mut total_hits = Vec::new();
+        for ch in thread_results {
+            total_hits.extend(ch);
+            if total_hits.len() >= limit {
+                total_hits.truncate(limit);
+                break;
+            }
+        }
+        if let Some(p) = progress {
+            p.scanned_bytes
+                .store(haystack.len(), std::sync::atomic::Ordering::Relaxed);
+            p.matches_found
+                .store(total_hits.len(), std::sync::atomic::Ordering::Relaxed);
+            p.done.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(total_hits)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn fast_mmap_search(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+        marker: char,
+        limit: usize,
+    ) -> Result<Vec<crate::search::ScanHit>, String> {
+        let matcher = crate::search::LiteralMatcher::new(query, case_sensitive)?;
+        let raw = self.scan_matches(&matcher, None, marker, limit, &|| false, None)?;
+        Ok(raw.into_iter().map(|r| r.hit).collect())
+    }
+
     pub(crate) fn delimiter(&self) -> Vec<u8> {
         let delimiter = match self.line_ending {
             LineEnding::Cr => "\r",
@@ -1235,6 +1611,447 @@ mod tests {
         // byte_offset_after_lines も正確
         let offset = source.byte_offset_after_lines(0, total_len, skip).unwrap();
         assert_eq!(offset, range_from);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    use crate::document::Document;
+    use crate::search::SearchSpec;
+    use crate::test_utils::*;
+
+    #[test]
+    fn background_scan_confirms_and_reads_the_empty_final_line() {
+        let path = std::env::temp_dir().join(format!(
+            "planetext-store-{}-background-final.txt",
+            std::process::id()
+        ));
+        let line = "0123456789\n";
+        let complete_lines = 100_000usize;
+        std::fs::write(&path, line.repeat(complete_lines)).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let (mut doc, scan) = Document::open(&path).unwrap();
+        assert!(scan.is_some());
+        assert_eq!(doc.read_tail(2).unwrap(), vec!["0123456789", ""]);
+        scan.unwrap().run().unwrap();
+        doc.confirm_scan();
+        assert_eq!(doc.line_count(), complete_lines + 1);
+        assert_eq!(doc.read(complete_lines, 1).unwrap(), vec![""]);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn replacing_provisional_final_line_preserves_pending_source_suffix() {
+        let path = std::env::temp_dir().join(format!(
+            "planetext-store-{}-background-provisional-final.txt",
+            std::process::id()
+        ));
+        let source_lines = 100_000usize;
+        let source = (0..source_lines)
+            .map(|line| format!("source line {line:06}\n"))
+            .collect::<String>();
+        std::fs::write(&path, &source).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let (mut doc, scan) = Document::open(&path).unwrap();
+        let scan = scan.expect("the file must exceed the initial scan chunk");
+        let provisional_line = doc.line_count() - 1;
+        let original = doc.read(provisional_line, 1).unwrap();
+
+        doc.replace(
+            provisional_line,
+            provisional_line + 1,
+            vec!["edited provisional line".into()],
+            1,
+            "before",
+            "after",
+        )
+        .unwrap();
+        scan.run().unwrap();
+        doc.confirm_scan();
+
+        assert_eq!(doc.line_count(), source_lines + 1);
+        assert_eq!(
+            doc.read(provisional_line, 2).unwrap(),
+            vec![
+                "edited provisional line".to_string(),
+                format!("source line {:06}", provisional_line + 1),
+            ]
+        );
+        assert_eq!(
+            doc.read(source_lines - 1, 2).unwrap(),
+            vec![format!("source line {:06}", source_lines - 1), "".into()]
+        );
+
+        let undone = doc.undo().unwrap().unwrap();
+        assert_eq!(undone.state, "before");
+        assert_eq!(doc.line_count(), source_lines + 1);
+        assert_eq!(doc.read(provisional_line, 1).unwrap(), original);
+        assert_eq!(
+            doc.read(source_lines - 1, 2).unwrap(),
+            vec![format!("source line {:06}", source_lines - 1), "".into()]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn confirming_background_scan_preserves_prior_edits_and_history() {
+        let path = std::env::temp_dir().join(format!(
+            "planetext-store-{}-background-edited.txt",
+            std::process::id()
+        ));
+        let source_line = "0123456789 source line\n";
+        let source_lines = 60_000usize;
+        let source_bytes = source_line.repeat(source_lines);
+        std::fs::write(&path, &source_bytes).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let (mut doc, scan) = Document::open(&path).unwrap();
+        let scan = scan.expect("the file must exceed the initial scan chunk");
+
+        doc.replace(
+            1,
+            2,
+            vec!["edited one".into(), "edited two".into()],
+            1,
+            "before",
+            "after",
+        )
+        .unwrap();
+        scan.run().unwrap();
+        doc.confirm_scan();
+
+        assert_eq!(doc.line_count(), source_lines + 2);
+        assert_eq!(doc.pieces_line_count_for_test(), source_lines + 2);
+        assert_eq!(doc.pieces_newline_count_for_test(), source_lines + 1);
+        assert_eq!(
+            doc.bytes(),
+            source_bytes.len() - "0123456789 source line".len() + "edited one\nedited two".len()
+        );
+        assert_eq!(
+            doc.read(0, 4).unwrap(),
+            vec![
+                "0123456789 source line",
+                "edited one",
+                "edited two",
+                "0123456789 source line"
+            ]
+        );
+
+        let undone = doc.undo().unwrap().unwrap();
+        assert_eq!(undone.state, "before");
+        assert_eq!(doc.line_count(), source_lines + 1);
+        assert_eq!(doc.pieces_newline_count_for_test(), source_lines);
+        assert_eq!(doc.bytes(), source_bytes.len());
+        assert_eq!(doc.read(0, 3).unwrap(), vec!["0123456789 source line"; 3]);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn sparse_mark_at_eof_exposes_the_final_empty_line() {
+        let path = std::env::temp_dir().join(format!(
+            "planetext-store-{}-stride-final-empty.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, "\n".repeat(STRIDE)).unwrap();
+        let path = path.to_string_lossy().into_owned();
+        let (mut doc, scan) =
+            Document::open_with_encoding(&path, Some(FileEncoding::Utf8)).unwrap();
+
+        assert!(scan.is_none());
+        assert_eq!(
+            doc.source_sparse_mark_for_test(1),
+            doc.source_bytes_for_test()
+        );
+        assert_eq!(doc.line_count(), STRIDE + 1);
+        assert_eq!(doc.read(STRIDE, 1).unwrap(), vec![""]);
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 間引きの索引: STRIDE を越える文書でも、行は最寄りの索引から読み流して届く。
+    #[test]
+    fn far_lines_are_reached_through_the_sparse_index() {
+        let lines: Vec<String> = (0..STRIDE * 2 + 5).map(|i| format!("line {i}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (mut doc, path) = disk_doc("stride", &refs);
+        assert_eq!(doc.line_count(), STRIDE * 2 + 5);
+        assert_eq!(
+            doc.read(STRIDE + 3, 2).unwrap(),
+            vec![
+                format!("line {}", STRIDE + 3),
+                format!("line {}", STRIDE + 4)
+            ]
+        );
+        assert_eq!(
+            doc.read(STRIDE * 2 + 4, 5).unwrap(),
+            vec![format!("line {}", STRIDE * 2 + 4)]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn multi_piece_callbacks_keep_global_line_numbers() {
+        let (mut doc, path) = disk_doc("global-lines", &["a", "b", "c", "d", "e", "f"]);
+        doc.replace(
+            3,
+            4,
+            vec!["x".into(), "$one".into(), "y$".into()],
+            1,
+            "",
+            "",
+        )
+        .unwrap();
+        assert_eq!(doc.lines_containing(0, 99, '$').unwrap(), vec![4, 5]);
+        let overrides = std::collections::HashMap::from([(5, "override".to_string())]);
+        assert_eq!(
+            doc.assemble(2, None, 6, None, &overrides).unwrap(),
+            "c\nx\n$one\noverride\ne"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    /// EOF seekによる末尾読みの実測。行数走査は開始しない。
+    #[test]
+    #[ignore]
+    fn scale_check_reading_the_tail_without_line_count() {
+        let path = r"C:\workspace\test-800mb.txt";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let (mut doc, _scan) = Document::open(path).unwrap();
+        let start = std::time::Instant::now();
+        let tail = doc.read_tail(100).unwrap();
+        println!("read tail: {:?} ({} lines)", start.elapsed(), tail.len());
+        assert_eq!(tail.len(), 100);
+    }
+
+    /// 先頭1MBの同期読みと、残りの行数・間引き索引走査だけの実測。
+    #[test]
+    #[ignore]
+    fn scale_check_counting_lines() {
+        let path = r"C:\workspace\test-800mb.txt";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let start = std::time::Instant::now();
+        let (mut doc, scan) = Document::open(path).unwrap();
+        let opened = start.elapsed();
+        let start = std::time::Instant::now();
+        if let Some(scan) = scan {
+            scan.run().unwrap();
+        }
+        doc.confirm_scan();
+        println!(
+            "open: {opened:?}, scan: {:?}, lines: {}",
+            start.elapsed(),
+            doc.line_count()
+        );
+        assert_eq!(doc.line_count(), 16_000_001);
+    }
+
+    /// 規模の実測: `cargo test -p planetext --release -- --ignored --nocapture`。
+    /// C:\workspace\test-800mb.txt がある環境でだけ動く。
+    #[test]
+    #[ignore]
+    fn scale_check_opening_a_huge_file() {
+        let path = r"C:\workspace\test-800mb.txt";
+        if !std::path::Path::new(path).exists() {
+            return;
+        }
+        let start = std::time::Instant::now();
+        let (mut doc, scan) = Document::open(path).unwrap();
+        println!(
+            "open (scanned {} lines): {:?}",
+            doc.line_count(),
+            start.elapsed()
+        );
+        let start = std::time::Instant::now();
+        if let Some(scan) = scan {
+            scan.run().unwrap();
+        }
+        doc.confirm_scan();
+        println!(
+            "scan (exact {} lines): {:?}",
+            doc.line_count(),
+            start.elapsed()
+        );
+        let start = std::time::Instant::now();
+        let middle = doc.read(doc.line_count() / 2, 100).unwrap();
+        println!(
+            "read 100 lines: {:?} ({} lines)",
+            start.elapsed(),
+            middle.len()
+        );
+        let missing = "planetext-not-present";
+        let start = std::time::Instant::now();
+        let _ = doc
+            .scan_literal(missing, true, '$', 0, doc.line_count(), 64)
+            .unwrap();
+        println!("literal full scan: {:?}", start.elapsed());
+        let start = std::time::Instant::now();
+        let _ = doc
+            .scan_literal("PLANETEXT-NOT-PRESENT", false, '$', 0, doc.line_count(), 64)
+            .unwrap();
+        println!("ASCII fold full scan: {:?}", start.elapsed());
+        let mut snapshot = doc.search_snapshot().unwrap();
+        let query = crate::search::CompiledQuery::compile(missing, false, true, '$').unwrap();
+        let start = std::time::Instant::now();
+        let searched = snapshot
+            .search_candidates(
+                SearchSpec {
+                    query: &query,
+                    from: 0,
+                    end: doc.line_count(),
+                    after_col: None,
+                    forward: true,
+                },
+                &|| false,
+            )
+            .unwrap();
+        println!(
+            "single native job ({} hits): {:?}",
+            searched.hits.len(),
+            start.elapsed()
+        );
+        let start = std::time::Instant::now();
+        let estimate = doc
+            .estimate_matches(&regex::Regex::new("fox").unwrap())
+            .unwrap();
+        println!("estimate ({estimate} matches): {:?}", start.elapsed());
+    }
+
+    /// 巨大な行を含むファイルで MAX_READ_BYTES ガードが正しく働き、
+    /// 1回の read で 20MB を超えずに安全に打ち切られることを検証する。
+    #[test]
+    fn huge_lines_are_capped_at_max_read_bytes() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("planetext-huge-lines-test.txt");
+        // 5MBの行を10行（合計50MB）書き込む
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut writer = std::io::BufWriter::new(file);
+            let big_line = "a".repeat(5 * 1024 * 1024);
+            for i in 0..10 {
+                use std::io::Write;
+                if i > 0 {
+                    writeln!(writer).unwrap();
+                }
+                write!(writer, "{big_line}").unwrap();
+            }
+        }
+        let (mut doc, scan) = Document::open(path.to_str().unwrap()).unwrap();
+        if let Some(scan) = scan {
+            scan.run().unwrap();
+        }
+        doc.confirm_scan();
+        assert_eq!(doc.line_count(), 10);
+        // 10行読もうとしても、20MBガードにより最初の4〜5行で打ち切られる
+        let lines = doc.read(0, 10).unwrap();
+        assert!(lines.len() < 10);
+        assert!(lines.len() >= 3);
+        let total_read_bytes: usize = lines.iter().map(|l| l.len()).sum();
+        assert!(total_read_bytes <= 25 * 1024 * 1024);
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 10万行の巨大ファイルを生成して開き、索引付け・途中行 seek 読みが正しく動くことを検証。
+    #[test]
+    fn opening_and_reading_large_many_lines_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("planetext-100k-lines-test.txt");
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut writer = std::io::BufWriter::new(file);
+            for i in 0..100_000 {
+                use std::io::Write;
+                if i > 0 {
+                    writeln!(writer).unwrap();
+                }
+                write!(writer, "line {i} with some content").unwrap();
+            }
+        }
+        let (mut doc, scan) = Document::open(path.to_str().unwrap()).unwrap();
+        if let Some(scan) = scan {
+            scan.run().unwrap();
+        }
+        doc.confirm_scan();
+        assert_eq!(doc.line_count(), 100_000);
+        // 先頭、中間、末尾の行を正確にseek読みできるか
+        let middle = doc.read(50_000, 3).unwrap();
+        assert_eq!(
+            middle,
+            vec![
+                "line 50000 with some content",
+                "line 50001 with some content",
+                "line 50002 with some content"
+            ]
+        );
+        let tail = doc.read(99_998, 2).unwrap();
+        assert_eq!(
+            tail,
+            vec![
+                "line 99998 with some content",
+                "line 99999 with some content"
+            ]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 回帰: 未走査（バックグラウンド走査完了前）の巨大ファイルで、
+    /// 起動直後に末尾付近の行を読み出しても（Ctrl+End相当）、
+    /// 1行ごとの読み捨てではなく SIMD による一括スキップで即座に届くことを検証する。
+    #[test]
+    fn reading_distant_lines_before_scan_completion_is_fast() {
+        let lines: Vec<String> = (0..STRIDE * 5).map(|i| format!("content {i}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (mut doc, path) = disk_doc("distant-lines", &refs);
+
+        // 走査完了前（pending_source がまだ残る状態）
+        assert_eq!(doc.line_count(), STRIDE * 5);
+        let read = doc.read(STRIDE * 4 + 10, 3).unwrap();
+        assert_eq!(
+            read,
+            vec![
+                format!("content {}", STRIDE * 4 + 10),
+                format!("content {}", STRIDE * 4 + 11),
+                format!("content {}", STRIDE * 4 + 12),
+            ]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 回帰: 未走査の巨大ファイルで、末尾付近の行を編集して Undo/Redo しても、
+    /// ピース分割（split）が EOF seek により即座に行われ、タイムラグなしで復元できることを検証する。
+    #[test]
+    fn undo_redo_near_tail_before_scan_completion_is_instant() {
+        let total = STRIDE * 5;
+        let lines: Vec<String> = (0..total).map(|i| format!("line {i}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (mut doc, path) = disk_doc("instant-undo-tail", &refs);
+
+        // 走査完了前（pending_source が残る状態）で末尾直前の行（total - 2）を置換
+        let target_line = total - 2;
+        doc.replace(
+            target_line,
+            target_line + 1,
+            vec!["modified tail".into()],
+            1,
+            &format!("line {target_line}"),
+            "modified tail",
+        )
+        .unwrap();
+
+        assert_eq!(doc.read(target_line, 1).unwrap(), vec!["modified tail"]);
+
+        // Undo 実行（split が走るが、EOF seek により即座に元行へ戻る）
+        let undone = doc.undo().unwrap().unwrap();
+        assert_eq!(undone.state, format!("line {target_line}"));
+        assert_eq!(
+            doc.read(target_line, 1).unwrap(),
+            vec![format!("line {target_line}")]
+        );
+
+        // Redo 実行（即座に再適用される）
+        let redone = doc.redo().unwrap().unwrap();
+        assert_eq!(redone.state, "modified tail");
+        assert_eq!(doc.read(target_line, 1).unwrap(), vec!["modified tail"]);
 
         std::fs::remove_file(path).ok();
     }

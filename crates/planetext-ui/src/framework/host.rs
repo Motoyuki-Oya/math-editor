@@ -355,6 +355,13 @@ pub async fn replace_lines(
     serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
 }
 
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SpliceEdit {
+    pub from: usize,
+    pub to: usize,
+    pub lines: Vec<String>,
+}
+
 /// 元に戻す・やり直すの結果。`state` は預けたキャレットの控えそのもの。
 #[derive(Deserialize)]
 pub struct RestoredLines {
@@ -362,9 +369,13 @@ pub struct RestoredLines {
     pub touched_from: usize,
     pub line_count: usize,
     #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
     pub clean: bool,
     #[serde(default)]
     pub modified_lines: Vec<usize>,
+    #[serde(default)]
+    pub splices: Vec<SpliceEdit>,
 }
 
 pub async fn undo_lines(handle: u64, redo: bool) -> Option<RestoredLines> {
@@ -458,11 +469,16 @@ pub struct ScanHit {
     pub end: usize,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 pub struct SearchPage {
     pub hits: Vec<ScanHit>,
     pub scanned_to: usize,
     pub cancelled: bool,
+    #[serde(default)]
+    pub total_matches: Option<usize>,
+    #[serde(default)]
+    pub current_index: Option<usize>,
 }
 
 /// 空のページをnative側で読み進め、最初の候補群までを返します。
@@ -476,6 +492,7 @@ pub async fn search_document(
     from: usize,
     end: usize,
     after_col: Option<usize>,
+    forward: bool,
 ) -> Result<SearchPage, String> {
     #[derive(Serialize)]
     struct Args<'a> {
@@ -487,6 +504,7 @@ pub async fn search_document(
         from: usize,
         end: usize,
         after_col: Option<usize>,
+        forward: bool,
     }
     let value = call(
         "search_document",
@@ -499,12 +517,14 @@ pub async fn search_document(
             from,
             end,
             after_col,
+            forward,
         },
     )
     .await?;
     serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
 }
 
+#[allow(dead_code)]
 pub async fn cancel_search(handle: u64) {
     #[derive(Serialize)]
     struct Args {
@@ -537,6 +557,25 @@ pub async fn estimate_matches(
         },
     )
     .await?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
+}
+
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchProgress {
+    pub generation: u64,
+    pub scanned_bytes: usize,
+    pub total_bytes: usize,
+    pub matches_found: usize,
+    pub estimated_total: usize,
+    pub done: bool,
+}
+
+pub async fn search_progress(handle: u64) -> Result<Option<SearchProgress>, String> {
+    #[derive(Serialize)]
+    struct Args {
+        handle: u64,
+    }
+    let value = call("search_progress", Args { handle }).await?;
     serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
 }
 

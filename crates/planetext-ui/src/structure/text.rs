@@ -137,6 +137,7 @@ pub fn is_word(c: char) -> bool {
 
 /// ファイルから来た行の姿。呼び出し元（保存形式の層）が、素のテキストだけの
 /// 行と、構造を含むため解析済みの行を区別して渡す。
+#[derive(Clone, Debug)]
 pub enum SourceLine {
     Plain(String),
     Parsed(Row),
@@ -403,7 +404,7 @@ impl Text {
     /// `keep` の外の行を未着へ戻し、手元のメモリを返す。行はまた見えれば
     /// 本体から届き直す。まだ送っていない編集を含む行と `pinned`（選択や
     /// キャレットの行）は捨てない。これは編集ではないので控えには残らない。
-    pub fn evict_far(&mut self, keep: std::ops::Range<usize>, pinned: &[usize]) {
+    pub fn evict_far(&mut self, keep_ranges: &[std::ops::Range<usize>], pinned: &[usize]) {
         let Some((span_start, span_end)) = self.resident_span.get() else {
             return;
         };
@@ -439,7 +440,7 @@ impl Text {
                 if matches!(slot.as_ref(), Line::Absent) {
                     continue;
                 }
-                if keep.contains(&line)
+                if keep_ranges.iter().any(|r| r.contains(&line))
                     || pinned.contains(&line)
                     || self
                         .changes
@@ -782,6 +783,57 @@ impl Text {
         }
     }
 
+    /// 外部（他スライスの編集や文書エンジンからの通知）での行範囲置換を適用する。
+    /// 自身での編集ではないため、`self.changes`（送信控え）には記録しない。
+    #[allow(dead_code)]
+    pub fn replace_external(&mut self, from: usize, to: usize, lines: Vec<SourceLine>) {
+        let from = from.min(self.line_count);
+        let to = to.min(self.line_count);
+
+        // 1. 同一行数の置き換え（タイピング、文字削除・置換など最頻出ケース）
+        if to.saturating_sub(from) == lines.len() {
+            for (i, source) in lines.into_iter().enumerate() {
+                let line = from + i;
+                let l = match source {
+                    SourceLine::Plain(s) => {
+                        let clean = s.trim_end_matches(['\r', '\n']).to_string();
+                        Line::raw(clean)
+                    }
+                    SourceLine::Parsed(row) => Line::Rows(row),
+                };
+                let was_absent = self.is_absent(line);
+                self.set_line_rc(line, Rc::new(l));
+                if was_absent {
+                    self.absent = self.absent.saturating_sub(1);
+                }
+            }
+            self.total_chars.set(None);
+            if let Some((min, max)) = self.resident_span.get() {
+                self.resident_span.set(Some((min.min(from), max.max(to))));
+            }
+            return;
+        }
+
+        // 2. 行数が変わる場合（改行挿入、複数行削除など）
+        if from < to {
+            self.remove_lines_range(from, to);
+        }
+        if !lines.is_empty() {
+            let new_lines: Vec<Rc<Line>> = lines
+                .into_iter()
+                .map(|source| match source {
+                    SourceLine::Plain(s) => {
+                        let clean = s.trim_end_matches(['\r', '\n']).to_string();
+                        Rc::new(Line::raw(clean))
+                    }
+                    SourceLine::Parsed(row) => Rc::new(Line::Rows(row)),
+                })
+                .collect();
+            self.insert_lines_at(from, new_lines);
+        }
+        self.total_chars.set(None);
+    }
+
     pub fn remove(&mut self, from: Pos, to: Pos) -> Pos {
         let (from, to) = (self.clamp(from), self.clamp(to));
         if from == to {
@@ -1028,6 +1080,7 @@ pub fn character_after(row: &[Node], index: usize) -> usize {
 }
 
 #[cfg(test)]
+#[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
 
@@ -1202,7 +1255,7 @@ mod tests {
         }
         // 8 行目に未送信の編集を作る。
         text.line_mut(8);
-        text.evict_far(2..5, &[6]);
+        text.evict_far(&[2..5], &[6]);
         // 窓の中・ピン・編集済みは残り、それ以外は未着へ戻る。
         assert_eq!(text.raw_line(2), Some("line 2"));
         assert_eq!(text.raw_line(4), Some("line 4"));
@@ -1298,7 +1351,7 @@ mod tests {
         assert_eq!(text.resident_span.get(), Some((500_000, 500_050)));
 
         // 500_010..500_030 のみを keep して evict
-        text.evict_far(500_010..500_030, &[]);
+        text.evict_far(&[500_010..500_030], &[]);
         assert_eq!(text.resident_span.get(), Some((500_010, 500_030)));
 
         assert!(text.is_absent(500_000));
@@ -1341,7 +1394,7 @@ mod tests {
 
         // 4. ページ単位の evict_far 解放速度測定
         let t3 = Instant::now();
-        text.evict_far(0..10, &[]);
+        text.evict_far(&[0..10], &[]);
         let evict_time = t3.elapsed();
 
         assert_eq!(text.pages.len(), 0); // 完全に解放されて 0 ページに！

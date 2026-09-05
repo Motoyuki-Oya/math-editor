@@ -9,11 +9,14 @@ mod search;
 mod search_index;
 mod source;
 #[cfg(test)]
-mod store;
+mod test_utils;
+mod transaction;
+
+pub use transaction::FileTransaction;
 
 use document::Document;
-pub use search::CompiledQuery;
-use search::{ScanHit, SearchSpec};
+use search::SearchSpec;
+pub use search::{CompiledQuery, ScanHit, SearchProgress};
 use source::{FileEncoding, LineEnding, ScanIndex};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -56,6 +59,8 @@ pub struct ReopenedDocument {
     pub revision: u64,
 }
 
+pub use document::SpliceEdit;
+
 /// 元に戻す・やり直すの結果。`state` は frontend が預けた控えそのもの。
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct RestoredLines {
@@ -65,6 +70,8 @@ pub struct RestoredLines {
     pub clean: bool,
     pub revision: u64,
     pub modified_lines: Vec<usize>,
+    #[serde(default)]
+    pub splices: Vec<SpliceEdit>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -89,11 +96,13 @@ pub struct EditApplied {
     pub revision: u64,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct SearchPage {
-    hits: Vec<ScanHit>,
-    scanned_to: usize,
-    cancelled: bool,
+    pub hits: Vec<ScanHit>,
+    pub scanned_to: usize,
+    pub cancelled: bool,
+    pub total_matches: Option<usize>,
+    pub current_index: Option<usize>,
 }
 
 /// 下書きファイルは最初の行にドキュメントのパスがあり、その後にドキュメント自体が含まれているため、復元されたドラフトではそれがどのファイルに属しているかがわかります。
@@ -136,6 +145,7 @@ pub struct SearchJob {
     from: usize,
     end: usize,
     after_col: Option<usize>,
+    forward: bool,
     generation: Arc<AtomicU64>,
     ticket: u64,
 }
@@ -148,13 +158,19 @@ impl SearchJob {
                 from: self.from,
                 end: self.end,
                 after_col: self.after_col,
+                forward: self.forward,
             },
             &|| self.generation.load(Ordering::Relaxed) != self.ticket,
         )?;
-        let mapped_hits = self
+        let snapshot_cache = self.snapshot.search_cache.take();
+        let (mapped_hits, total_matches, current_index) = self
             .application
             .with_doc(self.handle, |doc| {
-                Ok(doc.map_search_hits(&self.snapshot, found.hits))
+                if let Some(cache) = snapshot_cache {
+                    doc.search_cache = Some(cache);
+                }
+                let mapped = doc.map_search_hits(&self.snapshot, found.hits);
+                Ok((mapped, found.total_matches, found.current_index))
             })
             .unwrap_or_default();
 
@@ -162,6 +178,8 @@ impl SearchJob {
             hits: mapped_hits,
             scanned_to: found.scanned_to,
             cancelled: found.cancelled,
+            total_matches,
+            current_index,
         })
     }
 }
@@ -225,8 +243,13 @@ impl SettingsWrite {
     }
 
     pub fn write(self) -> Result<(), String> {
-        std::fs::write(&self.path, self.contents)
-            .map_err(|e| format!("設定を保存できませんでした: {e}"))
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| "親ディレクトリがありません".to_string())?;
+        let mut tx = FileTransaction::begin(parent)?;
+        tx.add_file_bytes(&self.path, self.contents.as_bytes())?;
+        tx.commit()
     }
 }
 
@@ -426,10 +449,10 @@ impl Application {
             // また、万一過去のバグで先頭チャンクの暫定行数（doc.count）がそのまま保存されていた汚染下書きであっても、
             // それを確定値と誤認して背景走査を打ち切らないよう防護する。
             let is_stale_provisional_count =
-                doc.pending_source.is_some() && saved_line_count == doc.count;
+                doc.is_scanning() && saved_line_count == doc.line_count();
             if saved_line_count > 0 && !is_stale_provisional_count {
                 doc.confirm_scan_with_total_lines(saved_line_count);
-            } else if max_needed_line >= doc.count {
+            } else if max_needed_line >= doc.line_count() {
                 doc.confirm_scan_with_total_lines(max_needed_line);
             }
 
@@ -447,7 +470,7 @@ impl Application {
                     redo_diffs.push(diff);
                 }
             }
-            doc.pending_redo_diffs = redo_diffs;
+            doc.set_pending_redo_diffs(redo_diffs);
 
             if let Some(scan) = scan {
                 // 下書き復元は 0 秒即時リターンを保証するため、走査は常にバックグラウンドで回す。
@@ -493,7 +516,7 @@ impl Application {
                 .map(|d| d.from_line + d.removed_lines)
                 .max()
                 .unwrap_or(0);
-            if max_needed_line >= doc.count {
+            if max_needed_line >= doc.line_count() {
                 doc.confirm_scan_with_total_lines(max_needed_line);
             }
 
@@ -557,6 +580,7 @@ impl Application {
         before: String,
         after: String,
     ) -> Result<EditApplied, String> {
+        self.cancel_search(handle);
         self.with_doc(handle, |doc| {
             let line_count = doc.replace(from, to, lines, group, &before, &after)?;
             Ok(EditApplied {
@@ -578,6 +602,7 @@ impl Application {
         before: String,
         after: String,
     ) -> Result<EditApplied, String> {
+        self.cancel_search(handle);
         self.with_doc(handle, |doc| {
             let line_count =
                 doc.replace_with_base(base_revision, from, to, lines, group, &before, &after)?;
@@ -593,6 +618,7 @@ impl Application {
         if !self.state.docs.lock().unwrap().contains_key(&handle) {
             return Ok(None);
         }
+        self.cancel_search(handle);
         self.with_doc(handle, |doc| {
             Ok(
                 (if redo { doc.redo() } else { doc.undo() })?.map(|restored| RestoredLines {
@@ -602,19 +628,20 @@ impl Application {
                     clean: doc.is_clean(),
                     revision: doc.revision(),
                     modified_lines: doc.modified_lines(),
+                    splices: restored.splices,
                 }),
             )
         })
     }
 
     pub fn save_document(&self, handle: u64, path: String) -> Result<(), String> {
+        self.cancel_search(handle);
         self.with_doc(handle, |doc| doc.save(&path))
     }
 
     pub fn close_document(&self, handle: u64) {
-        if let Some(generation) = self.state.searches.lock().unwrap().remove(&handle) {
-            generation.fetch_add(1, Ordering::Relaxed);
-        }
+        self.cancel_search(handle);
+        self.state.searches.lock().unwrap().remove(&handle);
         self.state.docs.lock().unwrap().remove(&handle);
     }
 
@@ -629,6 +656,7 @@ impl Application {
         from: usize,
         end: usize,
         after_col: Option<usize>,
+        forward: bool,
     ) -> Result<SearchJob, String> {
         let generation = self
             .state
@@ -649,6 +677,7 @@ impl Application {
             from,
             end,
             after_col,
+            forward,
             generation,
             ticket,
         })
@@ -668,7 +697,15 @@ impl Application {
         case_sensitive: bool,
     ) -> Result<usize, String> {
         let query = CompiledQuery::compile(&query, regex, case_sensitive, '\0')?;
-        self.with_doc(handle, |doc| doc.estimate_matches(&query.pattern))
+        self.with_doc(handle, |doc| doc.estimate_matches(query.matcher.as_ref()))
+    }
+
+    pub fn search_index_progress(&self, handle: u64) -> Result<Option<(usize, usize)>, String> {
+        self.with_doc(handle, |doc| Ok(doc.search_index_progress()))
+    }
+
+    pub fn search_progress(&self, handle: u64) -> Result<Option<SearchProgress>, String> {
+        self.with_doc(handle, |doc| Ok(Some(doc.search_progress())))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -743,6 +780,9 @@ impl Application {
     }
 
     pub fn read_settings(&self, config_dir: Option<PathBuf>) -> String {
+        if let Some(ref dir) = config_dir {
+            let _ = FileTransaction::recover(dir);
+        }
         settings_path(config_dir)
             .and_then(|path| std::fs::read_to_string(path).ok())
             .unwrap_or_default()
@@ -760,6 +800,7 @@ impl Application {
     }
 
     /// 文書の本体から下書きを書きます。最初の行はドキュメントのパス、続きが本文。
+    /// 一時ファイル＋ジャーナル＋原子的置換によりクラッシュ時にも安全性を保証する。
     pub fn save_draft(
         &self,
         config_dir: Option<PathBuf>,
@@ -771,10 +812,10 @@ impl Application {
             return Err("下書きの保存先がありません".to_string());
         };
         self.with_doc(handle, |doc| {
-            let file = std::fs::File::create(dir.join(draft_name(&id)))
-                .map_err(|e| format!("下書きを保存できませんでした: {e}"))?;
-            let mut out = std::io::BufWriter::new(file);
-            doc.write_draft(&mut out, path.as_deref())
+            let target = dir.join(draft_name(&id));
+            let mut tx = FileTransaction::begin(&dir)?;
+            tx.add_file(&target, |out| doc.write_draft(out, path.as_deref()))?;
+            tx.commit()
         })
     }
 
@@ -803,6 +844,7 @@ impl Application {
         let Some(dir) = drafts_dir(config_dir) else {
             return Vec::new();
         };
+        let _ = FileTransaction::recover(&dir);
         let Ok(entries) = std::fs::read_dir(dir) else {
             return Vec::new();
         };
@@ -1735,5 +1777,108 @@ mod tests {
         application.clear_drafts(Some(temp_dir.clone()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         let _ = std::fs::remove_file(&file_path);
+    }
+
+    #[test]
+    fn search_job_automatically_cancelled_by_edit_undo_and_new_search() {
+        let application = Application::default();
+        let doc = application.create_document();
+        application
+            .replace_lines(
+                doc.handle,
+                0,
+                0,
+                vec![
+                    "line 1 target".into(),
+                    "line 2 target".into(),
+                    "line 3 target".into(),
+                ],
+                1,
+                "".into(),
+                "".into(),
+            )
+            .unwrap();
+
+        // 1. 編集によって先行検索が自動キャンセルされること
+        let job_before_edit = application
+            .prepare_search(
+                doc.handle,
+                "target".into(),
+                false,
+                true,
+                '$',
+                0,
+                3,
+                None,
+                true,
+            )
+            .unwrap();
+        application
+            .replace_lines(
+                doc.handle,
+                0,
+                1,
+                vec!["line 1 modified".into()],
+                2,
+                "".into(),
+                "".into(),
+            )
+            .unwrap();
+        let res1 = job_before_edit.run().unwrap();
+        assert!(res1.cancelled, "編集後の先行検索は自動キャンセルされること");
+
+        // 2. Undo によって先行検索が自動キャンセルされること
+        let job_before_undo = application
+            .prepare_search(
+                doc.handle,
+                "target".into(),
+                false,
+                true,
+                '$',
+                0,
+                3,
+                None,
+                true,
+            )
+            .unwrap();
+        application.undo_lines(doc.handle, false).unwrap();
+        let res2 = job_before_undo.run().unwrap();
+        assert!(res2.cancelled, "Undo後の先行検索は自動キャンセルされること");
+
+        // 3. 新規検索によって先行検索が自動キャンセルされること
+        let job_first = application
+            .prepare_search(
+                doc.handle,
+                "target".into(),
+                false,
+                true,
+                '$',
+                0,
+                3,
+                None,
+                true,
+            )
+            .unwrap();
+        let job_second = application
+            .prepare_search(
+                doc.handle,
+                "target".into(),
+                false,
+                true,
+                '$',
+                0,
+                3,
+                None,
+                true,
+            )
+            .unwrap();
+        let res_first = job_first.run().unwrap();
+        assert!(
+            res_first.cancelled,
+            "旧検索は新検索の開始により自動キャンセルされること"
+        );
+        let res_second = job_second.run().unwrap();
+        assert!(!res_second.cancelled, "最新の検索は正常完了すること");
+        assert_eq!(res_second.hits.len(), 3);
     }
 }

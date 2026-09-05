@@ -8,8 +8,9 @@ pub(crate) use host::{
     estimate_matches, file_size, finish_document, lines_containing, open_document, open_draft,
     read_drafts, read_lines, read_session_state, read_settings, read_tail, remove_draft,
     reopen_document_encoding, replace_lines, save_document, save_draft, save_session_state,
-    search_document, set_dirty, set_document_encoding, set_document_line_ending, undo_lines,
-    write_settings, Draft, EditApplied, OpenedDocument, ReadLines,
+    search_document, search_progress, set_dirty, set_document_encoding, set_document_line_ending,
+    undo_lines, write_settings, Draft, EditApplied, OpenedDocument, ReadLines, SearchProgress,
+    SpliceEdit,
 };
 
 pub(crate) type GuiError = String;

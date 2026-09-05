@@ -955,3 +955,96 @@ fn test_open_draft_with_confirmed_line_count_returns_some_and_needs_no_scan_wait
     let head_read = app.read_lines(restored.handle, 0, 5).unwrap();
     assert_eq!(head_read.lines.len(), 5);
 }
+
+#[test]
+fn test_two_edits_two_undos_kill_restore_redo_step_by_step() {
+    let ctx = TestContext::new("planetext_bb_two_edits_two_undos");
+    let file_path = ctx.file_path("test.txt");
+    fs::write(&file_path, "line 1\nline 2\nline 3\n").unwrap();
+
+    let app = Application::default();
+    let doc = app
+        .open_document(file_path.to_str().unwrap().to_string())
+        .unwrap();
+
+    // 編集1: 1行目を編集 (group: 1)
+    app.replace_lines(
+        doc.handle,
+        0,
+        1,
+        vec!["line 1 EDIT 1".into()],
+        1,
+        "".into(),
+        "".into(),
+    )
+    .unwrap();
+
+    // 編集2: 同じ1行目をさらに編集 (group: 2)
+    app.replace_lines(
+        doc.handle,
+        0,
+        1,
+        vec!["line 1 EDIT 2".into()],
+        2,
+        "".into(),
+        "".into(),
+    )
+    .unwrap();
+
+    // Undo 1回目: 編集2が元に戻り、編集1の状態になる
+    app.undo_lines(doc.handle, false).unwrap();
+    assert_eq!(
+        app.read_lines(doc.handle, 0, 3).unwrap().lines,
+        vec!["line 1 EDIT 1", "line 2", "line 3"]
+    );
+
+    // Undo 2回目: 編集1が元に戻り、最初の状態になる
+    app.undo_lines(doc.handle, false).unwrap();
+    assert_eq!(
+        app.read_lines(doc.handle, 0, 3).unwrap().lines,
+        vec!["line 1", "line 2", "line 3"]
+    );
+
+    // 下書き保存
+    app.save_draft(
+        ctx.config_dir(),
+        doc.handle,
+        "two_undos".into(),
+        Some(file_path.to_str().unwrap().into()),
+    )
+    .unwrap();
+
+    // プロセスkillに相当：新しい Application インスタンスを作成
+    let app2 = Application::default();
+
+    // 復帰：下書きから復元
+    let restored = app2
+        .open_draft(ctx.config_dir(), "two_undos".into())
+        .unwrap();
+    assert_eq!(
+        app2.read_lines(restored.handle, 0, 3).unwrap().lines,
+        vec!["line 1", "line 2", "line 3"]
+    );
+
+    // Redo 1回目: 編集1だけが戻るべき！
+    let _redo1 = app2
+        .undo_lines(restored.handle, true)
+        .unwrap()
+        .expect("redo 1 should succeed");
+    assert_eq!(
+        app2.read_lines(restored.handle, 0, 3).unwrap().lines,
+        vec!["line 1 EDIT 1", "line 2", "line 3"],
+        "Redo 1回目で編集1だけが戻るべき（2回分が一気に戻ってはならない）"
+    );
+
+    // Redo 2回目: 編集2が戻るべき！
+    let _redo2 = app2
+        .undo_lines(restored.handle, true)
+        .unwrap()
+        .expect("redo 2 should succeed");
+    assert_eq!(
+        app2.read_lines(restored.handle, 0, 3).unwrap().lines,
+        vec!["line 1 EDIT 2", "line 2", "line 3"],
+        "Redo 2回目で編集2が戻るべき"
+    );
+}

@@ -36,13 +36,19 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
     // `forward`: true なら +1（次を検索）、false なら -1（前を検索）。
     let step_match = move |forward: bool| {
         shell.focus_on(pane);
+        let epane = pane.editor_pane();
         let q = query.get_untracked();
-        let total = estimated_count.get_untracked().unwrap_or(0);
-        let cur_cursor = editor::current_cursor_pos();
+        let (pane_cur, pane_total) = pane.search_status.get_untracked();
+        let total = pane_total
+            .or_else(|| estimated_count.get_untracked())
+            .unwrap_or(0);
+        let cur_cursor = editor::current_cursor_pos_pane(epane);
         let caret_moved = last_matched_pos.get_untracked() != cur_cursor || cur_cursor.is_none();
 
-        let base = if caret_moved {
-            editor::current_match_number(&q, options(), total)
+        let base = if pane_cur > 0 {
+            pane_cur
+        } else if caret_moved {
+            editor::current_match_number_pane(epane, &q, options(), total)
         } else {
             current_match.get_untracked()
         };
@@ -63,6 +69,8 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
             base - 1
         };
         current_match.set(next);
+        pane.search_status
+            .set((next, pane_total.or_else(|| estimated_count.get_untracked())));
     };
 
     // バーは開いた後のみ画面上に表示されるため、フィールドが存在するとすぐに、
@@ -85,16 +93,25 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
 
     // 検索ジャンプの後に呼ぶ: ジャンプ先をキャレット移動検知用に記録する。
     let record_pos = move || {
-        last_matched_pos.set(editor::current_cursor_pos());
+        last_matched_pos.set(editor::current_cursor_pos_pane(pane.editor_pane()));
     };
 
     // on:focus で現在位置を同期する。
     let sync_on_focus = move || {
         shell.focus_on(pane);
+        let epane = pane.editor_pane();
         let q = query.get_untracked();
-        let total = estimated_count.get_untracked().unwrap_or(0);
-        current_match.set(editor::current_match_number(&q, options(), total));
-        last_matched_pos.set(editor::current_cursor_pos());
+        let (pane_cur, pane_total) = pane.search_status.get_untracked();
+        let total = pane_total
+            .or_else(|| estimated_count.get_untracked())
+            .unwrap_or(0);
+        let num = if pane_cur > 0 {
+            pane_cur
+        } else {
+            editor::current_match_number_pane(epane, &q, options(), total)
+        };
+        current_match.set(num);
+        last_matched_pos.set(editor::current_cursor_pos_pane(epane));
     };
 
     let close_bar = move || {
@@ -125,6 +142,7 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
                             let value = event_target_value(&ev);
                             query.set(value.clone());
                             current_match.set(0);
+                            pane.search_status.set((0, None));
                             last_matched_pos.set(None);
                             update_preview(
                                 pane,
@@ -147,15 +165,12 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
                                 let options = options();
                                 let forward = !ev.shift_key();
                                 step_match(forward);
-                                spawn_local(async move {
-                                    let size = file_size_for(pane).await;
-                                    if forward {
-                                        super::sync::find(shell, pane.editor_pane(), query, options, size);
-                                    } else {
-                                        super::sync::find_previous(shell, pane.editor_pane(), query, options, size);
-                                    }
-                                    record_pos();
-                                });
+                                if forward {
+                                    super::sync::find(shell, pane.editor_pane(), query, options, None);
+                                } else {
+                                    super::sync::find_previous(shell, pane.editor_pane(), query, options, None);
+                                }
+                                record_pos();
                             }
                         }
                     />
@@ -165,10 +180,16 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
                             if q.is_empty() {
                                 return "".to_string();
                             }
-                            let cur = current_match.get();
-                            match estimated_count.get() {
+                            let (pane_cur, pane_total) = pane.search_status.get();
+                            let cur = if pane_cur > 0 {
+                                pane_cur
+                            } else {
+                                current_match.get()
+                            };
+                            let total = pane_total.or_else(|| estimated_count.get());
+                            match total {
                                 Some(0) => "0/0".to_string(),
-                                Some(estimated) => format!("{cur}/{estimated}"),
+                                Some(t) => format!("{cur}/{t}"),
                                 None => format!("{cur}/…"),
                             }
                         }}
@@ -217,11 +238,8 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
                             let query = query.get_untracked();
                             let options = options();
                             step_match(false);
-                            spawn_local(async move {
-                                let size = file_size_for(pane).await;
-                                super::sync::find_previous(shell, pane.editor_pane(), query, options, size);
-                                record_pos();
-                            });
+                            super::sync::find_previous(shell, pane.editor_pane(), query, options, None);
+                            record_pos();
                         }
                     >
                         "↑"
@@ -234,11 +252,8 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
                             let query = query.get_untracked();
                             let options = options();
                             step_match(true);
-                            spawn_local(async move {
-                                let size = file_size_for(pane).await;
-                                super::sync::find(shell, pane.editor_pane(), query, options, size);
-                                record_pos();
-                            });
+                            super::sync::find(shell, pane.editor_pane(), query, options, None);
+                            record_pos();
                         }
                     >
                         "↓"
@@ -277,7 +292,13 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
                                     step_match(true);
                                     spawn_local(async move {
                                         let size = file_size_for(pane).await;
-                                        editor::replace_and_find_next(&query, &replacement, options, size);
+                                        editor::replace_and_find_next_pane(
+                                            pane.editor_pane(),
+                                            &query,
+                                            &replacement,
+                                            options,
+                                            size,
+                                        );
                                         record_pos();
                                     });
                                 }
@@ -295,7 +316,13 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
                                 step_match(true);
                                 spawn_local(async move {
                                     let size = file_size_for(pane).await;
-                                    editor::replace_and_find_next(&query, &replacement, options, size);
+                                    editor::replace_and_find_next_pane(
+                                        pane.editor_pane(),
+                                        &query,
+                                        &replacement,
+                                        options,
+                                        size,
+                                    );
                                     record_pos();
                                 });
                             }
@@ -358,6 +385,57 @@ fn update_preview(
         if generation.get_untracked() == current {
             if let Ok(count) = result {
                 estimated_count.set(Some(count));
+            }
+        } else {
+            return;
+        }
+
+        // バックグラウンドで全文並列走査を実行
+        let query_bg = query.clone();
+        let finished = std::rc::Rc::new(std::cell::Cell::new(false));
+        let finished_poller = finished.clone();
+
+        spawn_local(async move {
+            let page = crate::framework::search_document(
+                handle,
+                &query_bg,
+                options.regex,
+                options.case_sensitive,
+                crate::format::document::NOTATION_MARK,
+                0,
+                0,
+                None,
+                true,
+            )
+            .await;
+            finished.set(true);
+            if generation.get_untracked() == current {
+                if let Ok(page) = page {
+                    if !page.cancelled {
+                        if let Some(total) = page.total_matches {
+                            estimated_count.set(Some(total));
+                        }
+                    }
+                }
+            }
+        });
+
+        // 走査完了まで 0.5秒（500ms）ごとに進捗をポーリングして画面の推測値を随時更新する
+        loop {
+            tick(500).await;
+            if generation.get_untracked() != current || finished_poller.get() {
+                break;
+            }
+            if let Ok(Some(prog)) = crate::framework::search_progress(handle).await {
+                if generation.get_untracked() != current || finished_poller.get() {
+                    break;
+                }
+                if prog.done {
+                    estimated_count.set(Some(prog.matches_found));
+                    break;
+                } else if prog.scanned_bytes > 0 {
+                    estimated_count.set(Some(prog.estimated_total));
+                }
             }
         }
     });

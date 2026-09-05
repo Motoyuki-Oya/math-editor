@@ -15,7 +15,7 @@ use crate::edit_buffers::{EditBuffers, EditRange};
 use crate::operation_log::{BulkOperation, Edit, OperationLog};
 use crate::persistence::DraftDiff;
 use crate::piece_tree::{Piece, PieceTree};
-use crate::search::ScanHit;
+use crate::search::{convert_raw_hits, scan_encoded_range, ScanHit, SearchHitCache};
 use crate::search_index::{BackgroundIndex, SearchIndex};
 use crate::source::{BackgroundScan, FileEncoding, LineEnding, ScanIndex, Source};
 
@@ -28,30 +28,110 @@ pub(crate) struct PendingSource {
 
 pub(crate) struct Document {
     pub(crate) source: Option<Source>,
-    pub(crate) pieces: PieceTree,
-    pub(crate) buffers: EditBuffers,
+    pieces: PieceTree,
+    buffers: EditBuffers,
     /// すべてのピースの行数の合計。
-    pub(crate) count: usize,
-    pub(crate) log: OperationLog,
-    pub(crate) encoding: FileEncoding,
-    pub(crate) line_ending: LineEnding,
-    pub(crate) pending_source: Option<PendingSource>,
-    pub(crate) search_index: Option<SearchIndex>,
-    pub(crate) background_index: Option<BackgroundIndex>,
-    pub(crate) pending_redo_diffs: Vec<DraftDiff>,
+    count: usize,
+    log: OperationLog,
+    encoding: FileEncoding,
+    line_ending: LineEnding,
+    pending_source: Option<PendingSource>,
+    search_index: Option<SearchIndex>,
+    background_index: Option<BackgroundIndex>,
+    pending_redo_diffs: Vec<DraftDiff>,
+    pub(crate) search_cache: Option<SearchHitCache>,
+    pub(crate) search_progress: Arc<crate::search::SearchProgressTracker>,
 }
 
-/// 元に戻す・やり直すの結果: 復元すべき控えと、行が変わった範囲の始まり。
-/// frontend は `touched_from` から先の手元の行を捨てて取り寄せ直す。
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SpliceEdit {
+    pub from: usize,
+    pub to: usize,
+    pub lines: Vec<String>,
+}
+
+/// 元に戻す・やり直すの結果: 復元すべき控えと、行が置き換わった具体的な差分（SpliceEdit）。
+/// frontend は `splices` を受け取って手元のテキストの該当行を直接更新する。
 pub(crate) struct Restored {
     pub(crate) state: String,
     pub(crate) touched_from: usize,
     pub(crate) line_count: usize,
+    pub(crate) splices: Vec<SpliceEdit>,
 }
 
 impl Document {
     pub(crate) fn take_background_index(&mut self) -> Option<BackgroundIndex> {
         self.background_index.take()
+    }
+
+    pub(crate) fn is_scanning(&self) -> bool {
+        self.pending_source.is_some()
+    }
+
+    pub(crate) fn set_pending_redo_diffs(&mut self, diffs: Vec<DraftDiff>) {
+        self.pending_redo_diffs = diffs;
+    }
+
+    pub(crate) fn has_active_bulk(&self) -> bool {
+        self.log.has_active_bulk()
+    }
+
+    pub(crate) fn is_same_source_path(&self, path: &str) -> bool {
+        self.source
+            .as_ref()
+            .is_some_and(|source| source.path == Path::new(path))
+    }
+
+    pub(crate) fn take_source(&mut self) -> Option<Source> {
+        self.source.take()
+    }
+
+    pub(crate) fn restore_source(&mut self, source: Option<Source>) {
+        self.source = source;
+    }
+
+    pub(crate) fn reinitialize_after_save(&mut self, new_source: Source, is_small_file: bool) {
+        let lines = self.count;
+        let content_offset = new_source.content_offset as usize;
+        let bytes = new_source.bytes as usize;
+        self.source = Some(new_source);
+        self.pieces = PieceTree::new(vec![Piece::Source {
+            from: content_offset,
+            len: bytes.saturating_sub(content_offset),
+            newlines: lines.saturating_sub(1),
+            starts_newline: false,
+            ends_newline: false,
+        }]);
+        if !is_small_file {
+            self.log.clear();
+            self.buffers = EditBuffers::default();
+        } else {
+            self.log.mark_saved();
+        }
+        self.search_index = None;
+    }
+
+    pub(crate) fn search_index(&self) -> Option<&SearchIndex> {
+        self.search_index.as_ref()
+    }
+
+    pub(crate) fn search_index_progress(&self) -> Option<(usize, usize)> {
+        self.search_index.as_ref().map(|idx| idx.progress())
+    }
+
+    pub(crate) fn estimated_line_count(&self) -> usize {
+        if let (Some(pending), Some(source)) = (self.pending_source, &self.source) {
+            let pending_from = pending.from as u64;
+            if pending_from > source.content_offset && source.bytes > source.content_offset {
+                let scanned_bytes = (pending_from - source.content_offset) as u128;
+                let total_bytes = (source.bytes - source.content_offset) as u128;
+                ((self.count as u128 * total_bytes) / scanned_bytes.max(1)) as usize
+            } else {
+                self.count
+            }
+        } else {
+            self.count
+        }
     }
 
     fn source_pieces(source: &Source, count: usize) -> (Vec<Piece>, Option<PendingSource>) {
@@ -131,6 +211,8 @@ impl Document {
                 search_index,
                 background_index,
                 pending_redo_diffs: Vec::new(),
+                search_cache: None,
+                search_progress: Arc::new(crate::search::SearchProgressTracker::default()),
             },
             scan,
         ))
@@ -171,6 +253,8 @@ impl Document {
             search_index: None,
             background_index: None,
             pending_redo_diffs: Vec::new(),
+            search_cache: None,
+            search_progress: Arc::new(crate::search::SearchProgressTracker::default()),
         }
     }
 
@@ -319,6 +403,8 @@ impl Document {
             search_index: self.search_index.clone(),
             background_index: None,
             pending_redo_diffs: Vec::new(),
+            search_cache: self.search_cache.clone(),
+            search_progress: self.search_progress.clone(),
         };
         snapshot.confirm_scan_if_done();
         Ok(snapshot)
@@ -375,6 +461,15 @@ impl Document {
         Some((line, col))
     }
 
+    /// 元ファイル（ベースリビジョン）のバイト区間 [from, to) を現在リビジョンの座標へ写像する。
+    pub(crate) fn map_range_from_base(
+        &self,
+        from: usize,
+        to: usize,
+    ) -> Result<(usize, usize), String> {
+        self.log.map_range(self.log.base_revision, from, to)
+    }
+
     /// スナップショット時点で得られた検索結果を、現在のリビジョンにおける座標へ写像する。
     /// 編集と重なったヒットは無効化（除外）する。
     pub(crate) fn map_search_hits(
@@ -427,6 +522,32 @@ impl Document {
             search_index: None,
             background_index: None,
             pending_redo_diffs: Vec::new(),
+            search_cache: None,
+            search_progress: Arc::new(crate::search::SearchProgressTracker::default()),
+        }
+    }
+
+    pub(crate) fn search_progress(&self) -> crate::search::SearchProgress {
+        let p = &self.search_progress;
+        let generation = p.generation.load(std::sync::atomic::Ordering::Relaxed);
+        let scanned_bytes = p.scanned_bytes.load(std::sync::atomic::Ordering::Relaxed);
+        let total_bytes = p.total_bytes.load(std::sync::atomic::Ordering::Relaxed);
+        let matches_found = p.matches_found.load(std::sync::atomic::Ordering::Relaxed);
+        let done = p.done.load(std::sync::atomic::Ordering::Relaxed);
+        let estimated_total = if done {
+            matches_found
+        } else if scanned_bytes > 0 && total_bytes > 0 {
+            ((matches_found as u128 * total_bytes as u128) / scanned_bytes as u128) as usize
+        } else {
+            matches_found
+        };
+        crate::search::SearchProgress {
+            generation,
+            scanned_bytes,
+            total_bytes,
+            matches_found,
+            estimated_total,
+            done,
         }
     }
 
@@ -736,14 +857,22 @@ impl Document {
             .as_ref()
             .and_then(|source| source.index.status().ok().flatten())
             .is_some();
-        if scan_done {
+        let res = if scan_done {
             self.confirm_scan();
-            return self.read(self.count.saturating_sub(count), count);
+            self.read(self.count.saturating_sub(count), count)
+        } else {
+            self.source
+                .as_mut()
+                .ok_or_else(|| "末尾を読むファイルがありません".to_string())?
+                .read_tail(count)
+        };
+        // 末尾アクセス時に末尾ブロックの索引をオンデマンド構築
+        if let (Some(index), Some(source)) = (self.search_index.as_ref(), self.source.as_mut()) {
+            let tail_byte =
+                (source.bytes.saturating_sub(source.content_offset)).saturating_sub(1) as usize;
+            let _ = index.ensure_block_at_byte(tail_byte, source);
         }
-        self.source
-            .as_mut()
-            .ok_or_else(|| "末尾を読むファイルがありません".to_string())?
-            .read_tail(count)
+        res
     }
 
     /// `from..to` の行を `lines` に置き換え、操作ログに追記する。
@@ -1136,6 +1265,7 @@ impl Document {
         let edits = tx.edits().to_vec();
         let state = tx.before.clone();
         let mut touched_from = usize::MAX;
+        let mut splices = Vec::new();
         for edit in edits.into_iter().rev() {
             touched_from = touched_from.min(edit.from_line);
             let restored_lines = self.log.read_deleted(edit.removed);
@@ -1145,6 +1275,11 @@ impl Document {
                 edit.from_line + edit.inserted_lines,
                 &restored_lines,
             )?;
+            splices.push(SpliceEdit {
+                from: edit.from_line,
+                to: edit.from_line + edit.inserted_lines,
+                lines: restored_lines.clone(),
+            });
             if let Some(index) = self.search_index.as_ref() {
                 let byte_pos = edit.from;
                 let restored_text = restored_lines.join("\n");
@@ -1160,6 +1295,7 @@ impl Document {
                 touched_from
             },
             line_count: self.count,
+            splices,
         }))
     }
 
@@ -1168,6 +1304,7 @@ impl Document {
             let edits = tx.edits().to_vec();
             let state = tx.after.clone();
             let mut touched_from = usize::MAX;
+            let mut splices = Vec::new();
             for edit in edits.into_iter() {
                 touched_from = touched_from.min(edit.from_line);
                 let reapply_lines = self.buffers.read_lines(edit.inserted);
@@ -1177,6 +1314,11 @@ impl Document {
                     edit.from_line + edit.removed_lines,
                     &reapply_lines,
                 )?;
+                splices.push(SpliceEdit {
+                    from: edit.from_line,
+                    to: edit.from_line + edit.removed_lines,
+                    lines: reapply_lines.clone(),
+                });
                 if let Some(index) = self.search_index.as_ref() {
                     let byte_pos = edit.from;
                     let removed_text = removed_lines.join("\n");
@@ -1192,12 +1334,14 @@ impl Document {
                     touched_from
                 },
                 line_count: self.count,
+                splices,
             }));
         }
         if !self.pending_redo_diffs.is_empty() {
             let target_group = self.pending_redo_diffs[0].group;
             let mut state = String::new();
             let mut touched_from = usize::MAX;
+            let mut splices = Vec::new();
             while !self.pending_redo_diffs.is_empty()
                 && self.pending_redo_diffs[0].group == target_group
             {
@@ -1205,6 +1349,11 @@ impl Document {
                 let to_line = diff.from_line + diff.removed_lines;
                 state = diff.after.clone();
                 touched_from = touched_from.min(diff.from_line);
+                splices.push(SpliceEdit {
+                    from: diff.from_line,
+                    to: to_line,
+                    lines: diff.lines.clone(),
+                });
                 self.replace_with_deleted(
                     diff.from_line,
                     to_line,
@@ -1223,6 +1372,7 @@ impl Document {
                     touched_from
                 },
                 line_count: self.count,
+                splices,
             }));
         }
         Ok(None)
@@ -1280,6 +1430,306 @@ impl Document {
             .unwrap_or(0);
         self.buffers.len() + self.log.memory_usage() + index_mem
     }
+
+    /// トランザクションを等価な splice へ変換する。このまま active に残すと、
+    /// 変換後の行へ同じ規則が再適用され（foo→foofoo の二重化）、Undo も
+    /// 効かなくなる。変換後は通常の編集として Undo/Redo・下書き化できる。
+    pub(crate) fn materialize_bulk_transactions(&mut self) -> Result<(), String> {
+        use crate::operation_log::OperationKind;
+        let targets: Vec<usize> = self.log.transactions[..self.log.head]
+            .iter()
+            .enumerate()
+            .filter_map(|(i, tx)| matches!(tx.kind, OperationKind::Bulk(_)).then_some(i))
+            .collect();
+        for &index in targets.iter().rev() {
+            let (base_revision, group, revision, bulk, before_text, after_text) = {
+                let tx = &self.log.transactions[index];
+                match &tx.kind {
+                    OperationKind::Bulk(bulk) => (
+                        tx.base_revision,
+                        tx.group,
+                        tx.revision,
+                        bulk.clone(),
+                        tx.before.clone(),
+                        tx.after.clone(),
+                    ),
+                    OperationKind::Splice(_) => continue,
+                }
+            };
+            let mut edits = Vec::new();
+            match &bulk {
+                crate::operation_log::BulkOperation::AllLines {
+                    from_line, to_line, ..
+                }
+                | crate::operation_log::BulkOperation::ReplaceAll {
+                    from_line, to_line, ..
+                } => {
+                    // 範囲内の各行を 1 編集として記録する。内容の変化有無で絞ると、
+                    // たまたま元と同じ結果になった行が欠けて Undo で復元できない
+                    // ため、位置ベースで全行を固める。後ろの行から置き換え、
+                    // まだ置き換えていない行の座標を変えない。
+                    for line_idx in (*from_line..*to_line).rev() {
+                        if line_idx >= self.count {
+                            break;
+                        }
+                        let original = self.read_raw(line_idx, 1)?;
+                        let current = self.read(line_idx, 1)?;
+                        edits.push(self.splice_with_deleted(
+                            line_idx,
+                            line_idx + 1,
+                            current,
+                            original,
+                        )?);
+                    }
+                }
+            }
+            let tx = crate::operation_log::Transaction {
+                group,
+                base_revision,
+                revision,
+                kind: OperationKind::Splice(edits),
+                before: before_text,
+                after: after_text,
+            };
+            self.log.transactions[index] = tx;
+        }
+        Ok(())
+    }
+
+    /// 未保存のトランザクションから、発生した時系列順に操作ログ（差分）を抽出する。
+    /// Undo された（Redo 可能な）トランザクションも含めて保持し、復元後に Redo できるようにする。
+    pub(crate) fn collect_draft_diffs(&mut self) -> (Vec<DraftDiff>, usize) {
+        let (txs, head_tx_offset) = self.log.all_unsaved_transactions();
+        let mut diffs = Vec::new();
+        let mut active_diffs_count = 0;
+        for (tx_idx, tx) in txs.iter().enumerate() {
+            let group = (tx_idx as u64) + 1;
+            for edit in tx.edits() {
+                let mut lines = Vec::with_capacity(edit.inserted_lines);
+                self.buffers.for_each_line(
+                    edit.inserted,
+                    0,
+                    edit.inserted_lines,
+                    &mut |_, line| {
+                        lines.push(line.to_string());
+                        true
+                    },
+                );
+                let deleted_lines = self.log.read_deleted(edit.removed);
+                let fallback_pos = format!("{}.0-{}.0", edit.from_line, edit.from_line);
+                let before = if tx.before.is_empty() {
+                    fallback_pos.clone()
+                } else {
+                    tx.before.clone()
+                };
+                let after = if tx.after.is_empty() {
+                    fallback_pos
+                } else {
+                    tx.after.clone()
+                };
+                diffs.push(DraftDiff {
+                    group,
+                    from_line: edit.from_line,
+                    removed_lines: edit.removed_lines,
+                    lines,
+                    deleted_lines,
+                    before,
+                    after,
+                });
+                if tx_idx < head_tx_offset {
+                    active_diffs_count += 1;
+                }
+            }
+        }
+        for pending in &self.pending_redo_diffs {
+            diffs.push(pending.clone());
+        }
+        (diffs, active_diffs_count)
+    }
+
+    /// 通常の大小区別あり文字列検索。ディスクのピースはバイト範囲をまとめて
+    /// memmem で探し、編集で入った行も同じ結果形式へ合わせる。
+    #[allow(dead_code)]
+    pub(crate) fn scan_literal(
+        &mut self,
+        query: &str,
+        case_sensitive: bool,
+        marker: char,
+        from: usize,
+        count: usize,
+        limit: usize,
+    ) -> Result<(Vec<ScanHit>, usize), String> {
+        let to = from.saturating_add(count).min(self.count);
+        if from >= to || limit == 0 {
+            return Ok((Vec::new(), from));
+        }
+        let query_characters = query.chars().count();
+        let mmap = self.source.as_ref().and_then(|s| s.mmap().ok());
+        let mut hits = Vec::new();
+        let mut scanned_to = from;
+        let mut error = None;
+        self.pieces
+            .for_each_line_range(from, to, &mut |piece_line, piece, skip, take| {
+                if hits.len() >= limit || error.is_some() {
+                    return false;
+                }
+                let result: Result<(Vec<ScanHit>, usize), String> = match piece {
+                    Piece::Source { from, len, .. } => {
+                        let Some(source) = self.source.as_mut() else {
+                            error = Some(
+                                "文書ストアのディスク参照が失われました。開き直してください"
+                                    .to_string(),
+                            );
+                            return false;
+                        };
+                        (|| {
+                            let (range_from, range_to) =
+                                source.byte_range_for_lines(from, len, skip, take)?;
+                            let encoding = source.encoding;
+                            let delimiter = source.delimiter();
+                            let encoded_query = encoding.encode_str(query);
+                            let encoded_marker = encoding.encode_str(&marker.to_string());
+                            let (raw, scanned) = if let Some(ref mmap) = mmap {
+                                scan_encoded_range(
+                                    range_to - range_from,
+                                    take,
+                                    encoding,
+                                    &delimiter,
+                                    &encoded_query,
+                                    &encoded_marker,
+                                    case_sensitive,
+                                    limit - hits.len(),
+                                    |offset, size| {
+                                        let start = range_from + offset;
+                                        let end = (start + size).min(mmap.len());
+                                        if start <= mmap.len() {
+                                            Ok(mmap[start..end].to_vec())
+                                        } else {
+                                            Err("mmap 範囲外アクセス".to_string())
+                                        }
+                                    },
+                                )?
+                            } else {
+                                scan_encoded_range(
+                                    range_to - range_from,
+                                    take,
+                                    encoding,
+                                    &delimiter,
+                                    &encoded_query,
+                                    &encoded_marker,
+                                    case_sensitive,
+                                    limit - hits.len(),
+                                    |offset, size| {
+                                        source.read_byte_range(range_from + offset, size)
+                                    },
+                                )?
+                            };
+                            let converted = if let Some(ref mmap) = mmap {
+                                convert_raw_hits(
+                                    raw,
+                                    encoding,
+                                    piece_line + skip,
+                                    query_characters,
+                                    |offset, size| {
+                                        let start = range_from + offset;
+                                        let end = (start + size).min(mmap.len());
+                                        if start <= mmap.len() {
+                                            Ok(mmap[start..end].to_vec())
+                                        } else {
+                                            Err("mmap 範囲外アクセス".to_string())
+                                        }
+                                    },
+                                )?
+                            } else {
+                                convert_raw_hits(
+                                    raw,
+                                    encoding,
+                                    piece_line + skip,
+                                    query_characters,
+                                    |offset, size| {
+                                        source.read_byte_range(range_from + offset, size)
+                                    },
+                                )?
+                            };
+                            Ok((converted, scanned))
+                        })()
+                    }
+                    Piece::Edit {
+                        from,
+                        len,
+                        newlines,
+                        starts_newline,
+                        ends_newline,
+                        encoding,
+                        line_ending,
+                        ..
+                    } => {
+                        let leading = usize::from(starts_newline)
+                            * crate::edit_buffers::EditBuffers::line_separator_len(
+                                encoding,
+                                line_ending,
+                            );
+                        let range = EditRange {
+                            from: from + leading,
+                            len: len - leading,
+                            lines: newlines + usize::from(!ends_newline)
+                                - usize::from(starts_newline),
+                            encoding,
+                            line_ending,
+                        };
+                        let bytes = self.buffers.bytes(range);
+                        let range_start = self.buffers.byte_offset_after_lines(range, skip);
+                        let range_end = self
+                            .buffers
+                            .byte_offset_after_lines(range, skip.saturating_add(take));
+                        let selected = &bytes[range_start..range_end];
+                        let delimiter = encoding.encode_str(match line_ending {
+                            crate::source::LineEnding::Cr => "\r",
+                            _ => "\n",
+                        });
+                        let encoded_query = encoding.encode_str(query);
+                        let encoded_marker = encoding.encode_str(&marker.to_string());
+                        scan_encoded_range(
+                            selected.len(),
+                            take,
+                            encoding,
+                            &delimiter,
+                            &encoded_query,
+                            &encoded_marker,
+                            case_sensitive,
+                            limit - hits.len(),
+                            |offset, size| Ok(selected[offset..offset + size].to_vec()),
+                        )
+                        .and_then(|(raw, scanned)| {
+                            let converted = convert_raw_hits(
+                                raw,
+                                encoding,
+                                piece_line + skip,
+                                query_characters,
+                                |offset, size| Ok(selected[offset..offset + size].to_vec()),
+                            )?;
+                            Ok((converted, scanned))
+                        })
+                    }
+                };
+                match result {
+                    Ok((mut piece_hits, scanned)) => {
+                        hits.append(&mut piece_hits);
+                        scanned_to = piece_line + skip + scanned;
+                        hits.len() < limit
+                    }
+                    Err(message) => {
+                        error = Some(message);
+                        false
+                    }
+                }
+            });
+        if let Some(error) = error {
+            Err(error)
+        } else {
+            Ok((hits, scanned_to))
+        }
+    }
 }
 
 fn char_byte_len(c: char, encoding: FileEncoding) -> usize {
@@ -1293,5 +1743,655 @@ fn char_byte_len(c: char, encoding: FileEncoding) -> usize {
             }
         }
         _ => encoding.encode_str(&c.to_string()).len(),
+    }
+}
+
+#[cfg(test)]
+impl Document {
+    pub(crate) fn source_content_offset_for_test(&self) -> Option<u64> {
+        self.source.as_ref().map(|s| s.content_offset)
+    }
+
+    pub(crate) fn pieces_line_count_for_test(&self) -> usize {
+        self.pieces.line_count()
+    }
+
+    pub(crate) fn pieces_newline_count_for_test(&self) -> usize {
+        self.pieces.newline_count
+    }
+
+    pub(crate) fn pieces_byte_len_for_test(&self) -> usize {
+        self.pieces.byte_len
+    }
+
+    pub(crate) fn pieces_byte_offset_for_test(&self, line: usize) -> usize {
+        self.pieces.byte_offset(line)
+    }
+
+    pub(crate) fn buffers_len_for_test(&self) -> usize {
+        self.buffers.len()
+    }
+
+    pub(crate) fn log_transactions_len_for_test(&self) -> usize {
+        self.log.transactions.len()
+    }
+
+    pub(crate) fn log_head_for_test(&self) -> usize {
+        self.log.head
+    }
+
+    pub(crate) fn log_validate_base_for_test(&self, base_rev: u64) -> Result<(), String> {
+        self.log.validate_base(base_rev)
+    }
+
+    pub(crate) fn log_first_tx_removed_lines_for_test(&self) -> usize {
+        self.log.transactions[0].edits()[0].removed.lines
+    }
+
+    pub(crate) fn simulate_pending_source_for_test(
+        &mut self,
+        initial_bytes: usize,
+        initial_lines: usize,
+        total_bytes: usize,
+    ) {
+        self.pieces = PieceTree::new(vec![
+            Piece::Source {
+                from: 0,
+                len: initial_bytes,
+                newlines: initial_lines - 1,
+                starts_newline: false,
+                ends_newline: true,
+            },
+            Piece::Source {
+                from: initial_bytes,
+                len: total_bytes - initial_bytes,
+                newlines: 0,
+                starts_newline: true,
+                ends_newline: false,
+            },
+        ]);
+        self.count = initial_lines;
+        self.pending_source = Some(PendingSource {
+            from: initial_bytes,
+            len: total_bytes - initial_bytes,
+            prefix_newlines: initial_lines - 1,
+        });
+    }
+
+    pub(crate) fn source_sparse_mark_for_test(&self, index: usize) -> Option<u64> {
+        self.source
+            .as_ref()
+            .map(|s| s.index.state.lock().unwrap().marks[index])
+    }
+
+    pub(crate) fn source_bytes_for_test(&self) -> Option<u64> {
+        self.source.as_ref().map(|s| s.bytes)
+    }
+
+    pub(crate) fn simulate_scan_done_for_test(&mut self, lines: usize) {
+        if let Some(source) = &self.source {
+            let mut state = source.index.state.lock().unwrap();
+            state.done = true;
+            state.lines = lines;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::source::{FileEncoding, LineEnding};
+    use crate::test_utils::*;
+
+    #[test]
+    fn opening_indexes_lines_without_holding_the_contents() {
+        let (mut doc, path) = disk_doc("open", &["ab", "", "cd"]);
+        assert_eq!(doc.line_count(), 3);
+        assert_eq!(all(&mut doc), vec!["ab", "", "cd"]);
+        assert_eq!(doc.read(2, 1).unwrap(), vec!["cd"]);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn replacing_lines_and_undoing_restores_the_document() {
+        let (mut doc, path) = disk_doc("undo", &["a", "b", "c"]);
+        doc.replace(1, 2, vec!["X".into(), "Y".into()], 1, "before", "after")
+            .unwrap();
+        assert_eq!(all(&mut doc), vec!["a", "X", "Y", "c"]);
+        let undone = doc.undo().unwrap().unwrap();
+        assert_eq!(undone.state, "before");
+        assert_eq!(undone.touched_from, 1);
+        assert_eq!(all(&mut doc), vec!["a", "b", "c"]);
+        let redone = doc.redo().unwrap().unwrap();
+        assert_eq!(redone.state, "after");
+        assert_eq!(all(&mut doc), vec!["a", "X", "Y", "c"]);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn no_op_edit_and_undo_keep_zero_removed_lines() {
+        let (mut doc, path) = disk_doc("no-op", &["a", "b"]);
+        doc.replace(1, 1, Vec::new(), 1, "before", "after").unwrap();
+
+        assert_eq!(doc.log_first_tx_removed_lines_for_test(), 0);
+        assert_eq!(all(&mut doc), vec!["a", "b"]);
+        let undone = doc.undo().unwrap().unwrap();
+        assert_eq!(undone.state, "before");
+        assert_eq!(all(&mut doc), vec!["a", "b"]);
+        assert_eq!(doc.redo().unwrap().unwrap().state, "after");
+        assert_eq!(all(&mut doc), vec!["a", "b"]);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn steps_in_the_same_group_undo_together() {
+        let (mut doc, path) = disk_doc("group", &["a", "b", "c"]);
+        // 「すべて置換」のように、複数の置き換えが 1 つのグループで届く。
+        doc.replace(2, 3, vec!["C".into()], 7, "start", "mid")
+            .unwrap();
+        doc.replace(0, 1, vec!["A".into()], 7, "ignored", "end")
+            .unwrap();
+        assert_eq!(all(&mut doc), vec!["A", "b", "C"]);
+        let undone = doc.undo().unwrap().unwrap();
+        assert_eq!(all(&mut doc), vec!["a", "b", "c"]);
+        assert_eq!(undone.state, "start");
+        assert_eq!(undone.touched_from, 0);
+        assert!(doc.undo().unwrap().is_none());
+        let redone = doc.redo().unwrap().unwrap();
+        assert_eq!(all(&mut doc), vec!["A", "b", "C"]);
+        assert_eq!(redone.state, "end");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn different_groups_undo_one_at_a_time() {
+        let mut doc = Document::empty();
+        doc.replace(0, 1, vec!["b".into()], 1, "s1", "e1").unwrap();
+        doc.replace(0, 1, vec!["c".into()], 2, "s2", "e2").unwrap();
+        doc.undo().unwrap();
+        assert_eq!(all(&mut doc), vec!["b"]);
+        doc.undo().unwrap();
+        assert_eq!(all(&mut doc), vec![""]);
+    }
+
+    #[test]
+    fn a_new_edit_clears_the_redo_branch() {
+        let mut doc = Document::empty();
+        doc.replace(0, 1, vec!["b".into()], 1, "", "").unwrap();
+        doc.undo().unwrap();
+        doc.replace(0, 1, vec!["c".into()], 2, "", "").unwrap();
+        assert!(doc.redo().unwrap().is_none());
+        assert_eq!(all(&mut doc), vec!["c"]);
+    }
+
+    #[test]
+    fn multiple_sequential_edits_in_one_group_undo_and_redo_correctly() {
+        let mut doc = Document::empty();
+        // 文字入力のように同一グループで順次行が置き換わる
+        doc.replace(0, 1, vec!["a".into()], 1, "0.0-0.0", "0.1-0.1")
+            .unwrap();
+        doc.replace(0, 1, vec!["ab".into()], 1, "", "0.2-0.2")
+            .unwrap();
+        doc.replace(0, 1, vec!["abc".into()], 1, "", "0.3-0.3")
+            .unwrap();
+        assert_eq!(all(&mut doc), vec!["abc"]);
+
+        // Undo 実行: 最初の "" (空) に戻る
+        let undone = doc.undo().unwrap().unwrap();
+        assert_eq!(undone.state, "0.0-0.0");
+        assert_eq!(all(&mut doc), vec![""]);
+
+        // Redo 実行: 最終状態 "abc" に正しく戻る（中間の "a" や "ab" に巻き戻らない）
+        let redone = doc.redo().unwrap().unwrap();
+        assert_eq!(redone.state, "0.3-0.3");
+        assert_eq!(all(&mut doc), vec!["abc"]);
+
+        // 再度 Undo 実行: 再び空に戻る
+        let undone2 = doc.undo().unwrap().unwrap();
+        assert_eq!(undone2.state, "0.0-0.0");
+        assert_eq!(all(&mut doc), vec![""]);
+    }
+
+    #[test]
+    fn out_of_range_replacements_are_rejected() {
+        let mut doc = Document::empty();
+        assert!(doc.replace(0, 2, vec![], 1, "", "").is_err());
+        assert!(doc.replace(1, 0, vec![], 1, "", "").is_err());
+    }
+
+    #[test]
+    fn assembling_a_range_uses_edges_and_overrides() {
+        let (mut doc, path) = disk_doc("assemble", &["aa", "bb", "cc", "dd"]);
+        let overrides = std::collections::HashMap::from([(2usize, "CC".to_string())]);
+        assert_eq!(
+            doc.assemble(0, Some("a".into()), 3, Some("d".into()), &overrides)
+                .unwrap(),
+            "a\nbb\nCC\nd"
+        );
+        assert_eq!(
+            doc.assemble(1, None, 1, None, &Default::default()).unwrap(),
+            "bb"
+        );
+        assert!(doc.assemble(0, None, 4, None, &Default::default()).is_err());
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 【回帰防止テスト】
+    /// assemble の実体化が MAX_ASSEMBLE_BYTES（10MB）を超える場合、
+    /// 安全のためにエラーを返し、巨大なヒープ確保によるプロセス圧迫を防ぐ。
+    #[test]
+    fn assemble_enforces_max_bytes_limit() {
+        let large_line = "A".repeat(1024 * 1024); // 1MB の行
+        let lines: Vec<String> = vec![large_line.clone(); 12]; // 12MB 分
+        let lines_ref: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (mut doc, path) = disk_doc("assemble-limit", &lines_ref);
+
+        let overrides = std::collections::HashMap::default();
+        let res = doc.assemble(0, None, 11, None, &overrides);
+        assert!(res.is_err(), "10MB を超える assemble はエラーを返すこと");
+        assert!(
+            res.unwrap_err().contains("上限10MB"),
+            "エラーメッセージに上限情報が含まれること"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 【回帰防止テスト】
+    /// 編集バッファと操作ログのメモリ使用量が memory_usage() で正しく追跡されることを保証する。
+    #[test]
+    fn document_memory_usage_tracks_edits() {
+        let (mut doc, path) = disk_doc("memory-tracking", &["hello", "world"]);
+        let initial_memory = doc.memory_usage();
+
+        doc.replace(1, 2, vec!["new content line".into()], 1, "", "")
+            .unwrap();
+        let edited_memory = doc.memory_usage();
+        assert!(
+            edited_memory > initial_memory,
+            "編集によりメモリ追跡値が増加すること"
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn trailing_newline_final_empty_line_edits_target_the_right_range() {
+        for line_ending in [LineEnding::Lf, LineEnding::CrLf] {
+            for (operation, inserted, edited) in [
+                ("edit", vec!["edited"], vec!["head", "edited"]),
+                (
+                    "replace",
+                    vec!["replacement one", "replacement two"],
+                    vec!["head", "replacement one", "replacement two"],
+                ),
+                ("delete", Vec::new(), vec!["head"]),
+            ] {
+                let name = format!("trailing-{line_ending:?}-{operation}");
+                let (mut doc, path) =
+                    encoded_disk_doc(&name, &["head"], FileEncoding::Utf8, line_ending, true);
+                assert_encoded_document_state(&mut doc, &["head", ""]);
+
+                doc.replace(
+                    1,
+                    2,
+                    inserted.into_iter().map(str::to_string).collect(),
+                    1,
+                    "before",
+                    "after",
+                )
+                .unwrap();
+                assert_encoded_document_state(&mut doc, &edited);
+
+                let undone = doc.undo().unwrap().unwrap();
+                assert_eq!(undone.state, "before");
+                assert_encoded_document_state(&mut doc, &["head", ""]);
+                let redone = doc.redo().unwrap().unwrap();
+                assert_eq!(redone.state, "after");
+                assert_encoded_document_state(&mut doc, &edited);
+                std::fs::remove_file(path).ok();
+            }
+        }
+    }
+
+    #[test]
+    fn edited_separators_match_document_line_ending_and_encoding() {
+        for (encoding, line_ending) in [
+            (FileEncoding::Utf8, LineEnding::Lf),
+            (FileEncoding::Utf8, LineEnding::CrLf),
+            (FileEncoding::Utf8, LineEnding::Cr),
+            (FileEncoding::Utf16Le, LineEnding::CrLf),
+            (FileEncoding::Utf16Be, LineEnding::Cr),
+        ] {
+            let name = format!("separator-{encoding:?}-{line_ending:?}");
+            let (mut doc, path) =
+                encoded_disk_doc(&name, &["head", "tail"], encoding, line_ending, false);
+            doc.replace(1, 1, vec!["左".into(), "右".into()], 1, "before", "after")
+                .unwrap();
+            assert_encoded_document_state(&mut doc, &["head", "左", "右", "tail"]);
+
+            let saved = format!("{path}.saved");
+            doc.save(&saved).unwrap();
+            let expected_text = ["head", "左", "右", "tail"]
+                .join(std::str::from_utf8(line_ending.as_bytes()).unwrap());
+            let expected_bytes = match encoding {
+                FileEncoding::Utf16Le | FileEncoding::Utf16Be => {
+                    utf16_file_bytes(&expected_text, encoding)
+                }
+                _ => encoded_text(&expected_text, encoding),
+            };
+            assert_eq!(std::fs::read(&saved).unwrap(), expected_bytes);
+
+            assert_eq!(doc.undo().unwrap().unwrap().state, "before");
+            assert_encoded_document_state(&mut doc, &["head", "tail"]);
+            assert_eq!(doc.redo().unwrap().unwrap().state, "after");
+            assert_encoded_document_state(&mut doc, &["head", "左", "右", "tail"]);
+            std::fs::remove_file(path).ok();
+            std::fs::remove_file(saved).ok();
+        }
+    }
+
+    #[test]
+    fn boundary_separators_survive_insertions_and_replacements() {
+        for (name, from, to, inserted, expected) in [
+            (
+                "replace-start",
+                0,
+                1,
+                vec!["A", "AA"],
+                vec!["A", "AA", "b", "c"],
+            ),
+            (
+                "replace-middle",
+                1,
+                2,
+                vec!["B", "BB"],
+                vec!["a", "B", "BB", "c"],
+            ),
+            (
+                "replace-eof",
+                2,
+                3,
+                vec!["C", "CC"],
+                vec!["a", "b", "C", "CC"],
+            ),
+            (
+                "insert-start",
+                0,
+                0,
+                vec!["H", "HH"],
+                vec!["H", "HH", "a", "b", "c"],
+            ),
+            (
+                "insert-middle",
+                1,
+                1,
+                vec!["M", "MM"],
+                vec!["a", "M", "MM", "b", "c"],
+            ),
+            (
+                "insert-eof",
+                3,
+                3,
+                vec!["T", "TT"],
+                vec!["a", "b", "c", "T", "TT"],
+            ),
+        ] {
+            let (mut doc, path) = disk_doc(name, &["a", "b", "c"]);
+            doc.replace(
+                from,
+                to,
+                inserted.into_iter().map(str::to_string).collect(),
+                1,
+                "",
+                "",
+            )
+            .unwrap();
+            let expected: Vec<String> = expected.into_iter().map(str::to_string).collect();
+            assert_document_state(&mut doc, &expected);
+            std::fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn document_boundaries_stay_consistent_beyond_node_capacity() {
+        let (mut doc, path) = disk_doc("many-pieces", &["base"]);
+        let mut expected = vec!["base".to_string()];
+        for i in 0..24 {
+            let line = format!("line-{i}");
+            let at = doc.line_count();
+            doc.replace(at, at, vec![line.clone()], i + 1, "", "")
+                .unwrap();
+            expected.push(line);
+        }
+        doc.replace(
+            9,
+            15,
+            vec!["middle-a".into(), "middle-b".into(), "middle-c".into()],
+            100,
+            "",
+            "",
+        )
+        .unwrap();
+        expected.splice(
+            9..15,
+            ["middle-a", "middle-b", "middle-c"].map(str::to_string),
+        );
+        assert_document_state(&mut doc, &expected);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn oversized_delete_is_rejected_without_mutating_the_document() {
+        let mut doc = Document::empty();
+        let line = "a".repeat(5 * 1024 * 1024);
+        doc.replace(
+            0,
+            1,
+            vec![line.clone(), line.clone(), line.clone(), line.clone(), line],
+            1,
+            "before",
+            "after",
+        )
+        .unwrap();
+        let undo_len = doc.log_head_for_test();
+
+        assert!(doc
+            .replace(0, 5, Vec::new(), 2, "before delete", "after delete")
+            .is_err());
+        assert_eq!(doc.line_count(), 5);
+        assert_eq!(doc.read(4, 1).unwrap().len(), 1);
+        assert_eq!(doc.log_head_for_test(), undo_len);
+    }
+
+    #[test]
+    fn replace_lines_with_base_revision_maps_old_coordinates() {
+        let (mut doc, path) = disk_doc("base-rev-map", &["line0", "line1", "line2", "line3"]);
+        let base_rev = doc.revision();
+
+        // 別の編集が先頭に入って revision が進む
+        doc.replace(0, 0, vec!["new0".to_string()], 1, "", "")
+            .unwrap();
+        assert_eq!(doc.line_count(), 5);
+
+        // 古い base_rev を基準にした「line2（旧2行目）の置換」を適用
+        doc.replace_with_base(
+            base_rev,
+            2,
+            3,
+            vec!["replaced_line2".to_string()],
+            2,
+            "",
+            "",
+        )
+        .unwrap();
+
+        // 現在座標（3行目）が置換されていること
+        let lines = doc.read(0, doc.line_count()).unwrap();
+        assert_eq!(
+            lines,
+            vec!["new0", "line0", "line1", "replaced_line2", "line3"]
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn bulk_replace_all_is_evaluated_on_demand_and_undoable() {
+        let (mut doc, path) = disk_doc("bulk-test", &["foo 123", "bar 456", "foo 789"]);
+        let base_rev = doc.revision();
+        let pattern = regex::RegexBuilder::new("foo")
+            .case_insensitive(true)
+            .build()
+            .unwrap();
+        let op = crate::operation_log::BulkOperation::ReplaceAll {
+            from_line: 0,
+            to_line: 3,
+            query: "foo".to_string(),
+            replacement: "baz".to_string(),
+            case_sensitive: false,
+            pattern: std::sync::Arc::new(pattern),
+        };
+        doc.apply_bulk_operation(base_rev, 1, op, "", "").unwrap();
+
+        // オンデマンドに評価されて置換結果が返ること
+        let lines = doc.read(0, 3).unwrap();
+        assert_eq!(lines, vec!["baz 123", "bar 456", "baz 789"]);
+
+        // Undo すると瞬時に元に戻ること
+        doc.undo().unwrap().unwrap();
+        let restored = doc.read(0, 3).unwrap();
+        assert_eq!(restored, vec!["foo 123", "bar 456", "foo 789"]);
+
+        // Redo すると再度適用されること
+        doc.redo().unwrap().unwrap();
+        let reapplied = doc.read(0, 3).unwrap();
+        assert_eq!(reapplied, vec!["baz 123", "bar 456", "baz 789"]);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 回帰: 同一 group の連続編集で既存トランザクションの revision が上書きされず、
+    /// 保存直後に続けてタイプしても saved checkpoint が壊れないことを検証する。
+    #[test]
+    fn merging_edits_keeps_revisions_immutable() {
+        let (mut doc, path) = disk_doc("merge-revision", &["a", "b"]);
+        // 保存して saved checkpoint を作る
+        doc.save(&path).unwrap();
+        let saved_rev = doc.revision();
+        assert!(doc.is_clean());
+
+        // 同一 group で連続タイプ（マージが発生する）
+        doc.replace(0, 1, vec!["a1".into()], 1, "", "").unwrap();
+        let rev1 = doc.revision();
+        assert!(!doc.is_clean());
+        doc.replace(0, 1, vec!["a12".into()], 1, "", "").unwrap();
+        let rev2 = doc.revision();
+
+        // マージは既存トランザクションへ追記するだけで、公開済みの revision を
+        // 書き換えない（保存済み checkpoint が破壊されない）。
+        assert_eq!(rev1, rev2, "マージで公開 revision を上書きしない");
+        assert!(
+            doc.log_validate_base_for_test(rev1).is_ok(),
+            "公開済み revision は残る"
+        );
+        assert!(
+            doc.log_validate_base_for_test(saved_rev).is_ok(),
+            "saved checkpoint は残る"
+        );
+        assert!(!doc.is_clean(), "内容が変わっているので dirty のまま");
+
+        // Undo すると saved 直後の状態へ 1 ステップで戻る（saved を飛び越さない）
+        doc.undo().unwrap();
+        assert!(doc.is_clean(), "Undo で saved checkpoint へ戻る");
+        assert_eq!(all(&mut doc), vec!["a", "b"]);
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 回帰: Undo 後の Redo 枝にしか存在しない revision を基準にした編集を拒否する。
+    #[test]
+    fn validate_base_rejects_redo_branch_revisions() {
+        let (mut doc, path) = disk_doc("redo-branch", &["x"]);
+        doc.replace(0, 1, vec!["y".into()], 1, "", "").unwrap();
+        let undone_rev = doc.revision();
+
+        // Undo して現在 head を巻き戻す（undone_rev は Redo 枝にだけ残る）
+        doc.undo().unwrap();
+        assert_eq!(all(&mut doc), vec!["x"]);
+
+        // Redo 枝の revision を base にした編集は拒否される
+        let result = doc.replace_with_base(undone_rev, 0, 1, vec!["z".into()], 2, "", "");
+        assert!(result.is_err(), "Redo 枝の revision は受け付けない");
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 回帰: 小さいファイルで bulk（すべて置換）を保存した後、
+    /// 変換済みの行へ同じ規則が再適用されず（foo→foofoo の二重化）、
+    /// Undo が正しく元の内容へ戻ることを検証する。
+    #[test]
+    fn bulk_replace_all_survives_save_without_double_apply() {
+        let (mut doc, path) = disk_doc("bulk-save", &["foo a", "bar b", "foo c"]);
+        let base_rev = doc.revision();
+        let pattern = regex::RegexBuilder::new("foo").build().unwrap();
+        let op = crate::operation_log::BulkOperation::ReplaceAll {
+            from_line: 0,
+            to_line: 3,
+            query: "foo".to_string(),
+            replacement: "baz".to_string(),
+            case_sensitive: true,
+            pattern: std::sync::Arc::new(pattern),
+        };
+        doc.apply_bulk_operation(base_rev, 1, op, "", "").unwrap();
+        assert_eq!(all(&mut doc), vec!["baz a", "bar b", "baz c"]);
+
+        // 保存（小さいファイルは Undo 履歴を保持する分岐）
+        doc.save(&path).unwrap();
+        assert!(doc.is_clean());
+
+        // 二重適用されていないこと
+        assert_eq!(all(&mut doc), vec!["baz a", "bar b", "baz c"]);
+
+        // Undo で bulk が元へ戻ること（マテリアライズ済み splice として）
+        doc.undo().unwrap();
+        assert_eq!(all(&mut doc), vec!["foo a", "bar b", "foo c"]);
+
+        // Redo で再適用されること
+        doc.redo().unwrap();
+        assert_eq!(all(&mut doc), vec!["baz a", "bar b", "baz c"]);
+        std::fs::remove_file(path).ok();
+    }
+
+    /// 回帰: bulk 操作（すべて置換）の後に通常編集が入っても、
+    /// 後続の新規テキストへ過去の bulk 規則が勝手に適用されず、
+    /// Undo も各段階へ正しく戻ることを検証する。
+    #[test]
+    fn new_edits_after_bulk_are_not_transformed_retroactively() {
+        let (mut doc, path) = disk_doc("bulk-edit-seq", &["foo 1", "bar 2", "foo 3"]);
+        let base_rev = doc.revision();
+        let pattern = regex::RegexBuilder::new("foo").build().unwrap();
+        let op = crate::operation_log::BulkOperation::ReplaceAll {
+            from_line: 0,
+            to_line: 3,
+            query: "foo".to_string(),
+            replacement: "baz".to_string(),
+            case_sensitive: true,
+            pattern: std::sync::Arc::new(pattern),
+        };
+        doc.apply_bulk_operation(base_rev, 1, op, "", "").unwrap();
+        assert_eq!(all(&mut doc), vec!["baz 1", "bar 2", "baz 3"]);
+
+        // bulk 適用後に、範囲内に新たな "foo new" を通常挿入する
+        doc.replace(1, 1, vec!["foo new".to_string()], 2, "", "foo new")
+            .unwrap();
+
+        // 挿入された "foo new" は "baz new" に書き換わらずそのまま残ること
+        assert_eq!(all(&mut doc), vec!["baz 1", "foo new", "bar 2", "baz 3"]);
+
+        // 1回目の Undo で通常編集（foo new の挿入）が取り消されること
+        doc.undo().unwrap();
+        assert_eq!(all(&mut doc), vec!["baz 1", "bar 2", "baz 3"]);
+
+        // 2回目の Undo で bulk 操作自体が取り消されて初期状態に戻ること
+        doc.undo().unwrap();
+        assert_eq!(all(&mut doc), vec!["foo 1", "bar 2", "foo 3"]);
+
+        std::fs::remove_file(path).ok();
     }
 }

@@ -7,46 +7,29 @@ mod edit;
 mod history;
 mod movement;
 mod nested;
-
+use crate::structure::text::{Pos, Sel, Text};
 pub use cursor::{merge_cursors, UnifiedCursor};
 pub use history::Flush;
 use history::{Recorder, Step};
 
-use crate::structure::text::{Pos, Sel, Text};
-
-/// コマンドが何をしたか、つまり呼び出し元が反応するために必要なのはそれだけです。質問するモードはなく、何かが移動または変更されたかどうかだけを尋ねます。
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Did {
-    /// 鍵はここには何も意味しませんので、他の誰にも所属しています。
-    Nothing,
-    /// キャレットまたは選択範囲が移動しました。
-    Moved,
-    /// 書類が変わりました。
-    Changed,
-}
-
-impl Did {
-    pub(super) fn moved(happened: bool) -> Did {
-        if happened {
-            Did::Moved
-        } else {
-            Did::Nothing
-        }
-    }
-}
-
-/// ドキュメントのモデル層: テキスト本体、Undo/Redo 履歴、変更行の管理。
-/// 表記や画面、キャレット位置については何も知らず、複数ペイン間で共有されます。
-#[derive(Default)]
+/// ドキュメントのモデル層: テキスト本体、Undo/Redo 履歴、変更行、既知の revision の管理。
+/// 表記や画面、キャレット位置については何も知らず、同一 doc_id の複数ペイン間で共有されます。
+#[derive(Clone, Debug, Default)]
 pub struct Document {
     pub(crate) text: Text,
     pub(crate) recorder: Recorder,
     pub(crate) modified_lines: std::collections::BTreeSet<usize>,
     pub(crate) file_bytes: Option<usize>,
     pub(crate) counting: bool,
+    pub(crate) known_revision: u64,
 }
 
+#[allow(dead_code)]
 impl Document {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     pub fn is_counting(&self) -> bool {
         self.counting
     }
@@ -55,18 +38,24 @@ impl Document {
         &self.text
     }
 
-    #[allow(dead_code)]
     pub fn text_mut(&mut self) -> &mut Text {
         &mut self.text
     }
 
-    #[allow(dead_code)]
     pub fn file_bytes(&self) -> Option<usize> {
         self.file_bytes
     }
 
     pub fn set_file_bytes(&mut self, bytes: Option<usize>) {
         self.file_bytes = bytes;
+    }
+
+    pub fn known_revision(&self) -> u64 {
+        self.known_revision
+    }
+
+    pub fn set_known_revision(&mut self, rev: u64) {
+        self.known_revision = rev;
     }
 
     pub fn modified_lines(&self) -> Vec<usize> {
@@ -108,9 +97,6 @@ impl Document {
         self.counting = false;
     }
 
-    /// 疎（スライス）テキストとして読み込む。
-    /// line_count が Some(count) の場合は行数確定済み（下書き復元等）として counting = false で開く。
-    /// line_count が None の場合は走査中（未確定）として 1,000 行枠を仮確保し counting = true で開く。
     pub fn load_sparse(&mut self, line_count: Option<usize>) {
         const INITIAL_PENDING_LINES: usize = 1_000;
         match line_count {
@@ -130,7 +116,6 @@ impl Document {
             self.load_sparse(None);
         } else {
             self.load_sparse(Some(line_count));
-            // 単体テスト等で明示的に走査中をシミュレートする場合の互換性
             self.counting = true;
         }
     }
@@ -144,8 +129,8 @@ impl Document {
         self.text.line_count() - self.text.absent_lines()
     }
 
-    pub fn evict_far(&mut self, keep: std::ops::Range<usize>, pinned: &[usize]) {
-        self.text.evict_far(keep, pinned);
+    pub fn evict_far(&mut self, keep_ranges: &[std::ops::Range<usize>], pinned: &[usize]) {
+        self.text.evict_far(keep_ranges, pinned);
     }
 
     pub fn forget_range(&mut self, range: std::ops::Range<usize>) {
@@ -162,9 +147,29 @@ impl Document {
         }
     }
 
-    #[allow(dead_code)]
     pub fn stats(&self) -> (usize, usize) {
         self.text.stats()
+    }
+}
+
+/// コマンドが何をしたか、つまり呼び出し元が反応するために必要なのはそれだけです。質問するモードはなく、何かが移動または変更されたかどうかだけを尋ねます。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Did {
+    /// 鍵はここには何も意味しませんので、他の誰にも所属しています。
+    Nothing,
+    /// キャレットまたは選択範囲が移動しました。
+    Moved,
+    /// 書類が変わりました。
+    Changed,
+}
+
+impl Did {
+    pub(super) fn moved(happened: bool) -> Did {
+        if happened {
+            Did::Moved
+        } else {
+            Did::Nothing
+        }
     }
 }
 
@@ -273,7 +278,7 @@ impl Editor {
             .iter()
             .flat_map(|sel| [sel.start().line, sel.end().line])
             .collect();
-        self.document.evict_far(keep, &pinned);
+        self.document.evict_far(&[keep], &pinned);
     }
 
     /// 選択のいずれかが、まだ届いていない行に触れているか。届く前の行は
@@ -428,7 +433,7 @@ pub(crate) mod tests {
         editor.set_caret(Pos::new(1, 2));
         editor.insert_text("X");
         editor.take_flush();
-        editor.apply_restored("1.2-1.2", 1, 2);
+        editor.apply_restored("1.2-1.2", 1, 2, &[]);
         assert_eq!(editor.primary().head, Pos::new(1, 2));
         assert_eq!(editor.text().first_absent(0), Some(1));
         assert_eq!(editor.take_flush().map(|flush| flush.changes), None);
@@ -444,12 +449,35 @@ pub(crate) mod tests {
         assert_eq!(flush.after, "1.11-1.11");
 
         // Undo: 編集前の 1 行目 5 列目に復元される
-        editor.apply_restored(&flush.before, 1, 2);
+        editor.apply_restored(&flush.before, 1, 2, &[]);
         assert_eq!(editor.primary().head, Pos::new(1, 5));
 
         // Redo: 編集後の 1 行目 11 列目に復元される
-        editor.apply_restored(&flush.after, 1, 2);
+        editor.apply_restored(&flush.after, 1, 2, &[]);
         assert_eq!(editor.primary().head, Pos::new(1, 11));
+    }
+
+    #[test]
+    fn test_undo_with_splices_directly_updates_lines_without_absent() {
+        use crate::framework::SpliceEdit;
+        let mut editor = editor("line0\nline1\nline2");
+        editor.set_caret(Pos::new(1, 5));
+        editor.insert_text("_edited");
+
+        // Undo 差分: line1 を元の "line1" に戻す SpliceEdit
+        let splices = vec![SpliceEdit {
+            from: 1,
+            to: 2,
+            lines: vec!["line1".to_string()],
+        }];
+
+        editor.apply_restored("1.5-1.5", 1, 3, &splices);
+
+        // キャレットが元に戻り、行は Absent にならず直接復元されていること
+        assert_eq!(editor.primary().head, Pos::new(1, 5));
+        assert_eq!(editor.text().raw_line(1), Some("line1"));
+        assert!(!editor.text().is_absent(1));
+        assert_eq!(editor.text().first_absent(0), None);
     }
 
     #[test]

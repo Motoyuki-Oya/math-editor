@@ -7,13 +7,14 @@
 use super::Editor;
 use crate::structure::text::LineChange;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Step {
     /// 入力された文字。その前のステップと結合します。
     Typing,
     Other,
 }
 
+#[derive(Clone, Debug)]
 pub(crate) struct Recorder {
     /// 現在のグループ。新しいステップで増える。
     pub(crate) group: u64,
@@ -96,10 +97,28 @@ impl Editor {
         })
     }
 
-    /// 文書の本体が巻き戻ったのに合わせる: `touched_from` から先の手元の行を
-    /// 捨てて届き直しを待ち、控えられていたキャレットへ戻る。
-    pub fn apply_restored(&mut self, state: &str, touched_from: usize, line_count: usize) {
-        self.text.reset_from(touched_from, line_count);
+    /// 文書の本体が巻き戻ったのに合わせる: 送られてきた置き換え差分（splices）を手元のテキストに
+    /// 直接適用し、控えられていたキャレットへ戻る。
+    /// splices が空の場合のみ、手元の行を reset_from で破棄して再取り寄せを待つ（フォールバック）。
+    pub fn apply_restored(
+        &mut self,
+        state: &str,
+        touched_from: usize,
+        line_count: usize,
+        splices: &[crate::framework::SpliceEdit],
+    ) {
+        if splices.is_empty() {
+            self.text.reset_from(touched_from, line_count);
+        } else {
+            for splice in splices {
+                let lines: Vec<_> = splice
+                    .lines
+                    .iter()
+                    .map(|l| crate::format::document::read_line(l))
+                    .collect();
+                self.text.replace_external(splice.from, splice.to, lines);
+            }
+        }
         self.restore_state(state);
         self.recorder.cut();
     }
