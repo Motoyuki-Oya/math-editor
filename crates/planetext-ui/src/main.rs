@@ -12,5 +12,6 @@ use leptos::prelude::*;
 
 fn main() {
     console_error_panic_hook::set_once();
+    framework::segmenter::init_segmenter();
     mount_to_body(|| view! { <app::App/> })
 }

@@ -1,6 +1,7 @@
 //! WebView側接続コードの共通界面。Host固有の詳細はhost.rsだけが知る。
 
 mod host;
+pub mod segmenter;
 
 #[allow(unused_imports)]
 pub(crate) use host::{

@@ -7,6 +7,7 @@ mod keys;
 pub mod model;
 mod mouse;
 pub mod search;
+pub mod segment;
 mod session;
 pub mod suggest;
 mod trigger;
