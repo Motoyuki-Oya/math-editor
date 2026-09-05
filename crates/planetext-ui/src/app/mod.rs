@@ -7,6 +7,7 @@ mod menu;
 mod palette;
 mod panes;
 mod preferences;
+mod session_state;
 mod shell;
 mod sync;
 
