@@ -501,7 +501,9 @@ fn resolve_raw_hit_helper(
         if encoded_marker.len() == 1 {
             memchr::memchr(encoded_marker[0], whole_line_slice).is_some()
         } else {
-            memchr::memmem::find_iter(whole_line_slice, encoded_marker).next().is_some()
+            memchr::memmem::find_iter(whole_line_slice, encoded_marker)
+                .next()
+                .is_some()
         }
     } else {
         false
@@ -564,9 +566,12 @@ impl Source {
         let marks = self.index.state.lock().unwrap().marks.clone();
 
         if let Some(p) = progress {
-            p.total_bytes.store(haystack.len(), std::sync::atomic::Ordering::Relaxed);
-            p.scanned_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
-            p.matches_found.store(0, std::sync::atomic::Ordering::Relaxed);
+            p.total_bytes
+                .store(haystack.len(), std::sync::atomic::Ordering::Relaxed);
+            p.scanned_bytes
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            p.matches_found
+                .store(0, std::sync::atomic::Ordering::Relaxed);
             p.done.store(false, std::sync::atomic::Ordering::Relaxed);
         }
 
@@ -593,8 +598,10 @@ impl Source {
                         return Ok(Vec::new());
                     }
                     if let Some(p) = progress {
-                        p.scanned_bytes.store(start, std::sync::atomic::Ordering::Relaxed);
-                        p.matches_found.store(hits.len(), std::sync::atomic::Ordering::Relaxed);
+                        p.scanned_bytes
+                            .store(start, std::sync::atomic::Ordering::Relaxed);
+                        p.matches_found
+                            .store(hits.len(), std::sync::atomic::Ordering::Relaxed);
                     }
                 }
                 if hits.len() >= limit {
@@ -623,8 +630,10 @@ impl Source {
                 ));
             }
             if let Some(p) = progress {
-                p.scanned_bytes.store(haystack.len(), std::sync::atomic::Ordering::Relaxed);
-                p.matches_found.store(hits.len(), std::sync::atomic::Ordering::Relaxed);
+                p.scanned_bytes
+                    .store(haystack.len(), std::sync::atomic::Ordering::Relaxed);
+                p.matches_found
+                    .store(hits.len(), std::sync::atomic::Ordering::Relaxed);
                 p.done.store(true, std::sync::atomic::Ordering::Relaxed);
             }
             return Ok(hits);
@@ -729,8 +738,10 @@ impl Source {
                         }
 
                         if let Some(p) = progress_ref {
-                            p.scanned_bytes.fetch_add(sub_slice.len(), std::sync::atomic::Ordering::Relaxed);
-                            p.matches_found.fetch_add(sub_hit_count, std::sync::atomic::Ordering::Relaxed);
+                            p.scanned_bytes
+                                .fetch_add(sub_slice.len(), std::sync::atomic::Ordering::Relaxed);
+                            p.matches_found
+                                .fetch_add(sub_hit_count, std::sync::atomic::Ordering::Relaxed);
                         }
 
                         if chunk_hits.len() >= limit {
@@ -762,8 +773,10 @@ impl Source {
             }
         }
         if let Some(p) = progress {
-            p.scanned_bytes.store(haystack.len(), std::sync::atomic::Ordering::Relaxed);
-            p.matches_found.store(total_hits.len(), std::sync::atomic::Ordering::Relaxed);
+            p.scanned_bytes
+                .store(haystack.len(), std::sync::atomic::Ordering::Relaxed);
+            p.matches_found
+                .store(total_hits.len(), std::sync::atomic::Ordering::Relaxed);
             p.done.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         Ok(total_hits)
@@ -1626,7 +1639,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     #[test]
     fn replacing_provisional_final_line_preserves_pending_source_suffix() {
         let path = std::env::temp_dir().join(format!(
@@ -1680,7 +1692,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     #[test]
     fn confirming_background_scan_preserves_prior_edits_and_history() {
         let path = std::env::temp_dir().join(format!(
@@ -1733,7 +1744,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     #[test]
     fn sparse_mark_at_eof_exposes_the_final_empty_line() {
         let path = std::env::temp_dir().join(format!(
@@ -1746,12 +1756,14 @@ mod tests {
             Document::open_with_encoding(&path, Some(FileEncoding::Utf8)).unwrap();
 
         assert!(scan.is_none());
-        assert_eq!(doc.source_sparse_mark_for_test(1), doc.source_bytes_for_test());
+        assert_eq!(
+            doc.source_sparse_mark_for_test(1),
+            doc.source_bytes_for_test()
+        );
         assert_eq!(doc.line_count(), STRIDE + 1);
         assert_eq!(doc.read(STRIDE, 1).unwrap(), vec![""]);
         std::fs::remove_file(path).ok();
     }
-
 
     /// 間引きの索引: STRIDE を越える文書でも、行は最寄りの索引から読み流して届く。
     #[test]
@@ -1774,7 +1786,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     #[test]
     fn multi_piece_callbacks_keep_global_line_numbers() {
         let (mut doc, path) = disk_doc("global-lines", &["a", "b", "c", "d", "e", "f"]);
@@ -1796,7 +1807,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     /// EOF seekによる末尾読みの実測。行数走査は開始しない。
     #[test]
     #[ignore]
@@ -1811,7 +1821,6 @@ mod tests {
         println!("read tail: {:?} ({} lines)", start.elapsed(), tail.len());
         assert_eq!(tail.len(), 100);
     }
-
 
     /// 先頭1MBの同期読みと、残りの行数・間引き索引走査だけの実測。
     #[test]
@@ -1836,7 +1845,6 @@ mod tests {
         );
         assert_eq!(doc.line_count(), 16_000_001);
     }
-
 
     /// 規模の実測: `cargo test -p planetext --release -- --ignored --nocapture`。
     /// C:\workspace\test-800mb.txt がある環境でだけ動く。
@@ -1909,7 +1917,6 @@ mod tests {
         println!("estimate ({estimate} matches): {:?}", start.elapsed());
     }
 
-
     /// 巨大な行を含むファイルで MAX_READ_BYTES ガードが正しく働き、
     /// 1回の read で 20MB を超えずに安全に打ち切られることを検証する。
     #[test]
@@ -1943,7 +1950,6 @@ mod tests {
         assert!(total_read_bytes <= 25 * 1024 * 1024);
         std::fs::remove_file(path).ok();
     }
-
 
     /// 10万行の巨大ファイルを生成して開き、索引付け・途中行 seek 読みが正しく動くことを検証。
     #[test]
@@ -1988,7 +1994,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     /// 回帰: 未走査（バックグラウンド走査完了前）の巨大ファイルで、
     /// 起動直後に末尾付近の行を読み出しても（Ctrl+End相当）、
     /// 1行ごとの読み捨てではなく SIMD による一括スキップで即座に届くことを検証する。
@@ -2011,7 +2016,6 @@ mod tests {
         );
         std::fs::remove_file(path).ok();
     }
-
 
     /// 回帰: 未走査の巨大ファイルで、末尾付近の行を編集して Undo/Redo しても、
     /// ピース分割（split）が EOF seek により即座に行われ、タイムラグなしで復元できることを検証する。
@@ -2051,5 +2055,4 @@ mod tests {
 
         std::fs::remove_file(path).ok();
     }
-
 }

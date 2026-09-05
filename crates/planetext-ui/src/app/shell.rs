@@ -1279,7 +1279,10 @@ impl Shell {
                                                 editor::set_doc_file_size(doc_id, Some(doc.bytes));
                                                 editor::load_sparse_doc(doc_id, doc.line_count);
                                                 if !modified_lines.is_empty() {
-                                                    editor::set_doc_modified_lines(doc_id, modified_lines);
+                                                    editor::set_doc_modified_lines(
+                                                        doc_id,
+                                                        modified_lines,
+                                                    );
                                                 }
                                                 editor::redraw_doc(doc_id, None);
                                                 shell_copy.save_session();

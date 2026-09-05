@@ -116,7 +116,9 @@ async fn run_fetch(_shell: Shell, tab: Tab, editor_pane: usize) {
         let Ok(read_res) = framework::read_lines(handle, range.start, count).await else {
             break;
         };
-        let known_revision = editor::get_or_create_doc_model(doc_id).borrow().known_revision;
+        let known_revision = editor::get_or_create_doc_model(doc_id)
+            .borrow()
+            .known_revision;
         if read_res.revision < known_revision {
             // 編集前の古い revision の応答は行番号がずれているため破棄
             continue;
@@ -176,7 +178,8 @@ pub(super) fn find(
         if editor::find_next_pane(pane, &query, options, file_size) {
             if let Some(pane_obj) = shell.pane_for_editor(pane) {
                 let total = pane_obj.search_status.get_untracked().1;
-                let num = editor::current_match_number_pane(pane, &query, options, total.unwrap_or(0));
+                let num =
+                    editor::current_match_number_pane(pane, &query, options, total.unwrap_or(0));
                 pane_obj.search_status.set((num, total));
             }
         }
@@ -219,7 +222,8 @@ pub(super) fn find_previous(
         if editor::find_previous_pane(pane, &query, options, file_size) {
             if let Some(pane_obj) = shell.pane_for_editor(pane) {
                 let total = pane_obj.search_status.get_untracked().1;
-                let num = editor::current_match_number_pane(pane, &query, options, total.unwrap_or(0));
+                let num =
+                    editor::current_match_number_pane(pane, &query, options, total.unwrap_or(0));
                 pane_obj.search_status.set((num, total));
             }
         }
@@ -380,7 +384,10 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
             file_size,
             forward,
         } => {
-            let result = find_far(shell, tab, pane, handle, &query, options, file_size, forward).await;
+            let result = find_far(
+                shell, tab, pane, handle, &query, options, file_size, forward,
+            )
+            .await;
             match result {
                 Ok(Some(true)) => shell.status.set("見つかりました".into()),
                 Ok(Some(false)) => shell.status.set("見つかりませんでした".into()),
@@ -394,6 +401,7 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
 
 /// 文書の本体を走査して次／前の一致へ跳ぶ。
 /// `None` は新しい検索や編集によるキャンセル。
+#[allow(clippy::too_many_arguments)]
 async fn find_far(
     shell: Shell,
     tab: Tab,

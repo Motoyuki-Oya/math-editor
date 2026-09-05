@@ -39,7 +39,9 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
         let epane = pane.editor_pane();
         let q = query.get_untracked();
         let (pane_cur, pane_total) = pane.search_status.get_untracked();
-        let total = pane_total.or_else(|| estimated_count.get_untracked()).unwrap_or(0);
+        let total = pane_total
+            .or_else(|| estimated_count.get_untracked())
+            .unwrap_or(0);
         let cur_cursor = editor::current_cursor_pos_pane(epane);
         let caret_moved = last_matched_pos.get_untracked() != cur_cursor || cur_cursor.is_none();
 
@@ -67,7 +69,8 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
             base - 1
         };
         current_match.set(next);
-        pane.search_status.set((next, pane_total.or_else(|| estimated_count.get_untracked())));
+        pane.search_status
+            .set((next, pane_total.or_else(|| estimated_count.get_untracked())));
     };
 
     // バーは開いた後のみ画面上に表示されるため、フィールドが存在するとすぐに、
@@ -99,7 +102,9 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
         let epane = pane.editor_pane();
         let q = query.get_untracked();
         let (pane_cur, pane_total) = pane.search_status.get_untracked();
-        let total = pane_total.or_else(|| estimated_count.get_untracked()).unwrap_or(0);
+        let total = pane_total
+            .or_else(|| estimated_count.get_untracked())
+            .unwrap_or(0);
         let num = if pane_cur > 0 {
             pane_cur
         } else {

@@ -1619,7 +1619,9 @@ impl Document {
                                     &encoded_marker,
                                     case_sensitive,
                                     limit - hits.len(),
-                                    |offset, size| source.read_byte_range(range_from + offset, size),
+                                    |offset, size| {
+                                        source.read_byte_range(range_from + offset, size)
+                                    },
                                 )?
                             };
                             let converted = if let Some(ref mmap) = mmap {
@@ -1644,7 +1646,9 @@ impl Document {
                                     encoding,
                                     piece_line + skip,
                                     query_characters,
-                                    |offset, size| source.read_byte_range(range_from + offset, size),
+                                    |offset, size| {
+                                        source.read_byte_range(range_from + offset, size)
+                                    },
                                 )?
                             };
                             Ok((converted, scanned))
@@ -1833,8 +1837,6 @@ impl Document {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1849,7 +1851,6 @@ mod tests {
         assert_eq!(doc.read(2, 1).unwrap(), vec!["cd"]);
         std::fs::remove_file(path).ok();
     }
-
 
     #[test]
     fn replacing_lines_and_undoing_restores_the_document() {
@@ -1867,7 +1868,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     #[test]
     fn no_op_edit_and_undo_keep_zero_removed_lines() {
         let (mut doc, path) = disk_doc("no-op", &["a", "b"]);
@@ -1882,7 +1882,6 @@ mod tests {
         assert_eq!(all(&mut doc), vec!["a", "b"]);
         std::fs::remove_file(path).ok();
     }
-
 
     #[test]
     fn steps_in_the_same_group_undo_together() {
@@ -1904,7 +1903,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     #[test]
     fn different_groups_undo_one_at_a_time() {
         let mut doc = Document::empty();
@@ -1916,7 +1914,6 @@ mod tests {
         assert_eq!(all(&mut doc), vec![""]);
     }
 
-
     #[test]
     fn a_new_edit_clears_the_redo_branch() {
         let mut doc = Document::empty();
@@ -1926,7 +1923,6 @@ mod tests {
         assert!(doc.redo().unwrap().is_none());
         assert_eq!(all(&mut doc), vec!["c"]);
     }
-
 
     #[test]
     fn multiple_sequential_edits_in_one_group_undo_and_redo_correctly() {
@@ -1956,14 +1952,12 @@ mod tests {
         assert_eq!(all(&mut doc), vec![""]);
     }
 
-
     #[test]
     fn out_of_range_replacements_are_rejected() {
         let mut doc = Document::empty();
         assert!(doc.replace(0, 2, vec![], 1, "", "").is_err());
         assert!(doc.replace(1, 0, vec![], 1, "", "").is_err());
     }
-
 
     #[test]
     fn assembling_a_range_uses_edges_and_overrides() {
@@ -1981,7 +1975,6 @@ mod tests {
         assert!(doc.assemble(0, None, 4, None, &Default::default()).is_err());
         std::fs::remove_file(path).ok();
     }
-
 
     /// 【回帰防止テスト】
     /// assemble の実体化が MAX_ASSEMBLE_BYTES（10MB）を超える場合、
@@ -2003,7 +1996,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     /// 【回帰防止テスト】
     /// 編集バッファと操作ログのメモリ使用量が memory_usage() で正しく追跡されることを保証する。
     #[test]
@@ -2020,7 +2012,6 @@ mod tests {
         );
         std::fs::remove_file(path).ok();
     }
-
 
     #[test]
     fn trailing_newline_final_empty_line_edits_target_the_right_range() {
@@ -2061,7 +2052,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn edited_separators_match_document_line_ending_and_encoding() {
         for (encoding, line_ending) in [
@@ -2098,7 +2088,6 @@ mod tests {
             std::fs::remove_file(saved).ok();
         }
     }
-
 
     #[test]
     fn boundary_separators_survive_insertions_and_replacements() {
@@ -2162,7 +2151,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn document_boundaries_stay_consistent_beyond_node_capacity() {
         let (mut doc, path) = disk_doc("many-pieces", &["base"]);
@@ -2191,7 +2179,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     #[test]
     fn oversized_delete_is_rejected_without_mutating_the_document() {
         let mut doc = Document::empty();
@@ -2214,7 +2201,6 @@ mod tests {
         assert_eq!(doc.read(4, 1).unwrap().len(), 1);
         assert_eq!(doc.log_head_for_test(), undo_len);
     }
-
 
     #[test]
     fn replace_lines_with_base_revision_maps_old_coordinates() {
@@ -2246,7 +2232,6 @@ mod tests {
         );
         std::fs::remove_file(path).ok();
     }
-
 
     #[test]
     fn bulk_replace_all_is_evaluated_on_demand_and_undoable() {
@@ -2282,7 +2267,6 @@ mod tests {
 
         std::fs::remove_file(path).ok();
     }
-
 
     /// 回帰: 同一 group の連続編集で既存トランザクションの revision が上書きされず、
     /// 保存直後に続けてタイプしても saved checkpoint が壊れないことを検証する。
@@ -2321,7 +2305,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     /// 回帰: Undo 後の Redo 枝にしか存在しない revision を基準にした編集を拒否する。
     #[test]
     fn validate_base_rejects_redo_branch_revisions() {
@@ -2338,7 +2321,6 @@ mod tests {
         assert!(result.is_err(), "Redo 枝の revision は受け付けない");
         std::fs::remove_file(path).ok();
     }
-
 
     /// 回帰: 小さいファイルで bulk（すべて置換）を保存した後、
     /// 変換済みの行へ同じ規則が再適用されず（foo→foofoo の二重化）、
@@ -2376,7 +2358,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     /// 回帰: bulk 操作（すべて置換）の後に通常編集が入っても、
     /// 後続の新規テキストへ過去の bulk 規則が勝手に適用されず、
     /// Undo も各段階へ正しく戻ることを検証する。
@@ -2413,5 +2394,4 @@ mod tests {
 
         std::fs::remove_file(path).ok();
     }
-
 }

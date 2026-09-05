@@ -469,6 +469,7 @@ pub struct ScanHit {
     pub end: usize,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 pub struct SearchPage {
     pub hits: Vec<ScanHit>,

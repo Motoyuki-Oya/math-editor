@@ -404,7 +404,7 @@ impl Text {
     /// `keep` の外の行を未着へ戻し、手元のメモリを返す。行はまた見えれば
     /// 本体から届き直す。まだ送っていない編集を含む行と `pinned`（選択や
     /// キャレットの行）は捨てない。これは編集ではないので控えには残らない。
-    pub fn evict_far(&mut self, keep: std::ops::Range<usize>, pinned: &[usize]) {
+    pub fn evict_far(&mut self, keep_ranges: &[std::ops::Range<usize>], pinned: &[usize]) {
         let Some((span_start, span_end)) = self.resident_span.get() else {
             return;
         };
@@ -440,7 +440,7 @@ impl Text {
                 if matches!(slot.as_ref(), Line::Absent) {
                     continue;
                 }
-                if keep.contains(&line)
+                if keep_ranges.iter().any(|r| r.contains(&line))
                     || pinned.contains(&line)
                     || self
                         .changes
@@ -1080,6 +1080,7 @@ pub fn character_after(row: &[Node], index: usize) -> usize {
 }
 
 #[cfg(test)]
+#[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
 
@@ -1254,7 +1255,7 @@ mod tests {
         }
         // 8 行目に未送信の編集を作る。
         text.line_mut(8);
-        text.evict_far(2..5, &[6]);
+        text.evict_far(&[2..5], &[6]);
         // 窓の中・ピン・編集済みは残り、それ以外は未着へ戻る。
         assert_eq!(text.raw_line(2), Some("line 2"));
         assert_eq!(text.raw_line(4), Some("line 4"));
@@ -1350,7 +1351,7 @@ mod tests {
         assert_eq!(text.resident_span.get(), Some((500_000, 500_050)));
 
         // 500_010..500_030 のみを keep して evict
-        text.evict_far(500_010..500_030, &[]);
+        text.evict_far(&[500_010..500_030], &[]);
         assert_eq!(text.resident_span.get(), Some((500_010, 500_030)));
 
         assert!(text.is_absent(500_000));
@@ -1393,7 +1394,7 @@ mod tests {
 
         // 4. ページ単位の evict_far 解放速度測定
         let t3 = Instant::now();
-        text.evict_far(0..10, &[]);
+        text.evict_far(&[0..10], &[]);
         let evict_time = t3.elapsed();
 
         assert_eq!(text.pages.len(), 0); // 完全に解放されて 0 ページに！

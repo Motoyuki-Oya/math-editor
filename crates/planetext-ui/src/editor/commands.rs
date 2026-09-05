@@ -496,7 +496,9 @@ pub fn replace_and_find_next(
     file_size: Option<usize>,
 ) -> bool {
     session()
-        .map(|s| replace_and_find_next_pane(s.borrow().pane, query, replacement, options, file_size))
+        .map(|s| {
+            replace_and_find_next_pane(s.borrow().pane, query, replacement, options, file_size)
+        })
         .unwrap_or(false)
 }
 

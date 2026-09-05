@@ -1107,22 +1107,49 @@ pub fn feed_pane(pane: usize, from: usize, lines: &[String]) {
     let read_lines: Vec<_> = lines.iter().map(|line| document::read_line(line)).collect();
 
     // 共有の Document に行データを投入（同一 doc_id の全ペインへ即座に反映される）
-    session.borrow().document.borrow_mut().feed(from, read_lines);
+    session
+        .borrow()
+        .document
+        .borrow_mut()
+        .feed(from, read_lines);
 
     {
         let borrowed = session.borrow();
         let mut doc = borrowed.document.borrow_mut();
         if doc.resident_lines() > RESIDENT_LIMIT {
-            let drawn = borrowed.view.drawn();
+            let mut keep_ranges = Vec::new();
             let mut pinned: Vec<usize> = Vec::new();
-            for sel in borrowed.cursors() {
-                pinned.push(sel.start().line);
-                pinned.push(sel.end().line);
+
+            if doc_id != UNBOUND_DOC_ID {
+                PANES.with(|panes| {
+                    for s in panes.borrow().iter() {
+                        let b = s.borrow();
+                        if b.doc_id == doc_id {
+                            let drawn = b.view.drawn();
+                            keep_ranges.push(
+                                drawn.start.saturating_sub(RESIDENT_KEEP)
+                                    ..drawn.end + RESIDENT_KEEP,
+                            );
+                            for sel in b.cursors() {
+                                pinned.push(sel.start().line);
+                                pinned.push(sel.end().line);
+                            }
+                        }
+                    }
+                });
             }
-            doc.evict_far(
-                drawn.start.saturating_sub(RESIDENT_KEEP)..drawn.end + RESIDENT_KEEP,
-                &pinned,
-            );
+
+            if keep_ranges.is_empty() {
+                let drawn = borrowed.view.drawn();
+                keep_ranges
+                    .push(drawn.start.saturating_sub(RESIDENT_KEEP)..drawn.end + RESIDENT_KEEP);
+                for sel in borrowed.cursors() {
+                    pinned.push(sel.start().line);
+                    pinned.push(sel.end().line);
+                }
+            }
+
+            doc.evict_far(&keep_ranges, &pinned);
         }
     }
 
@@ -1257,8 +1284,9 @@ pub fn apply_flush_to_other_panes(origin_pane: usize, batch: &FlushBatch) {
                             cursor.sel.anchor.line =
                                 (cursor.sel.anchor.line as isize + delta).max(0) as usize;
                         } else if cursor.sel.anchor.line >= edit.from {
-                            cursor.sel.anchor.line = (edit.from + edit.lines.len().saturating_sub(1))
-                                .min(doc.text().line_count().saturating_sub(1));
+                            cursor.sel.anchor.line = (edit.from
+                                + edit.lines.len().saturating_sub(1))
+                            .min(doc.text().line_count().saturating_sub(1));
                         }
                         if cursor.sel.head.line >= edit.to {
                             cursor.sel.head.line =
@@ -1712,8 +1740,14 @@ mod tests {
         let shared_doc = get_or_create_doc(doc_id);
         assert_eq!(shared_doc.borrow().text().line_count(), 50);
         assert!(!shared_doc.borrow().text().is_absent(0));
-        assert_eq!(shared_doc.borrow().text().raw_line(0), Some("content line 0"));
-        assert_eq!(shared_doc.borrow().text().raw_line(49), Some("content line 49"));
+        assert_eq!(
+            shared_doc.borrow().text().raw_line(0),
+            Some("content line 0")
+        );
+        assert_eq!(
+            shared_doc.borrow().text().raw_line(49),
+            Some("content line 49")
+        );
     }
 
     /// 【下書き復元時の白飛び防止テスト】
@@ -1799,7 +1833,9 @@ mod tests {
         doc.borrow_mut().text.replace_external(
             11,
             12,
-            vec![crate::structure::text::SourceLine::Plain("edited line 11".into())],
+            vec![crate::structure::text::SourceLine::Plain(
+                "edited line 11".into(),
+            )],
         );
         assert_eq!(doc.borrow().text().raw_line(11), Some("edited line 11"));
 

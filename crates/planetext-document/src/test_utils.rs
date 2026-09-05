@@ -1,4 +1,4 @@
-﻿#![cfg(test)]
+#![cfg(test)]
 
 use crate::document::Document;
 use crate::source::{FileEncoding, LineEnding};
@@ -74,7 +74,10 @@ pub(crate) fn assert_document_state(doc: &mut Document, expected: &[String]) {
     assert_eq!(all(doc), expected);
     assert_eq!(doc.line_count(), expected.len());
     assert_eq!(doc.pieces_line_count_for_test(), expected.len());
-    assert_eq!(doc.pieces_newline_count_for_test(), expected.len().saturating_sub(1));
+    assert_eq!(
+        doc.pieces_newline_count_for_test(),
+        expected.len().saturating_sub(1)
+    );
     let separator = std::str::from_utf8(doc.line_ending().as_bytes()).unwrap();
     assert_eq!(
         doc.bytes(),
@@ -90,7 +93,10 @@ pub(crate) fn assert_encoded_document_state(doc: &mut Document, expected: &[&str
     assert_eq!(all(doc), expected_lines);
     assert_eq!(doc.line_count(), expected.len());
     assert_eq!(doc.pieces_line_count_for_test(), expected.len());
-    assert_eq!(doc.pieces_newline_count_for_test(), expected.len().saturating_sub(1));
+    assert_eq!(
+        doc.pieces_newline_count_for_test(),
+        expected.len().saturating_sub(1)
+    );
     assert_eq!(doc.bytes(), encoded_text(&text, doc.encoding()).len());
     assert_eq!(doc.pieces_byte_len_for_test(), doc.bytes());
 }

@@ -32,7 +32,8 @@ impl FileTransaction {
     pub fn begin<P: AsRef<Path>>(dir: P) -> Result<Self, String> {
         let dir = dir.as_ref();
         if !dir.exists() {
-            std::fs::create_dir_all(dir).map_err(|e| format!("ディレクトリを作成できませんでした: {e}"))?;
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("ディレクトリを作成できませんでした: {e}"))?;
         }
 
         // 残存ジャーナルがあれば復旧
@@ -40,11 +41,19 @@ impl FileTransaction {
 
         let journal_path = dir.join(JOURNAL_NAME);
         let journal_file = OpenOptions::new()
-            .create(true)
+            .create_new(true)
             .write(true)
-            .truncate(true)
             .open(&journal_path)
-            .map_err(|e| format!("ジャーナルファイルを作成できませんでした: {e}"))?;
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    format!(
+                        "別のトランザクションが実行中です: {}",
+                        journal_path.display()
+                    )
+                } else {
+                    format!("ジャーナルファイルを作成できませんでした: {e}")
+                }
+            })?;
 
         Ok(Self {
             journal_path,
@@ -77,7 +86,8 @@ impl FileTransaction {
         let _ = std::fs::remove_file(&backup);
 
         // 一時ファイルへ書き込み
-        let file = File::create(&temp).map_err(|e| format!("一時ファイルを作成できませんでした: {e}"))?;
+        let file =
+            File::create(&temp).map_err(|e| format!("一時ファイルを作成できませんでした: {e}"))?;
         let mut writer = BufWriter::new(file);
         write_fn(&mut writer)?;
         writer
@@ -110,7 +120,11 @@ impl FileTransaction {
     }
 
     /// バイト列を直接指定してファイルを追加するユーティリティ。
-    pub fn add_file_bytes<P: AsRef<Path>>(&mut self, target: P, bytes: &[u8]) -> Result<(), String> {
+    pub fn add_file_bytes<P: AsRef<Path>>(
+        &mut self,
+        target: P,
+        bytes: &[u8],
+    ) -> Result<(), String> {
         self.add_file(target, |writer| {
             writer
                 .write_all(bytes)
@@ -225,4 +239,3 @@ impl Drop for FileTransaction {
         }
     }
 }
-

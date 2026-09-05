@@ -378,7 +378,6 @@ impl DraftDiff {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use crate::document::Document;
@@ -408,7 +407,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn forced_utf8_bom_without_a_bom_keeps_all_content() {
         for (name, bytes) in [
@@ -434,7 +432,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn draft_construction_is_dirty_without_an_undo_step() {
         let mut doc = Document::from_draft(vec!["draft one".into(), "draft two".into()]);
@@ -443,7 +440,6 @@ mod tests {
         assert!(!doc.is_clean());
         assert!(doc.undo().unwrap().is_none());
     }
-
 
     #[test]
     fn first_edit_after_draft_construction_undoes_to_the_dirty_draft() {
@@ -456,7 +452,6 @@ mod tests {
         assert_eq!(all(&mut doc), vec!["draft"]);
         assert!(!doc.is_clean());
     }
-
 
     #[test]
     fn saving_a_constructed_draft_marks_it_clean() {
@@ -471,7 +466,6 @@ mod tests {
         assert!(doc.is_clean());
         std::fs::remove_file(path).ok();
     }
-
 
     /// 【回帰防止テスト】
     /// 小さいファイルの保存後、Undo履歴が保持され、保存状態（is_clean）がマークされることを検証する。
@@ -490,7 +484,6 @@ mod tests {
         );
         std::fs::remove_file(path).ok();
     }
-
 
     /// 【回帰防止テスト】
     /// 巨大ファイル（30MB超）の保存後、新しいベースへ切り替わり、メモリを圧迫しないよう
@@ -513,10 +506,13 @@ mod tests {
             0,
             "巨大ファイルは保存後に操作ログが破棄されてメモリが解放されること"
         );
-        assert_eq!(doc.buffers_len_for_test(), 0, "編集バッファも解放されること");
+        assert_eq!(
+            doc.buffers_len_for_test(),
+            0,
+            "編集バッファも解放されること"
+        );
         std::fs::remove_file(path).ok();
     }
-
 
     /// 保存すると保存先が新しい本体になり、続きの読みも元に戻すも生きている。
     #[test]
@@ -533,7 +529,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     #[test]
     fn a_failed_overwrite_keeps_the_open_source_readable() {
         let (mut doc, path) = disk_doc("failed-save", &["a", "b"]);
@@ -545,7 +540,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     /// 開いている間の外部変更は、壊れた読みを返さずに断る。
     #[test]
     fn outside_changes_are_refused_instead_of_read_wrong() {
@@ -554,7 +548,6 @@ mod tests {
         assert!(doc.read(0, 2).is_err());
         std::fs::remove_file(path).ok();
     }
-
 
     #[test]
     fn utf16_bom_files_read_edit_undo_redo_save_and_reopen() {
@@ -606,7 +599,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn encoding_change_keeps_existing_edit_and_undo_ranges_decodable() {
         let (mut doc, path) = disk_doc("encoding-change", &["base", "tail"]);
@@ -626,7 +618,6 @@ mod tests {
         assert_eq!(all(&mut reopened), vec!["base", "編集"]);
         std::fs::remove_file(path).ok();
     }
-
 
     #[test]
     fn shift_jis_reading_and_writing_and_search() {
@@ -677,7 +668,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     #[test]
     fn euc_jp_and_iso2022jp_reading() {
         let dir = std::env::temp_dir();
@@ -711,7 +701,6 @@ mod tests {
         std::fs::remove_file(jis_path).ok();
     }
 
-
     #[test]
     fn line_ending_detection_and_saving() {
         let dir = std::env::temp_dir();
@@ -743,7 +732,6 @@ mod tests {
         std::fs::remove_file(cr_path).ok();
     }
 
-
     #[test]
     fn reopen_with_encoding_switches_decoding() {
         let dir = std::env::temp_dir();
@@ -768,7 +756,6 @@ mod tests {
 
         std::fs::remove_file(path).ok();
     }
-
 
     /// 回帰: Clean な下書きに遠方の保留 Redo 差分があるとき、
     /// 復元時にその行マークまで確定され、即時 Redo が全文走査へ落ちないことを検証する。
@@ -804,5 +791,4 @@ mod tests {
             .unwrap_or(0);
         assert_eq!(max_needed_line, 1_000_000, "保留 Redo の位置を含むこと");
     }
-
 }

@@ -1018,14 +1018,19 @@ fn test_two_edits_two_undos_kill_restore_redo_step_by_step() {
     let app2 = Application::default();
 
     // 復帰：下書きから復元
-    let restored = app2.open_draft(ctx.config_dir(), "two_undos".into()).unwrap();
+    let restored = app2
+        .open_draft(ctx.config_dir(), "two_undos".into())
+        .unwrap();
     assert_eq!(
         app2.read_lines(restored.handle, 0, 3).unwrap().lines,
         vec!["line 1", "line 2", "line 3"]
     );
 
     // Redo 1回目: 編集1だけが戻るべき！
-    let _redo1 = app2.undo_lines(restored.handle, true).unwrap().expect("redo 1 should succeed");
+    let _redo1 = app2
+        .undo_lines(restored.handle, true)
+        .unwrap()
+        .expect("redo 1 should succeed");
     assert_eq!(
         app2.read_lines(restored.handle, 0, 3).unwrap().lines,
         vec!["line 1 EDIT 1", "line 2", "line 3"],
@@ -1033,7 +1038,10 @@ fn test_two_edits_two_undos_kill_restore_redo_step_by_step() {
     );
 
     // Redo 2回目: 編集2が戻るべき！
-    let _redo2 = app2.undo_lines(restored.handle, true).unwrap().expect("redo 2 should succeed");
+    let _redo2 = app2
+        .undo_lines(restored.handle, true)
+        .unwrap()
+        .expect("redo 2 should succeed");
     assert_eq!(
         app2.read_lines(restored.handle, 0, 3).unwrap().lines,
         vec!["line 1 EDIT 2", "line 2", "line 3"],

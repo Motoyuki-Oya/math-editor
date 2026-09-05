@@ -83,7 +83,6 @@ pub struct SearchProgress {
     pub done: bool,
 }
 
-
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub(crate) struct RawScanHit {
@@ -676,8 +675,10 @@ impl DocumentMatcher for RegexMatcher {
     ) -> Box<dyn Iterator<Item = (usize, usize)> + 'a> {
         if matches!(encoding, FileEncoding::Utf8 | FileEncoding::Utf8Bom) {
             if let Some(ref re) = self.bytes_regex {
-                let matches: Vec<(usize, usize)> =
-                    re.find_iter(haystack).map(|m| (m.start(), m.end())).collect();
+                let matches: Vec<(usize, usize)> = re
+                    .find_iter(haystack)
+                    .map(|m| (m.start(), m.end()))
+                    .collect();
                 return Box::new(matches.into_iter());
             }
         }
@@ -739,8 +740,10 @@ impl DocumentMatcher for regex::Regex {
     ) -> Box<dyn Iterator<Item = (usize, usize)> + 'a> {
         if matches!(encoding, FileEncoding::Utf8 | FileEncoding::Utf8Bom) {
             if let Ok(re) = regex::bytes::RegexBuilder::new(self.as_str()).build() {
-                let matches: Vec<(usize, usize)> =
-                    re.find_iter(haystack).map(|m| (m.start(), m.end())).collect();
+                let matches: Vec<(usize, usize)> = re
+                    .find_iter(haystack)
+                    .map(|m| (m.start(), m.end()))
+                    .collect();
                 return Box::new(matches.into_iter());
             }
         }
@@ -978,7 +981,7 @@ impl Document {
         let forward = spec.forward;
 
         // 1. キャッシュの初期化または再利用
-        let is_cached = self.search_cache.as_ref().map_or(false, |cache| {
+        let is_cached = self.search_cache.as_ref().is_some_and(|cache| {
             cache.revision == cur_rev
                 && cache.case_sensitive == case_sensitive
                 && cache.pattern == pattern_str
@@ -1254,7 +1257,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     #[test]
     fn estimating_matches_is_exact_when_every_line_is_sampled() {
         let (mut doc, path) = disk_doc("estimate", &["hit hit", "none", "hit"]);
@@ -1262,7 +1264,6 @@ mod tests {
         assert_eq!(doc.estimate_matches(&pattern).unwrap(), 3);
         std::fs::remove_file(path).ok();
     }
-
 
     #[test]
     fn estimating_matches_extrapolates_uniform_samples() {
@@ -1273,7 +1274,6 @@ mod tests {
         assert_eq!(doc.estimate_matches(&pattern).unwrap(), 200_000);
         std::fs::remove_file(path).ok();
     }
-
 
     /// 【回帰防止テスト】
     /// バックグラウンド走査中の巨大ファイル（pending_source が残る状態）であっても、
@@ -1316,14 +1316,12 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     #[test]
     fn ascii_case_fold_finds_non_overlapping_matches() {
         assert_eq!(literal_positions(b"xxAbCaBC", b"abc", false), vec![2, 5]);
         assert_eq!(literal_positions(b"aaaa", b"aa", false), vec![0, 2]);
         assert!(literal_positions(b"ABC", b"abc", true).is_empty());
     }
-
 
     #[test]
     fn ascii_case_insensitive_scan_keeps_utf8_columns() {
@@ -1337,7 +1335,6 @@ mod tests {
         );
         std::fs::remove_file(path).ok();
     }
-
 
     #[test]
     fn search_snapshot_keeps_the_contents_at_search_start() {
@@ -1363,7 +1360,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     #[test]
     fn native_search_stops_when_cancelled() {
         let (doc, path) = disk_doc("search-cancel", &["a", "b"]);
@@ -1385,7 +1381,6 @@ mod tests {
         assert!(found.hits.is_empty());
         std::fs::remove_file(path).ok();
     }
-
 
     #[test]
     fn literal_search_candidates_resume_after_a_character_column() {
@@ -1418,7 +1413,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     #[test]
     fn literal_scan_reports_utf8_character_columns() {
         let (mut doc, path) = disk_doc("literal-scan", &["前abc後abc"]);
@@ -1431,7 +1425,6 @@ mod tests {
         );
         std::fs::remove_file(path).ok();
     }
-
 
     #[test]
     fn literal_scan_handles_a_source_line_over_the_display_limit() {
@@ -1451,7 +1444,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     #[test]
     fn literal_scan_finds_a_match_across_its_source_chunk_boundary() {
         let line = format!("{}needle", "x".repeat(CHUNK - 3));
@@ -1466,7 +1458,6 @@ mod tests {
         );
         std::fs::remove_file(path).ok();
     }
-
 
     #[test]
     fn literal_scan_keeps_utf16_alignment_and_character_columns() {
@@ -1503,7 +1494,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn literal_scan_searches_edited_pieces_and_keeps_global_lines() {
         let (mut doc, path) = disk_doc("literal-edited-piece", &["zero", "one", "two", "three"]);
@@ -1534,7 +1524,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     #[test]
     fn notation_marker_suppresses_all_literal_hits_on_its_line() {
         let (mut doc, path) = disk_doc("literal-notation", &["needle $ needle", "needle"]);
@@ -1549,7 +1538,6 @@ mod tests {
         );
         std::fs::remove_file(path).ok();
     }
-
 
     #[test]
     fn literal_scan_small_limit_counts_a_marker_line_once() {
@@ -1570,7 +1558,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     #[test]
     fn literal_scan_line_numbers_are_correct_across_source_and_edit_pieces() {
         let (mut doc, path) = disk_doc(
@@ -1590,7 +1577,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     #[test]
     fn finding_lines_that_contain_a_character() {
         let (mut doc, path) = disk_doc("contains", &["aa", "a$b", "cc", "$"]);
@@ -1598,7 +1584,6 @@ mod tests {
         assert_eq!(doc.lines_containing(0, 99, '$').unwrap(), vec![1, 3]);
         std::fs::remove_file(path).ok();
     }
-
 
     #[test]
     fn search_snapshot_maps_hits_across_intervening_edits() {
@@ -1625,7 +1610,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     #[test]
     fn search_snapshot_invalidates_hits_overlapping_edits() {
         let (mut doc, path) = disk_doc("search-invalid", &["apple", "banana", "cherry"]);
@@ -1646,7 +1630,6 @@ mod tests {
         assert!(mapped.is_empty());
         std::fs::remove_file(path).ok();
     }
-
 
     #[test]
     fn search_index_estimates_matches_and_updates_on_edit() {
@@ -1677,7 +1660,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     #[test]
     fn search_index_treats_structure_format_as_raw_text() {
         // 構造フォーマット・数式記法を含むテキストもフィルタリングせずそのまま bi-gram インデックス化されること
@@ -1693,7 +1675,6 @@ mod tests {
 
         std::fs::remove_file(path).ok();
     }
-
 
     #[test]
     fn search_index_undo_redo_updates_deltas() {
@@ -1729,7 +1710,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-
     #[test]
     fn search_candidates_finds_distant_matches_efficiently() {
         use crate::search::{CompiledQuery, SearchSpec};
@@ -1764,7 +1744,6 @@ mod tests {
 
         std::fs::remove_file(path).ok();
     }
-
 
     /// 回帰: 1 行に 64 件を超える一致がある場合でも、after_col の後ろの
     /// 一致が切り捨てられずに返ることを検証する。
@@ -1803,22 +1782,25 @@ mod tests {
     fn test_dirty_document_search_cache_and_wraparound() {
         let (mut doc, path) = disk_doc("dirty-cache-test", &["alpha", "beta", "gamma", "delta"]);
         // 編集を加えて dirty (!is_clean) にする
-        doc.replace(1, 2, vec!["edited_target".to_string()], 1, "", "").unwrap();
+        doc.replace(1, 2, vec!["edited_target".to_string()], 1, "", "")
+            .unwrap();
         assert!(!doc.is_clean());
 
         let query = crate::search::CompiledQuery::compile("target", false, true, '$').unwrap();
 
         // 1回目: 走査して見つかる -> キャッシュに入る
-        let found1 = doc.search_candidates(
-            SearchSpec {
-                query: &query,
-                from: 0,
-                end: doc.line_count(),
-                after_col: None,
-                forward: true,
-            },
-            &|| false,
-        ).unwrap();
+        let found1 = doc
+            .search_candidates(
+                SearchSpec {
+                    query: &query,
+                    from: 0,
+                    end: doc.line_count(),
+                    after_col: None,
+                    forward: true,
+                },
+                &|| false,
+            )
+            .unwrap();
         assert_eq!(found1.hits.len(), 1);
         assert_eq!(found1.hits[0].line, 1);
         assert_eq!(found1.hits[0].start, 7);
@@ -1829,44 +1811,50 @@ mod tests {
         assert_eq!(cache.hits.len(), 1);
 
         // 2回目（forward、同一位置以降）: キャッシュから返る
-        let found2 = doc.search_candidates(
-            SearchSpec {
-                query: &query,
-                from: 1,
-                end: doc.line_count(),
-                after_col: Some(7),
-                forward: true,
-            },
-            &|| false,
-        ).unwrap();
+        let found2 = doc
+            .search_candidates(
+                SearchSpec {
+                    query: &query,
+                    from: 1,
+                    end: doc.line_count(),
+                    after_col: Some(7),
+                    forward: true,
+                },
+                &|| false,
+            )
+            .unwrap();
         assert_eq!(found2.hits.len(), 1);
         assert_eq!(found2.hits[0].line, 1);
 
         // backward（末尾から手前へ）: キャッシュから返る
-        let found_back = doc.search_candidates(
-            SearchSpec {
-                query: &query,
-                from: 3,
-                end: doc.line_count(),
-                after_col: None,
-                forward: false,
-            },
-            &|| false,
-        ).unwrap();
+        let found_back = doc
+            .search_candidates(
+                SearchSpec {
+                    query: &query,
+                    from: 3,
+                    end: doc.line_count(),
+                    after_col: None,
+                    forward: false,
+                },
+                &|| false,
+            )
+            .unwrap();
         assert_eq!(found_back.hits.len(), 1);
         assert_eq!(found_back.hits[0].line, 1);
 
         // さらに末尾からの forward（ラップアラウンド）
-        let found_wrap = doc.search_candidates(
-            SearchSpec {
-                query: &query,
-                from: 3,
-                end: doc.line_count(),
-                after_col: None,
-                forward: true,
-            },
-            &|| false,
-        ).unwrap();
+        let found_wrap = doc
+            .search_candidates(
+                SearchSpec {
+                    query: &query,
+                    from: 3,
+                    end: doc.line_count(),
+                    after_col: None,
+                    forward: true,
+                },
+                &|| false,
+            )
+            .unwrap();
         // 現在位置 3 以降には無いが、先頭から検索し直して line 1 のヒットが返る
         assert_eq!(found_wrap.hits.len(), 1);
         assert_eq!(found_wrap.hits[0].line, 1);
@@ -1889,62 +1877,74 @@ mod tests {
         let query = crate::search::CompiledQuery::compile("target", false, true, '$').unwrap();
 
         // 1. 末尾のヒット（line 1002）の位置から「前へ」(forward = false) を呼ぶ -> line 1 (Hit 2) になること
-        let found2 = doc.search_candidates(
-            SearchSpec {
-                query: &query,
-                from: 1002,
-                end: doc.line_count(),
-                after_col: Some(0),
-                forward: false,
-            },
-            &|| false,
-        ).unwrap();
+        let found2 = doc
+            .search_candidates(
+                SearchSpec {
+                    query: &query,
+                    from: 1002,
+                    end: doc.line_count(),
+                    after_col: Some(0),
+                    forward: false,
+                },
+                &|| false,
+            )
+            .unwrap();
         assert_eq!(found2.hits.len(), 1);
-        assert_eq!(found2.hits[0].line, 1, "Expected hit 2 (line 1), but got line {}", found2.hits[0].line);
+        assert_eq!(
+            found2.hits[0].line, 1,
+            "Expected hit 2 (line 1), but got line {}",
+            found2.hits[0].line
+        );
         assert_eq!(found2.current_index, Some(2));
         assert_eq!(found2.total_matches, Some(3));
 
         // 2. さらに「前へ」-> line 0 (Hit 1) になること
-        let found1 = doc.search_candidates(
-            SearchSpec {
-                query: &query,
-                from: 1,
-                end: doc.line_count(),
-                after_col: Some(0),
-                forward: false,
-            },
-            &|| false,
-        ).unwrap();
+        let found1 = doc
+            .search_candidates(
+                SearchSpec {
+                    query: &query,
+                    from: 1,
+                    end: doc.line_count(),
+                    after_col: Some(0),
+                    forward: false,
+                },
+                &|| false,
+            )
+            .unwrap();
         assert_eq!(found1.hits.len(), 1);
         assert_eq!(found1.hits[0].line, 0);
         assert_eq!(found1.current_index, Some(1));
 
         // 3. 先頭からさらに「前へ」-> 末尾の line 1002 (Hit 3) へラップアラウンドすること
-        let found_wrap_back = doc.search_candidates(
-            SearchSpec {
-                query: &query,
-                from: 0,
-                end: doc.line_count(),
-                after_col: Some(0),
-                forward: false,
-            },
-            &|| false,
-        ).unwrap();
+        let found_wrap_back = doc
+            .search_candidates(
+                SearchSpec {
+                    query: &query,
+                    from: 0,
+                    end: doc.line_count(),
+                    after_col: Some(0),
+                    forward: false,
+                },
+                &|| false,
+            )
+            .unwrap();
         assert_eq!(found_wrap_back.hits.len(), 1);
         assert_eq!(found_wrap_back.hits[0].line, 1002);
         assert_eq!(found_wrap_back.current_index, Some(3));
 
         // 4. 末尾から「次へ」-> 先頭 line 0 (Hit 1) へラップアラウンドすること
-        let found_wrap_fwd = doc.search_candidates(
-            SearchSpec {
-                query: &query,
-                from: 1002,
-                end: doc.line_count(),
-                after_col: Some(6),
-                forward: true,
-            },
-            &|| false,
-        ).unwrap();
+        let found_wrap_fwd = doc
+            .search_candidates(
+                SearchSpec {
+                    query: &query,
+                    from: 1002,
+                    end: doc.line_count(),
+                    after_col: Some(6),
+                    forward: true,
+                },
+                &|| false,
+            )
+            .unwrap();
         assert!(!found_wrap_fwd.hits.is_empty());
         assert_eq!(found_wrap_fwd.hits[0].line, 0);
         assert_eq!(found_wrap_fwd.current_index, Some(1));
@@ -1954,10 +1954,8 @@ mod tests {
 
     #[test]
     fn test_unified_matcher_literal_and_regex() {
-        let (mut doc, path) = crate::test_utils::disk_doc(
-            "test_matcher",
-            &["alpha 123", "beta 456", "gamma 123"],
-        );
+        let (mut doc, path) =
+            crate::test_utils::disk_doc("test_matcher", &["alpha 123", "beta 456", "gamma 123"]);
 
         // 1. LiteralMatcher
         let lit_query = super::CompiledQuery::compile("123", false, true, '\0').unwrap();
@@ -2012,10 +2010,19 @@ mod tests {
         // 1. 行 2 ("target 2") を削除
         doc.replace(2, 3, Vec::new(), 1, "", "").unwrap();
         // 2. 行 1 の直前に "inserted target" を挿入
-        doc.replace(1, 1, vec!["inserted target".to_string()], 2, "", "").unwrap();
+        doc.replace(1, 1, vec!["inserted target".to_string()], 2, "", "")
+            .unwrap();
         // 3. 末尾行 ("target 4") を "completely replaced" に置換
         let last_idx = doc.line_count() - 1; // 末尾行 ("target 4")
-        doc.replace(last_idx, last_idx + 1, vec!["completely replaced".to_string()], 3, "", "").unwrap();
+        doc.replace(
+            last_idx,
+            last_idx + 1,
+            vec!["completely replaced".to_string()],
+            3,
+            "",
+            "",
+        )
+        .unwrap();
 
         // 検索実行 (Literal)
         let query = super::CompiledQuery::compile("target", false, true, '\0').unwrap();
@@ -2125,5 +2132,3 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 }
-
-

@@ -8,15 +8,15 @@ mod piece_tree;
 mod search;
 mod search_index;
 mod source;
-mod transaction;
 #[cfg(test)]
 mod test_utils;
+mod transaction;
 
 pub use transaction::FileTransaction;
 
 use document::Document;
-pub use search::{CompiledQuery, ScanHit, SearchProgress};
 use search::SearchSpec;
+pub use search::{CompiledQuery, ScanHit, SearchProgress};
 use source::{FileEncoding, LineEnding, ScanIndex};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -814,9 +814,7 @@ impl Application {
         self.with_doc(handle, |doc| {
             let target = dir.join(draft_name(&id));
             let mut tx = FileTransaction::begin(&dir)?;
-            tx.add_file(&target, |out| {
-                doc.write_draft(out, path.as_deref())
-            })?;
+            tx.add_file(&target, |out| doc.write_draft(out, path.as_deref()))?;
             tx.commit()
         })
     }
@@ -1803,7 +1801,17 @@ mod tests {
 
         // 1. 編集によって先行検索が自動キャンセルされること
         let job_before_edit = application
-            .prepare_search(doc.handle, "target".into(), false, true, '$', 0, 3, None, true)
+            .prepare_search(
+                doc.handle,
+                "target".into(),
+                false,
+                true,
+                '$',
+                0,
+                3,
+                None,
+                true,
+            )
             .unwrap();
         application
             .replace_lines(
@@ -1821,7 +1829,17 @@ mod tests {
 
         // 2. Undo によって先行検索が自動キャンセルされること
         let job_before_undo = application
-            .prepare_search(doc.handle, "target".into(), false, true, '$', 0, 3, None, true)
+            .prepare_search(
+                doc.handle,
+                "target".into(),
+                false,
+                true,
+                '$',
+                0,
+                3,
+                None,
+                true,
+            )
             .unwrap();
         application.undo_lines(doc.handle, false).unwrap();
         let res2 = job_before_undo.run().unwrap();
@@ -1829,10 +1847,30 @@ mod tests {
 
         // 3. 新規検索によって先行検索が自動キャンセルされること
         let job_first = application
-            .prepare_search(doc.handle, "target".into(), false, true, '$', 0, 3, None, true)
+            .prepare_search(
+                doc.handle,
+                "target".into(),
+                false,
+                true,
+                '$',
+                0,
+                3,
+                None,
+                true,
+            )
             .unwrap();
         let job_second = application
-            .prepare_search(doc.handle, "target".into(), false, true, '$', 0, 3, None, true)
+            .prepare_search(
+                doc.handle,
+                "target".into(),
+                false,
+                true,
+                '$',
+                0,
+                3,
+                None,
+                true,
+            )
             .unwrap();
         let res_first = job_first.run().unwrap();
         assert!(

@@ -1,5 +1,5 @@
-﻿use std::fs;
 use planetext_document::FileTransaction;
+use std::fs;
 
 #[test]
 fn test_single_file_commit() {
@@ -71,7 +71,8 @@ fn test_rollback_on_explicit_drop() {
 
     {
         let mut tx = FileTransaction::begin(&temp_dir).unwrap();
-        tx.add_file_bytes(&target, b"new tentative content").unwrap();
+        tx.add_file_bytes(&target, b"new tentative content")
+            .unwrap();
         assert!(temp_dir.join("preserve.txt.tmp").exists());
         // commit() を呼ばずにブロックを抜ける（Drop）
     }

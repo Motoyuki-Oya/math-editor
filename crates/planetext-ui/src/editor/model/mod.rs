@@ -7,10 +7,10 @@ mod edit;
 mod history;
 mod movement;
 mod nested;
+use crate::structure::text::{Pos, Sel, Text};
 pub use cursor::{merge_cursors, UnifiedCursor};
 pub use history::Flush;
 use history::{Recorder, Step};
-use crate::structure::text::{Pos, Sel, Text};
 
 /// ドキュメントのモデル層: テキスト本体、Undo/Redo 履歴、変更行、既知の revision の管理。
 /// 表記や画面、キャレット位置については何も知らず、同一 doc_id の複数ペイン間で共有されます。
@@ -24,6 +24,7 @@ pub struct Document {
     pub(crate) known_revision: u64,
 }
 
+#[allow(dead_code)]
 impl Document {
     pub fn new() -> Self {
         Self::default()
@@ -128,8 +129,8 @@ impl Document {
         self.text.line_count() - self.text.absent_lines()
     }
 
-    pub fn evict_far(&mut self, keep: std::ops::Range<usize>, pinned: &[usize]) {
-        self.text.evict_far(keep, pinned);
+    pub fn evict_far(&mut self, keep_ranges: &[std::ops::Range<usize>], pinned: &[usize]) {
+        self.text.evict_far(keep_ranges, pinned);
     }
 
     pub fn forget_range(&mut self, range: std::ops::Range<usize>) {
@@ -171,8 +172,6 @@ impl Did {
         }
     }
 }
-
-
 
 pub struct Editor {
     pub document: Document,
@@ -279,7 +278,7 @@ impl Editor {
             .iter()
             .flat_map(|sel| [sel.start().line, sel.end().line])
             .collect();
-        self.document.evict_far(keep, &pinned);
+        self.document.evict_far(&[keep], &pinned);
     }
 
     /// 選択のいずれかが、まだ届いていない行に触れているか。届く前の行は
