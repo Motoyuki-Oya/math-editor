@@ -36,7 +36,7 @@ struct ApplicationState {
     docs: Mutex<HashMap<u64, Document>>,
     /// 文書ごとの検索世代。値が変われば走査スレッドは古い検索を中止する。
     searches: Mutex<HashMap<u64, Arc<AtomicU64>>>,
-    next_document: Mutex<u64>,
+    next_document: AtomicU64,
 }
 
 /// 開き方の答え: 文書の取っ手と、行数と大きさ、文字コード、改行コード、リビジョン。
@@ -274,11 +274,7 @@ impl Application {
         // 走査未完了の間は行数は未確定（None）として返す。確定済みなら Some(count)。
         let line_count = doc.confirmed_line_count();
         let opened = OpenedDocument {
-            handle: {
-                let mut next = self.state.next_document.lock().unwrap();
-                *next += 1;
-                *next
-            },
+            handle: self.state.next_document.fetch_add(1, Ordering::Relaxed) + 1,
             line_count,
             bytes: doc.bytes(),
             encoding,
