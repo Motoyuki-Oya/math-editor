@@ -466,7 +466,7 @@ impl View {
         let caret = state.primary;
         let carets = state.carets;
         let focused = state.focused;
-        let _linked = state.linked;
+        let linked = state.linked;
         self.overlay.set_inner_html("");
         let origin = self.document.get_bounding_client_rect();
         for highlight in highlights {
@@ -479,8 +479,8 @@ impl View {
                 self.shade_as(doc, rect, &origin, "mn-search-hit");
             }
         }
-        // IME の作成中だけキャレットを隠す。非フォーカス時でもキャレット位置を維持・可視化（mn-cursor-inactive）する。
-        let show_carets = caret.composing.is_none();
+        // IME の作成中だけキャレットを隠す。キャレットはフォーカスがあるか連動（linked）しているペインでのみ可視化する。
+        let show_carets = caret.composing.is_none() && (focused || linked);
         for (index, nested) in carets.iter().enumerate() {
             let Some(cursor) = nested.inside else {
                 continue;

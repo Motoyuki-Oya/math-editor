@@ -386,6 +386,23 @@ pub fn choose_pane(session: &Rc<RefCell<Session>>, add: bool) -> bool {
     newly_linked
 }
 
+/// 指定ペインと連動中（Alt+クリック）の全ペインIDを返します。
+/// 連動していなければ指定ペインのみを返します。
+pub fn linked_panes(origin_pane: usize) -> Vec<usize> {
+    PANES.with(|panes| {
+        let panes = panes.borrow();
+        let origin = panes.iter().find(|s| s.borrow().pane == origin_pane);
+        match origin {
+            Some(s) if s.borrow().linked => panes
+                .iter()
+                .filter(|s| s.borrow().linked)
+                .map(|s| s.borrow().pane)
+                .collect(),
+            _ => vec![origin_pane],
+        }
+    })
+}
+
 /// 1回の編集を受けるペイン群。連動中でなければ発生元だけ。
 pub(super) fn edit_sessions(origin: &Rc<RefCell<Session>>) -> Vec<Rc<RefCell<Session>>> {
     if !origin.borrow().linked {
@@ -1538,42 +1555,81 @@ pub fn load_doc_contents(doc_id: usize, text: &str) {
     redraw_doc(doc_id, None);
 }
 
+/// スプライス（行の挿入・削除）に伴うカーソルの追従シフト補正を行います。
+pub(super) fn shift_cursors_for_splices(
+    cursors: &mut [UnifiedCursor],
+    doc: &Document,
+    splices: &[crate::framework::SpliceEdit],
+) {
+    for splice in splices {
+        let delta = splice.lines.len() as isize - (splice.to as isize - splice.from as isize);
+        if delta != 0 {
+            for cursor in cursors.iter_mut() {
+                if cursor.sel.anchor.line >= splice.to {
+                    cursor.sel.anchor.line =
+                        (cursor.sel.anchor.line as isize + delta).max(0) as usize;
+                } else if cursor.sel.anchor.line >= splice.from {
+                    cursor.sel.anchor.line = (splice.from + splice.lines.len().saturating_sub(1))
+                        .min(doc.text().line_count().saturating_sub(1));
+                }
+                if cursor.sel.head.line >= splice.to {
+                    cursor.sel.head.line = (cursor.sel.head.line as isize + delta).max(0) as usize;
+                } else if cursor.sel.head.line >= splice.from {
+                    cursor.sel.head.line = (splice.from + splice.lines.len().saturating_sub(1))
+                        .min(doc.text().line_count().saturating_sub(1));
+                }
+                cursor.sel.anchor = doc.text().clamp(cursor.sel.anchor);
+                cursor.sel.head = doc.text().clamp(cursor.sel.head);
+            }
+        }
+    }
+}
+
 /// 文書の本体が巻き戻ったのに合わせる: 該当ドキュメントを開いているセッションへ
-/// テキスト差分を適用し、カーソルを復元する。
+/// テキスト差分を適用し、Undo発生元ペインのカーソルを復元、他ペインはスプライス追従のみを行う。
 pub fn apply_restored(
     doc_id: usize,
+    origin_pane: Option<usize>,
     state: &str,
     touched_from: usize,
     line_count: usize,
     splices: &[crate::framework::SpliceEdit],
 ) {
     let sessions = PANES.with(|panes| panes.borrow().clone());
-    let mut text_restored = false;
+    let doc = get_or_create_doc(doc_id);
 
+    // 1. 文書本体のモデル層を更新
+    doc.borrow_mut()
+        .apply_restored(touched_from, line_count, splices);
+
+    // 2. セッション層のカーソル・表示を更新
+    let mut origin_restored = false;
     for s in &sessions {
         if s.borrow().doc_id == doc_id {
-            s.borrow_mut().edit(|editor| {
-                if !text_restored {
-                    editor.apply_restored(state, touched_from, line_count, splices);
-                    text_restored = true;
-                } else {
+            let is_origin = match origin_pane {
+                Some(origin) => s.borrow().pane == origin,
+                None => !origin_restored,
+            };
+
+            if is_origin {
+                s.borrow_mut().edit(|editor| {
                     editor.restore_state(state);
-                }
-            });
+                });
+                origin_restored = true;
+            } else {
+                // 他ペインのカーソルは相手の state で上書きせず、
+                // 差分行数に応じた位置補正（シフト）のみ行って独立カーソルを維持
+                let mut session_mut = s.borrow_mut();
+                let doc_ref = session_mut.document.clone();
+                let doc_b = doc_ref.borrow();
+                shift_cursors_for_splices(&mut session_mut.cursors, &doc_b, splices);
+            }
+            s.borrow().view.invalidate();
+            scrolled(s);
         }
     }
 
-    if !text_restored {
-        let doc = get_or_create_doc(doc_id);
-        let mut editor = Editor {
-            document: std::mem::take(&mut *doc.borrow_mut()),
-            cursors: vec![],
-        };
-        editor.apply_restored(state, touched_from, line_count, splices);
-        *doc.borrow_mut() = editor.document;
-    }
-
-    redraw_doc(doc_id, Some(FOCUSED.get()));
+    redraw_doc(doc_id, origin_pane.or_else(|| Some(FOCUSED.get())));
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1816,7 +1872,7 @@ mod tests {
         let restored_revision = 1;
         doc.borrow_mut().known_revision = restored_revision;
 
-        apply_restored(doc_id, "0.0-0.0", 10, 20, &[]);
+        apply_restored(doc_id, None, "0.0-0.0", 10, 20, &[]);
 
         // 行 0..10 はそのまま保持され、行 10..20 は Absent になっている（フォールバック動作）
         assert_eq!(doc.borrow().text().raw_line(0), Some("initial line 0"));
@@ -1868,7 +1924,7 @@ mod tests {
             lines: vec!["original line 11".to_string()],
         }];
 
-        apply_restored(doc_id, "0.0-0.0", 11, 15, &splices);
+        apply_restored(doc_id, None, "0.0-0.0", 11, 15, &splices);
 
         // 手元の行は Absent にならず、即座に元に戻っていること
         assert_eq!(doc.borrow().text().raw_line(11), Some("original line 11"));
@@ -1967,10 +2023,62 @@ mod tests {
             },
         ];
 
-        apply_restored(doc_id, "1.0-1.0", 1, 10, &splices);
+        apply_restored(doc_id, None, "1.0-1.0", 1, 10, &splices);
 
         // 両ペインの変更が 1 回の Undo で元通り復元されたこと
         assert_eq!(doc.borrow().text().raw_line(1), Some("line 1"));
         assert_eq!(doc.borrow().text().raw_line(5), Some("line 5"));
+    }
+
+    /// 【同一文書マルチペイン Undo 時の独立カーソル保護テスト】
+    /// 相手ペインの Undo（apply_restored / shift_cursors_for_splices）が発生した際、
+    /// 他ペインのカーソルが相手のカーソル位置に合流せず、自身のカーソル行が維持されること。
+    /// かつ、Undo による行増減（splice delta）がある場合は正しく追従シフトされることを検証する。
+    #[test]
+    fn shift_cursors_for_splices_preserves_independent_cursor_of_other_pane() {
+        use crate::framework::SpliceEdit;
+        let doc_id = 7777;
+        let doc = get_or_create_doc(doc_id);
+        doc.borrow_mut().load_sparse(Some(20));
+
+        let initial_lines: Vec<_> = (0..20)
+            .map(|i| document::read_line(&format!("line {i}")))
+            .collect();
+        doc.borrow_mut().feed(0, initial_lines);
+
+        // 他ペイン（ペイン 2）のカーソル: 行 10 に位置している
+        let mut pane2_cursors = vec![UnifiedCursor::caret(Pos::new(10, 3))];
+
+        // ケース 1: ペイン 1 の行 1 の変更が Undo された（行数増減なし delta = 0）
+        let splices_same_count = vec![SpliceEdit {
+            from: 1,
+            to: 2,
+            lines: vec!["line 1 original".to_string()],
+        }];
+        shift_cursors_for_splices(&mut pane2_cursors, &doc.borrow(), &splices_same_count);
+
+        // ペイン 2 のカーソルは相手の Undo（行 1）に合流せず、行 10 のまま維持される
+        assert_eq!(pane2_cursors[0].sel.head, Pos::new(10, 3));
+        assert_eq!(pane2_cursors[0].sel.anchor, Pos::new(10, 3));
+
+        // ケース 2: ペイン 1 の Undo により、上流の行が 2 行削除された（from: 1, to: 3 -> 1 行に縮小: delta = -1）
+        let splices_shrink = vec![SpliceEdit {
+            from: 1,
+            to: 3,
+            lines: vec!["line 1 single".to_string()],
+        }];
+        shift_cursors_for_splices(&mut pane2_cursors, &doc.borrow(), &splices_shrink);
+
+        // ペイン 2 のカーソルは 1 行上に追従シフトして 行 9 になる（行 1 に合流することはない）
+        assert_eq!(pane2_cursors[0].sel.head, Pos::new(9, 3));
+        assert_eq!(pane2_cursors[0].sel.anchor, Pos::new(9, 3));
+    }
+
+    /// 【非連動時の linked_panes 単独性テスト】
+    /// 連動していないペインに対して linked_panes を呼んだ場合、自身のみの 1 要素 Vec が返ること。
+    #[test]
+    fn linked_panes_isolated_when_not_linked() {
+        let panes = linked_panes(999);
+        assert_eq!(panes, vec![999]);
     }
 }

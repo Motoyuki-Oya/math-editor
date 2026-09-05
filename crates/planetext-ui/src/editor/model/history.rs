@@ -100,6 +100,7 @@ impl Editor {
     /// 文書の本体が巻き戻ったのに合わせる: 送られてきた置き換え差分（splices）を手元のテキストに
     /// 直接適用し、控えられていたキャレットへ戻る。
     /// splices が空の場合のみ、手元の行を reset_from で破棄して再取り寄せを待つ（フォールバック）。
+    #[allow(dead_code)]
     pub fn apply_restored(
         &mut self,
         state: &str,
@@ -107,20 +108,9 @@ impl Editor {
         line_count: usize,
         splices: &[crate::framework::SpliceEdit],
     ) {
-        if splices.is_empty() {
-            self.text.reset_from(touched_from, line_count);
-        } else {
-            for splice in splices {
-                let lines: Vec<_> = splice
-                    .lines
-                    .iter()
-                    .map(|l| crate::format::document::read_line(l))
-                    .collect();
-                self.text.replace_external(splice.from, splice.to, lines);
-            }
-        }
+        self.document
+            .apply_restored(touched_from, line_count, splices);
         self.restore_state(state);
-        self.recorder.cut();
     }
 
     /// キャレットと選択の控え。文書の本体に預けるだけの不透明な文字列。

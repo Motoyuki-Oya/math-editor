@@ -146,8 +146,25 @@ pub(super) fn flush(shell: Shell, editor_pane: usize) {
 }
 
 pub(super) fn undo(shell: Shell, redo: bool) {
-    let tab = shell.tab_untracked();
-    enqueue(tab, Task::Undo { redo });
+    let focused_editor = shell.pane_untracked().editor_pane();
+    let linked = editor::linked_panes(focused_editor);
+
+    let mut tabs: Vec<Tab> = Vec::new();
+    for pane_id in linked {
+        if let Some(tab) = shell.tab_of(pane_id) {
+            let doc_id = tab.id.get_untracked();
+            if !tabs.iter().any(|t| t.id.get_untracked() == doc_id) {
+                tabs.push(tab);
+            }
+        }
+    }
+    if tabs.is_empty() {
+        tabs.push(shell.tab_untracked());
+    }
+
+    for tab in tabs {
+        enqueue(tab, Task::Undo { redo });
+    }
 }
 
 pub(super) fn save(tab: Tab, path: String) {
@@ -341,8 +358,18 @@ async fn execute(shell: Shell, tab: Tab, task: Task) -> bool {
                 let doc_model = editor::get_or_create_doc_model(doc_id);
                 doc_model.borrow_mut().known_revision = restored.revision;
 
+                let origin_pane = {
+                    let focused_editor = shell.pane_untracked().editor_pane();
+                    if shell.tab_of(focused_editor).map(|t| t.id.get_untracked()) == Some(doc_id) {
+                        Some(focused_editor)
+                    } else {
+                        shell.pane_showing(tab).map(|p| p.editor_pane())
+                    }
+                };
+
                 shell.apply_restored(
                     tab,
+                    origin_pane,
                     &restored.state,
                     restored.touched_from,
                     restored.line_count,

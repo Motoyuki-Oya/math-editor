@@ -371,13 +371,21 @@ impl Shell {
     pub(super) fn apply_restored(
         &self,
         tab: Tab,
+        origin_pane: Option<usize>,
         state: &str,
         touched_from: usize,
         line_count: usize,
         splices: &[crate::framework::SpliceEdit],
     ) {
         let doc_id = tab.id.get_untracked();
-        editor::apply_restored(doc_id, state, touched_from, line_count, splices);
+        editor::apply_restored(
+            doc_id,
+            origin_pane,
+            state,
+            touched_from,
+            line_count,
+            splices,
+        );
     }
 
     pub(super) fn pane_showing(&self, tab: Tab) -> Option<Pane> {
