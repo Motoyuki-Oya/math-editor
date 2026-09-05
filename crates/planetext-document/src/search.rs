@@ -54,7 +54,6 @@ pub(crate) fn literal_positions(
         })
         .collect()
 }
-
 #[derive(Clone, Debug)]
 pub(crate) struct SearchHitCache {
     pub(crate) pattern: String,
@@ -65,6 +64,8 @@ pub(crate) struct SearchHitCache {
     pub(crate) fully_scanned: bool,
 }
 
+
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub(crate) struct RawScanHit {
     pub(crate) line: usize,
@@ -73,6 +74,7 @@ pub(crate) struct RawScanHit {
     pub(crate) start: usize,
 }
 
+#[allow(dead_code)]
 fn character_columns(
     encoding: FileEncoding,
     positions: &[usize],
@@ -109,6 +111,7 @@ fn character_columns(
     Ok(columns)
 }
 
+#[allow(dead_code)]
 pub(crate) fn convert_raw_hits(
     raw: Vec<RawScanHit>,
     encoding: FileEncoding,
@@ -154,6 +157,7 @@ pub(crate) fn convert_raw_hits(
     Ok(converted)
 }
 
+#[allow(dead_code)]
 fn aligned_positions(
     haystack: &[u8],
     needle: &[u8],
@@ -169,6 +173,7 @@ fn aligned_positions(
 /// `read` が返す小さな窓だけを保持し、窓境界の最長パターン分だけ重ねる。
 /// PieceTree のピース境界は行境界なので、検索語は境界を越えない（従来の
 /// 行単位検索と同じ）。同じ行のバイトが複数ピースへ分割される構造は作られない。
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn scan_encoded_range(
     len: usize,
@@ -354,7 +359,7 @@ pub(crate) fn scan_encoded_range(
 }
 
 /// 検索走査の 1 件。`notation` の行は一致ではなく「frontend が見るべき行」。
-#[derive(serde::Serialize, Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct ScanHit {
     pub line: usize,
     pub notation: bool,
@@ -363,13 +368,299 @@ pub struct ScanHit {
     pub end: usize,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct RawHit {
+    pub(crate) hit: ScanHit,
+    pub(crate) start_byte: usize,
+    pub(crate) end_byte: usize,
+}
+
 use std::sync::Arc;
+
+/// 検索パターンの完全抽象化 trait。
+/// リテラル・正規表現・bi-gram 索引による絞り込み・推定件数取得を単一のインターフェースでカプセル化する。
+pub(crate) trait DocumentMatcher: std::fmt::Debug + Send + Sync {
+    /// 生バイト列 (mmap: &[u8]) に対する一致位置 (start_byte, end_byte) のイテレータ
+    fn find_in_bytes<'a>(
+        &'a self,
+        haystack: &'a [u8],
+        encoding: FileEncoding,
+    ) -> Box<dyn Iterator<Item = (usize, usize)> + 'a>;
+
+    /// 編集バッファ文字列 (&str) に対する一致位置 (start_char, end_char) のイテレータ
+    fn find_in_str<'a>(&'a self, text: &'a str) -> Box<dyn Iterator<Item = (usize, usize)> + 'a>;
+
+    /// bi-gram 索引により指定ブロックをスキップできるか判定
+    fn may_contain_in_block(&self, index: &crate::search_index::SearchIndex, block: usize) -> bool {
+        let _ = (index, block);
+        true
+    }
+
+    /// bi-gram 索引から推定件数を取得できるか
+    fn estimate_with_index(&self, index: &crate::search_index::SearchIndex) -> Option<usize> {
+        let _ = index;
+        None
+    }
+
+    /// クエリ文字数が固定（リテラルの長さ）であればその文字数を返す
+    fn fixed_char_count(&self) -> Option<usize> {
+        None
+    }
+
+    /// サンプリング等で使用する正規表現
+    fn pattern(&self) -> &regex::Regex;
+
+    /// 検索パターンの文字列表現（キャッシュキー用）
+    fn pattern_str(&self) -> &str;
+
+    /// リテラル文字列（リテラル検索の場合のみ Some）
+    fn literal(&self) -> Option<&str> {
+        None
+    }
+
+    /// 大小文字区別
+    fn case_sensitive(&self) -> bool;
+}
+
+#[derive(Debug)]
+pub(crate) struct LiteralMatcher {
+    query: String,
+    case_sensitive: bool,
+    pattern: regex::Regex,
+    query_chars: usize,
+}
+
+impl LiteralMatcher {
+    pub(crate) fn new(query: &str, case_sensitive: bool) -> Result<Self, String> {
+        let pattern_str = regex::escape(query);
+        let pattern = regex::RegexBuilder::new(&pattern_str)
+            .case_insensitive(!case_sensitive)
+            .build()
+            .map_err(|e| format!("検索正規表現の生成に失敗しました: {e}"))?;
+        let query_chars = query.chars().count();
+        Ok(Self {
+            query: query.to_string(),
+            case_sensitive,
+            pattern,
+            query_chars,
+        })
+    }
+}
+
+impl DocumentMatcher for LiteralMatcher {
+    fn find_in_bytes<'a>(
+        &'a self,
+        haystack: &'a [u8],
+        encoding: FileEncoding,
+    ) -> Box<dyn Iterator<Item = (usize, usize)> + 'a> {
+        let encoded_query = encoding.encode_str(&self.query);
+        let unit = encoding.unit_bytes();
+        let query_len = encoded_query.len();
+        if query_len == 0 {
+            return Box::new(std::iter::empty());
+        }
+
+        let has_casing = self.query.chars().any(|c| {
+            c.is_alphabetic()
+                && (c.to_lowercase().collect::<String>() != c.to_uppercase().collect::<String>())
+        });
+
+        if self.case_sensitive || !has_casing {
+            let matches: Vec<(usize, usize)> = memchr::memmem::find_iter(haystack, &encoded_query)
+                .filter(move |&pos| unit == 1 || pos.is_multiple_of(unit))
+                .map(move |pos| (pos, pos + query_len))
+                .collect();
+            Box::new(matches.into_iter())
+        } else if unit == 1 {
+            let positions = literal_positions(haystack, &encoded_query, false);
+            Box::new(positions.into_iter().map(move |pos| (pos, pos + query_len)))
+        } else if let Ok(re) = regex::bytes::RegexBuilder::new(&regex::escape(&self.query))
+            .case_insensitive(true)
+            .build()
+        {
+            let matches: Vec<(usize, usize)> = re
+                .find_iter(haystack)
+                .filter(|m| unit == 1 || m.start().is_multiple_of(unit))
+                .map(|m| (m.start(), m.end()))
+                .collect();
+            Box::new(matches.into_iter())
+        } else {
+            Box::new(std::iter::empty())
+        }
+    }
+
+    fn find_in_str<'a>(&'a self, text: &'a str) -> Box<dyn Iterator<Item = (usize, usize)> + 'a> {
+        let query_len = self.query_chars;
+        if self.case_sensitive {
+            let query = self.query.clone();
+            let matches: Vec<(usize, usize)> = text
+                .match_indices(&query)
+                .map(|(byte_offset, _)| {
+                    let start = text[..byte_offset].chars().count();
+                    (start, start + query_len)
+                })
+                .collect();
+            Box::new(matches.into_iter())
+        } else {
+            let matches: Vec<(usize, usize)> = self
+                .pattern
+                .find_iter(text)
+                .map(|m| {
+                    let start = text[..m.start()].chars().count();
+                    let end = start + text[m.start()..m.end()].chars().count();
+                    (start, end)
+                })
+                .collect();
+            Box::new(matches.into_iter())
+        }
+    }
+
+    fn may_contain_in_block(&self, index: &crate::search_index::SearchIndex, block: usize) -> bool {
+        index.may_contain_query(block, &self.query)
+    }
+
+    fn estimate_with_index(&self, index: &crate::search_index::SearchIndex) -> Option<usize> {
+        index.estimate_matches(&self.query)
+    }
+
+    fn fixed_char_count(&self) -> Option<usize> {
+        Some(self.query_chars)
+    }
+
+    fn pattern(&self) -> &regex::Regex {
+        &self.pattern
+    }
+
+    fn pattern_str(&self) -> &str {
+        &self.query
+    }
+
+    fn literal(&self) -> Option<&str> {
+        Some(&self.query)
+    }
+
+    fn case_sensitive(&self) -> bool {
+        self.case_sensitive
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct RegexMatcher {
+    query: String,
+    pattern: regex::Regex,
+    bytes_regex: Option<regex::bytes::Regex>,
+    case_sensitive: bool,
+}
+
+impl RegexMatcher {
+    pub(crate) fn new(query: &str, case_sensitive: bool) -> Result<Self, String> {
+        let pattern = regex::RegexBuilder::new(query)
+            .case_insensitive(!case_sensitive)
+            .build()
+            .map_err(|e| format!("正規表現を読めませんでした: {e}"))?;
+        let bytes_regex = regex::bytes::RegexBuilder::new(query)
+            .case_insensitive(!case_sensitive)
+            .build()
+            .ok();
+        Ok(Self {
+            query: query.to_string(),
+            pattern,
+            bytes_regex,
+            case_sensitive,
+        })
+    }
+}
+
+impl DocumentMatcher for RegexMatcher {
+    fn find_in_bytes<'a>(
+        &'a self,
+        haystack: &'a [u8],
+        encoding: FileEncoding,
+    ) -> Box<dyn Iterator<Item = (usize, usize)> + 'a> {
+        if matches!(encoding, FileEncoding::Utf8 | FileEncoding::Utf8Bom) {
+            if let Some(ref re) = self.bytes_regex {
+                let matches: Vec<(usize, usize)> =
+                    re.find_iter(haystack).map(|m| (m.start(), m.end())).collect();
+                return Box::new(matches.into_iter());
+            }
+        }
+        Box::new(std::iter::empty())
+    }
+
+    fn find_in_str<'a>(&'a self, text: &'a str) -> Box<dyn Iterator<Item = (usize, usize)> + 'a> {
+        let matches: Vec<(usize, usize)> = self
+            .pattern
+            .find_iter(text)
+            .map(|m| {
+                let start = text[..m.start()].chars().count();
+                let end = start + text[m.start()..m.end()].chars().count();
+                (start, end)
+            })
+            .collect();
+        Box::new(matches.into_iter())
+    }
+
+    fn pattern(&self) -> &regex::Regex {
+        &self.pattern
+    }
+
+    fn pattern_str(&self) -> &str {
+        &self.query
+    }
+
+    fn literal(&self) -> Option<&str> {
+        None
+    }
+
+    fn case_sensitive(&self) -> bool {
+        self.case_sensitive
+    }
+}
+
+impl DocumentMatcher for regex::Regex {
+    fn find_in_bytes<'a>(
+        &'a self,
+        haystack: &'a [u8],
+        encoding: FileEncoding,
+    ) -> Box<dyn Iterator<Item = (usize, usize)> + 'a> {
+        if matches!(encoding, FileEncoding::Utf8 | FileEncoding::Utf8Bom) {
+            if let Ok(re) = regex::bytes::RegexBuilder::new(self.as_str()).build() {
+                let matches: Vec<(usize, usize)> =
+                    re.find_iter(haystack).map(|m| (m.start(), m.end())).collect();
+                return Box::new(matches.into_iter());
+            }
+        }
+        Box::new(std::iter::empty())
+    }
+
+    fn find_in_str<'a>(&'a self, text: &'a str) -> Box<dyn Iterator<Item = (usize, usize)> + 'a> {
+        let matches: Vec<(usize, usize)> = self
+            .find_iter(text)
+            .map(|m| {
+                let start = text[..m.start()].chars().count();
+                let end = start + text[m.start()..m.end()].chars().count();
+                (start, end)
+            })
+            .collect();
+        Box::new(matches.into_iter())
+    }
+
+    fn pattern(&self) -> &regex::Regex {
+        self
+    }
+
+    fn pattern_str(&self) -> &str {
+        self.as_str()
+    }
+
+    fn case_sensitive(&self) -> bool {
+        true
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct CompiledQuery {
-    pub pattern: Arc<regex::Regex>,
-    pub literal: Option<String>,
-    pub case_sensitive: bool,
+    pub(crate) matcher: Arc<dyn DocumentMatcher>,
     pub marker: char,
 }
 
@@ -380,22 +671,24 @@ impl CompiledQuery {
         case_sensitive: bool,
         marker: char,
     ) -> Result<Self, String> {
-        let pattern_str = if regex {
-            query.to_string()
+        let matcher: Arc<dyn DocumentMatcher> = if regex {
+            Arc::new(RegexMatcher::new(query, case_sensitive)?)
         } else {
-            regex::escape(query)
+            Arc::new(LiteralMatcher::new(query, case_sensitive)?)
         };
-        let pattern = regex::RegexBuilder::new(&pattern_str)
-            .case_insensitive(!case_sensitive)
-            .build()
-            .map_err(|e| format!("正規表現を読めませんでした: {e}"))?;
-        let literal = (!regex).then(|| query.to_string());
-        Ok(Self {
-            pattern: Arc::new(pattern),
-            literal,
-            case_sensitive,
-            marker,
-        })
+        Ok(Self { matcher, marker })
+    }
+
+    pub fn pattern(&self) -> &regex::Regex {
+        self.matcher.pattern()
+    }
+
+    pub fn literal(&self) -> Option<&str> {
+        self.matcher.literal()
+    }
+
+    pub fn case_sensitive(&self) -> bool {
+        self.matcher.case_sensitive()
     }
 }
 
@@ -416,126 +709,172 @@ pub(crate) struct SearchSpec<'a> {
 }
 
 impl Document {
-    /// `from..end` を native 内で走査し、候補群を返す。
-    /// 未走査の場合はドキュメント全体を一気にゼロコピー走査して全ヒットをキャッシュに保存し、
-    /// 正確な件数（total_matches）と現在何件目か（current_index）を即座に特定する。
+    /// クリーン／編集済み（dirty）を問わず、元ファイル部分を mmap ゼロコピー走査し、
+    /// 操作ログ (OperationLog::map_range) による現在座標写像と編集バッファ差分走査を
+    /// 完全に単一のパイプラインとして解決する。
+    pub(crate) fn resolve_hits(
+        &mut self,
+        matcher: &dyn DocumentMatcher,
+        marker: char,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<ScanHit>, String> {
+        let is_clean = self.is_clean();
+        let mut all_hits = Vec::new();
+
+        if let Some(ref source) = self.source {
+            let raw_hits = source.scan_matches(
+                matcher,
+                self.search_index(),
+                marker,
+                usize::MAX,
+                cancelled,
+            )?;
+            if is_clean {
+                all_hits = raw_hits.into_iter().map(|r| r.hit).collect();
+            } else {
+                for raw in raw_hits {
+                    if cancelled() {
+                        return Ok(Vec::new());
+                    }
+                    if let Ok((new_start, new_end)) =
+                        self.map_range_from_base(raw.start_byte, raw.end_byte)
+                    {
+                        if let (Some((line1, col1)), Some((line2, col2))) = (
+                            self.byte_offset_to_line_column(new_start),
+                            self.byte_offset_to_line_column(new_end),
+                        ) {
+                            if line1 == line2 {
+                                all_hits.push(ScanHit {
+                                    line: line1,
+                                    notation: raw.hit.notation,
+                                    start: col1,
+                                    end: col2,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // 編集バッファ（変更行）の差分走査
+                let mod_lines = self.modified_lines();
+                for line_idx in mod_lines {
+                    if cancelled() {
+                        return Ok(Vec::new());
+                    }
+                    self.each_line(line_idx, 1, &mut |_, line| {
+                        let has_marker = marker != '\0' && line.contains(marker);
+                        if has_marker {
+                            all_hits.push(ScanHit {
+                                line: line_idx,
+                                notation: true,
+                                start: 0,
+                                end: 0,
+                            });
+                        } else {
+                            for (start, end) in matcher.find_in_str(line) {
+                                all_hits.push(ScanHit {
+                                    line: line_idx,
+                                    notation: false,
+                                    start,
+                                    end,
+                                });
+                            }
+                        }
+                        true
+                    })?;
+                }
+
+                all_hits.sort_by_key(|h| (h.line, h.start));
+                all_hits.dedup();
+            }
+        } else {
+            // source なしのメモリ内文書（新規下書きなど）
+            self.each_line(0, self.line_count(), &mut |line_idx, line| {
+                if cancelled() {
+                    return false;
+                }
+                let has_marker = marker != '\0' && line.contains(marker);
+                if has_marker {
+                    all_hits.push(ScanHit {
+                        line: line_idx,
+                        notation: true,
+                        start: 0,
+                        end: 0,
+                    });
+                } else {
+                    for (start, end) in matcher.find_in_str(line) {
+                        all_hits.push(ScanHit {
+                            line: line_idx,
+                            notation: false,
+                            start,
+                            end,
+                        });
+                    }
+                }
+                true
+            })?;
+        }
+
+        Ok(all_hits)
+    }
+
+    /// `from..end` の範囲を指定された方向（forward）に走査し、候補群を返す。
+    /// 一致が見つかり次第、即座に返却する。
     pub(crate) fn search_candidates(
         &mut self,
         spec: SearchSpec<'_>,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<SearchCandidates, String> {
-        let pattern = &spec.query.pattern;
-        let literal = spec.query.literal.as_deref();
-        let case_sensitive = spec.query.case_sensitive;
-        let marker = spec.query.marker;
         let from = spec.from;
+        if cancelled() {
+            return Ok(SearchCandidates {
+                hits: Vec::new(),
+                scanned_to: from,
+                cancelled: true,
+                total_matches: None,
+                current_index: None,
+            });
+        }
+
+        let cur_rev = self.revision();
+        let pattern_str = spec.query.matcher.pattern_str();
+        let literal = spec.query.matcher.literal();
+        let case_sensitive = spec.query.matcher.case_sensitive();
+        let marker = spec.query.marker;
         let end = spec.end;
         let after_col = spec.after_col;
         let forward = spec.forward;
-        let cur_rev = self.revision();
-        let pattern_str = pattern.as_str();
 
-        let is_cached = if let Some(cache) = &self.search_cache {
+        // 1. キャッシュの初期化または再利用
+        let is_cached = self.search_cache.as_ref().map_or(false, |cache| {
             cache.revision == cur_rev
                 && cache.case_sensitive == case_sensitive
                 && cache.pattern == pattern_str
                 && cache.literal.as_deref() == literal
                 && cache.fully_scanned
-        } else {
-            false
-        };
+        });
 
         if !is_cached {
             if cancelled() {
                 return Ok(SearchCandidates {
                     hits: Vec::new(),
-                    scanned_to: 0,
+                    scanned_to: from,
                     cancelled: true,
                     total_matches: None,
                     current_index: None,
                 });
             }
-            let doc_lines = self.line_count();
-            let mut all_hits = Vec::new();
-            let is_clean = self.is_clean();
 
-            // クリーンな通常ファイル（Piece::Source がベース）なら、ファイルサイズ不問で fast_mmap_search を最優先実行！
-            let fast_done = if is_clean {
-                if let (Some(ref source), Some(query)) = (self.source.as_ref(), literal) {
-                    if let Ok(fast_hits) = source.fast_mmap_search(query, case_sensitive, marker, usize::MAX) {
-                        all_hits = fast_hits;
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
+            let all_hits = self.resolve_hits(spec.query.matcher.as_ref(), marker, cancelled)?;
 
-            if !fast_done {
-                let mut at = 0;
-                let mut page_lines = 50_000;
-                const MAX_PAGE_LINES: usize = 1_000_000;
-                let mod_lines = if !is_clean {
-                    self.modified_lines()
-                } else {
-                    Vec::new()
-                };
-
-                while at < doc_lines {
-                    if cancelled() {
-                        return Ok(SearchCandidates {
-                            hits: Vec::new(),
-                            scanned_to: at,
-                            cancelled: true,
-                            total_matches: None,
-                            current_index: None,
-                        });
-                    }
-
-                    let page_end = (at + page_lines).min(doc_lines);
-                    let skip_scan = if let (Some(index), Some(query)) = (self.search_index().cloned(), literal) {
-                        if let (Ok(start_byte), Ok(end_byte)) = (
-                            self.byte_offset_of_line(at),
-                            self.byte_offset_of_line(page_end),
-                        ) {
-                            let start_block = start_byte / crate::search_index::INDEX_BLOCK_BYTES;
-                            let end_block = end_byte / crate::search_index::INDEX_BLOCK_BYTES;
-                            let is_clean_range = if is_clean {
-                                true
-                            } else {
-                                !mod_lines.iter().any(|&line| line >= at && line < page_end)
-                            };
-                            if is_clean_range {
-                                (start_block..=end_block).all(|b| !index.may_contain_query(b, query))
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
-
-                    if skip_scan {
-                        at = page_end;
-                        page_lines = (page_lines * 4).min(MAX_PAGE_LINES);
-                        continue;
-                    }
-
-                    let (hits, _) = if let Some(query) = literal {
-                        self.scan_literal(query, case_sensitive, marker, at, page_end - at, usize::MAX)?
-                    } else {
-                        self.scan(pattern, marker, at, page_end - at, usize::MAX)?
-                    };
-                    all_hits.extend(hits);
-                    at = page_end;
-                    page_lines = (page_lines * 4).min(MAX_PAGE_LINES);
-                }
+            if cancelled() {
+                return Ok(SearchCandidates {
+                    hits: Vec::new(),
+                    scanned_to: from,
+                    cancelled: true,
+                    total_matches: None,
+                    current_index: None,
+                });
             }
 
             self.search_cache = Some(SearchHitCache {
@@ -549,73 +888,49 @@ impl Document {
         }
 
         let cache = self.search_cache.as_ref().unwrap();
-        let total_matches = Some(cache.hits.len());
-
-        let mut matching_hits = Vec::new();
-        let mut first_match_idx = None;
-
-        if forward {
-            // 順方向（次へ）: (from, after_col) 以降の直近ヒットを探す
-            for (idx, hit) in cache.hits.iter().enumerate() {
-                if hit.line < from {
-                    continue;
-                }
-                if hit.line == from {
-                    if let Some(col) = after_col {
-                        if !hit.notation && hit.start < col {
-                            continue;
-                        }
-                    }
-                }
-                if first_match_idx.is_none() {
-                    first_match_idx = Some(idx + 1); // 1-indexed
-                }
-                matching_hits.push(hit.clone());
-                if matching_hits.len() >= 64 {
-                    break;
-                }
-            }
-            if matching_hits.is_empty() && !cache.hits.is_empty() {
-                // 末尾を越えたら先頭へラップアラウンド
-                first_match_idx = Some(1);
-                matching_hits.push(cache.hits[0].clone());
-            }
-        } else {
-            // 逆方向（前へ）: (from, after_col) 以前の直近ヒットを探す
-            for (idx, hit) in cache.hits.iter().enumerate().rev() {
-                if hit.line > from {
-                    continue;
-                }
-                if hit.line == from {
-                    if let Some(col) = after_col {
-                        if !hit.notation && hit.start >= col {
-                            continue;
-                        }
-                    }
-                }
-                first_match_idx = Some(idx + 1); // 1-indexed
-                matching_hits.push(hit.clone());
-                break;
-            }
-            if matching_hits.is_empty() && !cache.hits.is_empty() {
-                // 先頭を越えたら末尾へラップアラウンド
-                first_match_idx = Some(cache.hits.len());
-                matching_hits.push(cache.hits.last().unwrap().clone());
-            }
+        let total = cache.hits.len();
+        if total == 0 {
+            return Ok(SearchCandidates {
+                hits: Vec::new(),
+                scanned_to: end,
+                cancelled: false,
+                total_matches: Some(0),
+                current_index: None,
+            });
         }
 
-        let scanned_to = matching_hits.last().map_or(end, |hit| hit.line + 1);
+        let target = (from, after_col.unwrap_or(0));
+
+        let (cur_idx, hits) = if forward {
+            let i = cache.hits.partition_point(|h| (h.line, h.start) < target);
+            if i < total {
+                let take = (total - i).min(64);
+                (i + 1, cache.hits[i..i + take].to_vec())
+            } else {
+                let take = total.min(64);
+                (1, cache.hits[..take].to_vec())
+            }
+        } else {
+            let i = cache.hits.partition_point(|h| (h.line, h.start) < target);
+            if i > 0 {
+                (i, vec![cache.hits[i - 1].clone()])
+            } else {
+                (total, vec![cache.hits[total - 1].clone()])
+            }
+        };
+
         Ok(SearchCandidates {
-            hits: matching_hits,
-            scanned_to,
+            hits,
+            scanned_to: end,
             cancelled: false,
-            total_matches,
-            current_index: first_match_idx,
+            total_matches: Some(total),
+            current_index: Some(cur_idx),
         })
     }
 
     /// 検索の走査で見つかったもの: 素の行の一致か、読み替え（記法の解釈）を
     /// 要する行。行の順に並ぶ。
+    #[allow(dead_code)]
     pub(crate) fn scan(
         &mut self,
         pattern: &regex::Regex,
@@ -658,10 +973,13 @@ impl Document {
         Ok((hits, scanned_to))
     }
 
-    pub(crate) fn estimate_matches(&mut self, pattern: &regex::Regex) -> Result<usize, String> {
+    pub(crate) fn estimate_matches(
+        &mut self,
+        matcher: &dyn DocumentMatcher,
+    ) -> Result<usize, String> {
         self.confirm_scan_if_done();
         let cur_rev = self.revision();
-        let pattern_str = pattern.as_str();
+        let pattern_str = matcher.pattern_str();
 
         if let Some(cache) = &self.search_cache {
             if cache.fully_scanned && cache.revision == cur_rev && cache.pattern == pattern_str {
@@ -670,14 +988,8 @@ impl Document {
         }
 
         if let Some(index) = self.search_index() {
-            let query = pattern.as_str();
-            let is_literal = !query.contains([
-                '\\', '.', '+', '*', '?', '(', ')', '|', '[', ']', '{', '}', '^', '$',
-            ]);
-            if is_literal {
-                if let Some(estimated) = index.estimate_matches(query) {
-                    return Ok(estimated);
-                }
+            if let Some(estimated) = matcher.estimate_with_index(index) {
+                return Ok(estimated);
             }
         }
 
@@ -689,6 +1001,7 @@ impl Document {
         let take = LINES_PER_WINDOW.min(step);
         let mut hits = 0;
         let mut sampled = 0;
+        let pattern = matcher.pattern();
         for from in (0..self.line_count()).step_by(step) {
             let count = take.min(self.line_count() - from);
             self.each_line(from, count, &mut |_, line| {
@@ -1344,4 +1657,291 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
+    #[test]
+    fn test_dirty_document_search_cache_and_wraparound() {
+        let (mut doc, path) = disk_doc("dirty-cache-test", &["alpha", "beta", "gamma", "delta"]);
+        // 編集を加えて dirty (!is_clean) にする
+        doc.replace(1, 2, vec!["edited_target".to_string()], 1, "", "").unwrap();
+        assert!(!doc.is_clean());
+
+        let query = crate::search::CompiledQuery::compile("target", false, true, '$').unwrap();
+
+        // 1回目: 走査して見つかる -> キャッシュに入る
+        let found1 = doc.search_candidates(
+            SearchSpec {
+                query: &query,
+                from: 0,
+                end: doc.line_count(),
+                after_col: None,
+                forward: true,
+            },
+            &|| false,
+        ).unwrap();
+        assert_eq!(found1.hits.len(), 1);
+        assert_eq!(found1.hits[0].line, 1);
+        assert_eq!(found1.hits[0].start, 7);
+
+        // キャッシュに保存されていることを確認
+        assert!(doc.search_cache.is_some());
+        let cache = doc.search_cache.as_ref().unwrap();
+        assert_eq!(cache.hits.len(), 1);
+
+        // 2回目（forward、同一位置以降）: キャッシュから返る
+        let found2 = doc.search_candidates(
+            SearchSpec {
+                query: &query,
+                from: 1,
+                end: doc.line_count(),
+                after_col: Some(7),
+                forward: true,
+            },
+            &|| false,
+        ).unwrap();
+        assert_eq!(found2.hits.len(), 1);
+        assert_eq!(found2.hits[0].line, 1);
+
+        // backward（末尾から手前へ）: キャッシュから返る
+        let found_back = doc.search_candidates(
+            SearchSpec {
+                query: &query,
+                from: 3,
+                end: doc.line_count(),
+                after_col: None,
+                forward: false,
+            },
+            &|| false,
+        ).unwrap();
+        assert_eq!(found_back.hits.len(), 1);
+        assert_eq!(found_back.hits[0].line, 1);
+
+        // さらに末尾からの forward（ラップアラウンド）
+        let found_wrap = doc.search_candidates(
+            SearchSpec {
+                query: &query,
+                from: 3,
+                end: doc.line_count(),
+                after_col: None,
+                forward: true,
+            },
+            &|| false,
+        ).unwrap();
+        // 現在位置 3 以降には無いが、先頭から検索し直して line 1 のヒットが返る
+        assert_eq!(found_wrap.hits.len(), 1);
+        assert_eq!(found_wrap.hits[0].line, 1);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_previous_from_last_hit_repro() {
+        let mut lines = Vec::new();
+        lines.push("target match 1".to_string());
+        lines.push("target match 2".to_string());
+        for _ in 0..1000 {
+            lines.push("some other text".to_string());
+        }
+        lines.push("target match 3".to_string());
+
+        let lines_ref: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        let (mut doc, path) = disk_doc("three-hits-test", &lines_ref);
+        let query = crate::search::CompiledQuery::compile("target", false, true, '$').unwrap();
+
+        // 1. 末尾のヒット（line 1002）の位置から「前へ」(forward = false) を呼ぶ -> line 1 (Hit 2) になること
+        let found2 = doc.search_candidates(
+            SearchSpec {
+                query: &query,
+                from: 1002,
+                end: doc.line_count(),
+                after_col: Some(0),
+                forward: false,
+            },
+            &|| false,
+        ).unwrap();
+        assert_eq!(found2.hits.len(), 1);
+        assert_eq!(found2.hits[0].line, 1, "Expected hit 2 (line 1), but got line {}", found2.hits[0].line);
+        assert_eq!(found2.current_index, Some(2));
+        assert_eq!(found2.total_matches, Some(3));
+
+        // 2. さらに「前へ」-> line 0 (Hit 1) になること
+        let found1 = doc.search_candidates(
+            SearchSpec {
+                query: &query,
+                from: 1,
+                end: doc.line_count(),
+                after_col: Some(0),
+                forward: false,
+            },
+            &|| false,
+        ).unwrap();
+        assert_eq!(found1.hits.len(), 1);
+        assert_eq!(found1.hits[0].line, 0);
+        assert_eq!(found1.current_index, Some(1));
+
+        // 3. 先頭からさらに「前へ」-> 末尾の line 1002 (Hit 3) へラップアラウンドすること
+        let found_wrap_back = doc.search_candidates(
+            SearchSpec {
+                query: &query,
+                from: 0,
+                end: doc.line_count(),
+                after_col: Some(0),
+                forward: false,
+            },
+            &|| false,
+        ).unwrap();
+        assert_eq!(found_wrap_back.hits.len(), 1);
+        assert_eq!(found_wrap_back.hits[0].line, 1002);
+        assert_eq!(found_wrap_back.current_index, Some(3));
+
+        // 4. 末尾から「次へ」-> 先頭 line 0 (Hit 1) へラップアラウンドすること
+        let found_wrap_fwd = doc.search_candidates(
+            SearchSpec {
+                query: &query,
+                from: 1002,
+                end: doc.line_count(),
+                after_col: Some(6),
+                forward: true,
+            },
+            &|| false,
+        ).unwrap();
+        assert!(!found_wrap_fwd.hits.is_empty());
+        assert_eq!(found_wrap_fwd.hits[0].line, 0);
+        assert_eq!(found_wrap_fwd.current_index, Some(1));
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_unified_matcher_literal_and_regex() {
+        let (mut doc, path) = crate::test_utils::disk_doc(
+            "test_matcher",
+            &["alpha 123", "beta 456", "gamma 123"],
+        );
+
+        // 1. LiteralMatcher
+        let lit_query = super::CompiledQuery::compile("123", false, true, '\0').unwrap();
+        let lit_found = doc
+            .search_candidates(
+                super::SearchSpec {
+                    query: &lit_query,
+                    from: 0,
+                    end: doc.line_count(),
+                    after_col: None,
+                    forward: true,
+                },
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(lit_found.hits.len(), 2);
+        assert_eq!(lit_found.hits[0].line, 0);
+        assert_eq!(lit_found.hits[0].start, 6);
+        assert_eq!(lit_found.hits[0].end, 9);
+        assert_eq!(lit_found.hits[1].line, 2);
+
+        // 2. RegexMatcher
+        let re_query = super::CompiledQuery::compile(r"\d{3}", true, true, '\0').unwrap();
+        let re_found = doc
+            .search_candidates(
+                super::SearchSpec {
+                    query: &re_query,
+                    from: 0,
+                    end: doc.line_count(),
+                    after_col: None,
+                    forward: true,
+                },
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(re_found.hits.len(), 3); // 123, 456, 123
+        assert_eq!(re_found.hits[0].line, 0);
+        assert_eq!(re_found.hits[1].line, 1);
+        assert_eq!(re_found.hits[2].line, 2);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_unified_pipeline_dirty_document_mapping() {
+        let (mut doc, path) = crate::test_utils::disk_doc(
+            "test_dirty",
+            &["target 0", "target 1", "target 2", "target 3", "target 4"],
+        );
+
+        // 編集を実行:
+        // 1. 行 2 ("target 2") を削除
+        doc.replace(2, 3, Vec::new(), 1, "", "").unwrap();
+        // 2. 行 1 の直前に "inserted target" を挿入
+        doc.replace(1, 1, vec!["inserted target".to_string()], 2, "", "").unwrap();
+        // 3. 末尾行 ("target 4") を "completely replaced" に置換
+        let last_idx = doc.line_count() - 1; // 末尾行 ("target 4")
+        doc.replace(last_idx, last_idx + 1, vec!["completely replaced".to_string()], 3, "", "").unwrap();
+
+        // 検索実行 (Literal)
+        let query = super::CompiledQuery::compile("target", false, true, '\0').unwrap();
+        let found = doc
+            .search_candidates(
+                super::SearchSpec {
+                    query: &query,
+                    from: 0,
+                    end: doc.line_count(),
+                    after_col: None,
+                    forward: true,
+                },
+                &|| false,
+            )
+            .unwrap();
+
+        assert_eq!(found.total_matches, Some(4));
+        assert_eq!(found.hits.len(), 4);
+        assert_eq!(found.hits[0].line, 0);
+        assert_eq!(found.hits[1].line, 1);
+        assert_eq!(found.hits[2].line, 2);
+        assert_eq!(found.hits[3].line, 3);
+
+        // 二分探索ナビゲーション:
+        // 行 2 (target 1) の位置から「前へ」-> 行 1 (inserted target, index 2)
+        let prev = doc
+            .search_candidates(
+                super::SearchSpec {
+                    query: &query,
+                    from: 2,
+                    end: doc.line_count(),
+                    after_col: Some(0),
+                    forward: false,
+                },
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(prev.hits.len(), 1);
+        assert_eq!(prev.hits[0].line, 1);
+        assert_eq!(prev.current_index, Some(2));
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_search_immediate_cancellation() {
+        let lines = vec!["line with match"; 100];
+        let (mut doc, path) = crate::test_utils::disk_doc("test_cancel", &lines);
+
+        let query = super::CompiledQuery::compile("match", false, true, '\0').unwrap();
+        let cancelled = doc
+            .search_candidates(
+                super::SearchSpec {
+                    query: &query,
+                    from: 0,
+                    end: doc.line_count(),
+                    after_col: None,
+                    forward: true,
+                },
+                &|| true, // 即座にキャンセル
+            )
+            .unwrap();
+
+        assert!(cancelled.cancelled);
+        assert!(cancelled.hits.is_empty());
+
+        std::fs::remove_file(path).ok();
+    }
 }
+
+

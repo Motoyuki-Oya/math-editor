@@ -8,7 +8,9 @@ use web_sys::InputEvent;
 use super::clipboard::{self, Clip};
 use super::model::Did;
 use super::search::{self, Place, SearchOptions};
-use super::session::{changed, edit_sessions, focus, redraw, session, tail_locked, Session};
+use super::session::{
+    changed, edit_sessions, focus, pane_session, redraw, session, tail_locked, Session,
+};
 use super::trigger;
 use crate::structure::ast::Node;
 
@@ -230,21 +232,33 @@ pub fn leave_structure(session: &Rc<RefCell<Session>>) {
     session.borrow_mut().edit(|editor| editor.leave_structure());
 }
 
-/// 現在のキャレット（または選択開始）の行・列位置を返す。
-pub fn current_cursor_pos() -> Option<(usize, usize)> {
-    let session = session()?;
+/// 指定ペインの現在のキャレット（または選択開始）の行・列位置を返す。
+pub fn current_cursor_pos_pane(pane: usize) -> Option<(usize, usize)> {
+    let session = pane_session(pane)?;
     let borrowed = session.borrow();
     let p = borrowed.primary().start();
     Some((p.line, p.col))
 }
 
-/// 現在のキャレット位置が全体の中で何件目のマッチか（1-indexed）を返す。
-/// 巨大ファイル（未着行あり）では行位置の比率から推定する。
-pub fn current_match_number(query: &str, options: SearchOptions, total: usize) -> usize {
+/// 現在のキャレット（または選択開始）の行・列位置を返す。
+#[allow(dead_code)]
+pub fn current_cursor_pos() -> Option<(usize, usize)> {
+    session().and_then(|s| current_cursor_pos_pane(s.borrow().pane))
+}
+
+/// 指定ペインの現在のキャレット位置が全体の中で何件目のマッチか（1-indexed）を返す。
+/// 1,000行以内の小さなファイルは正確に数え、それを超える場合や巨大ファイル（未着行あり）では
+/// 行位置の比率から即座に推定する。
+pub fn current_match_number_pane(
+    pane: usize,
+    query: &str,
+    options: SearchOptions,
+    total: usize,
+) -> usize {
     if total == 0 || query.is_empty() {
         return 0;
     }
-    let Some(session) = session() else {
+    let Some(session) = pane_session(pane) else {
         return 0;
     };
     let borrowed = session.borrow();
@@ -252,20 +266,33 @@ pub fn current_match_number(query: &str, options: SearchOptions, total: usize) -
     let text = doc.text();
     let cur_pos = borrowed.primary().start();
 
-    if text.absent_lines() == 0 {
-        // 全行が手元にある通常ファイル: 正確に数える
+    if text.absent_lines() == 0 && text.line_count() <= 1000 {
+        // 1,000行以内の小規模ファイル: 正確に数える
         let key = search::key_at(cur_pos, borrowed.nested_cursor());
         search::count_matches_up_to(text, query, options, key).clamp(1, total)
     } else {
-        // 巨大ファイル: 行位置の進行度 × 総件数で推定
+        // 行数が多い、または未着行あり: 行位置の進行度 × 総件数で O(1) 推定
         let last_line = text.line_count().saturating_sub(1).max(1);
         let ratio = cur_pos.line as f64 / last_line as f64;
         (ratio * total as f64).round().clamp(1.0, total as f64) as usize
     }
 }
 
-pub fn find_next(query: &str, options: SearchOptions, file_size: Option<usize>) -> bool {
-    let Some(session) = session() else {
+/// 現在のキャレット位置が全体の中で何件目のマッチか（1-indexed）を返す。
+#[allow(dead_code)]
+pub fn current_match_number(query: &str, options: SearchOptions, total: usize) -> usize {
+    session()
+        .map(|s| current_match_number_pane(s.borrow().pane, query, options, total))
+        .unwrap_or(0)
+}
+
+pub fn find_next_pane(
+    pane: usize,
+    query: &str,
+    options: SearchOptions,
+    file_size: Option<usize>,
+) -> bool {
+    let Some(session) = pane_session(pane) else {
         return false;
     };
     let found = {
@@ -281,9 +308,21 @@ pub fn find_next(query: &str, options: SearchOptions, file_size: Option<usize>) 
     true
 }
 
+#[allow(dead_code)]
+pub fn find_next(query: &str, options: SearchOptions, file_size: Option<usize>) -> bool {
+    session()
+        .map(|s| find_next_pane(s.borrow().pane, query, options, file_size))
+        .unwrap_or(false)
+}
+
 /// 手元に届いている行の中だけで次の一致を探し、あればジャンプする。
-pub fn find_next_resident(query: &str, options: SearchOptions, file_size: Option<usize>) -> bool {
-    let Some(session) = session() else {
+pub fn find_next_resident_pane(
+    pane: usize,
+    query: &str,
+    options: SearchOptions,
+    file_size: Option<usize>,
+) -> bool {
+    let Some(session) = pane_session(pane) else {
         return false;
     };
     let found = {
@@ -299,8 +338,20 @@ pub fn find_next_resident(query: &str, options: SearchOptions, file_size: Option
     true
 }
 
-pub fn find_previous(query: &str, options: SearchOptions, file_size: Option<usize>) -> bool {
-    let Some(session) = session() else {
+#[allow(dead_code)]
+pub fn find_next_resident(query: &str, options: SearchOptions, file_size: Option<usize>) -> bool {
+    session()
+        .map(|s| find_next_resident_pane(s.borrow().pane, query, options, file_size))
+        .unwrap_or(false)
+}
+
+pub fn find_previous_pane(
+    pane: usize,
+    query: &str,
+    options: SearchOptions,
+    file_size: Option<usize>,
+) -> bool {
+    let Some(session) = pane_session(pane) else {
         return false;
     };
     let found = {
@@ -316,13 +367,21 @@ pub fn find_previous(query: &str, options: SearchOptions, file_size: Option<usiz
     true
 }
 
+#[allow(dead_code)]
+pub fn find_previous(query: &str, options: SearchOptions, file_size: Option<usize>) -> bool {
+    session()
+        .map(|s| find_previous_pane(s.borrow().pane, query, options, file_size))
+        .unwrap_or(false)
+}
+
 /// 手元に届いている行の中だけで前の一致を探し、あればジャンプする。
-pub fn find_previous_resident(
+pub fn find_previous_resident_pane(
+    pane: usize,
     query: &str,
     options: SearchOptions,
     file_size: Option<usize>,
 ) -> bool {
-    let Some(session) = session() else {
+    let Some(session) = pane_session(pane) else {
         return false;
     };
     let found = {
@@ -336,6 +395,17 @@ pub fn find_previous_resident(
     };
     apply_found_prev(&session, found);
     true
+}
+
+#[allow(dead_code)]
+pub fn find_previous_resident(
+    query: &str,
+    options: SearchOptions,
+    file_size: Option<usize>,
+) -> bool {
+    session()
+        .map(|s| find_previous_resident_pane(s.borrow().pane, query, options, file_size))
+        .unwrap_or(false)
 }
 
 fn apply_found_prev(session: &Rc<RefCell<Session>>, found: search::Found) {
@@ -359,14 +429,15 @@ fn apply_found(session: &Rc<RefCell<Session>>, found: search::Found) {
     redraw(session);
 }
 
-/// 現在の一致があればそれを置換し、直後に次の一致へ進む。
-pub fn replace_and_find_next(
+/// 指定ペインの現在の一致があればそれを置換し、直後に次の一致へ進む。
+pub fn replace_and_find_next_pane(
+    pane: usize,
     query: &str,
     replacement: &str,
     options: SearchOptions,
     file_size: Option<usize>,
 ) -> bool {
-    let Some(session) = session() else {
+    let Some(session) = pane_session(pane) else {
         return false;
     };
     if query.is_empty() {
@@ -413,13 +484,26 @@ pub fn replace_and_find_next(
     if replaced {
         changed(&session);
     }
-    find_next(query, options, file_size)
+    find_next_pane(pane, query, options, file_size)
+}
+
+/// 現在の一致があればそれを置換し、直後に次の一致へ進む。
+#[allow(dead_code)]
+pub fn replace_and_find_next(
+    query: &str,
+    replacement: &str,
+    options: SearchOptions,
+    file_size: Option<usize>,
+) -> bool {
+    session()
+        .map(|s| replace_and_find_next_pane(s.borrow().pane, query, replacement, options, file_size))
+        .unwrap_or(false)
 }
 
 /// 文書の本体の走査で検索を続けるための出発点: 検索キーと行数。
 /// 順方向（次へ）は選択末尾、逆方向（前へ）は選択先頭を出発点とする。
-pub fn far_search_start(forward: bool) -> Option<(search::Key, usize)> {
-    let session = session()?;
+pub fn far_search_start_pane(pane: usize, forward: bool) -> Option<(search::Key, usize)> {
+    let session = pane_session(pane)?;
     let borrowed = session.borrow();
     let doc = borrowed.document.borrow();
     let edge = if forward {
@@ -429,6 +513,12 @@ pub fn far_search_start(forward: bool) -> Option<(search::Key, usize)> {
     };
     let from = search::key_at(edge, borrowed.nested_cursor());
     Some((from, doc.text().line_count()))
+}
+
+/// 文書の本体の走査で検索を続けるための出発点: 検索キーと行数。
+#[allow(dead_code)]
+pub fn far_search_start(forward: bool) -> Option<(search::Key, usize)> {
+    session().and_then(|s| far_search_start_pane(s.borrow().pane, forward))
 }
 
 /// 本体の走査が見つけた素の行の一致へ跳びます。

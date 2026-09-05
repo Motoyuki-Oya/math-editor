@@ -11,10 +11,13 @@ mod session;
 pub mod suggest;
 mod trigger;
 
+#[allow(unused_imports)]
 pub use commands::{
-    annotate, apply_far_match, current_cursor_pos, current_match_number, far_search_start,
-    find_far_in_line, find_next, find_next_resident, find_previous, find_previous_resident,
-    insert_node, replace_all, replace_and_find_next, select_all, FarCopy,
+    annotate, apply_far_match, current_cursor_pos, current_cursor_pos_pane, current_match_number,
+    current_match_number_pane, far_search_start, far_search_start_pane, find_far_in_line,
+    find_next, find_next_pane, find_next_resident, find_next_resident_pane, find_previous,
+    find_previous_pane, find_previous_resident, find_previous_resident_pane, insert_node,
+    replace_all, replace_and_find_next, replace_and_find_next_pane, select_all, FarCopy,
 };
 pub use search::SearchOptions;
 #[allow(unused_imports)]

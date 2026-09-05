@@ -164,19 +164,19 @@ pub(super) fn find(
     options: editor::SearchOptions,
     file_size: Option<usize>,
 ) {
-    if editor::find_next_resident(&query, options, file_size) {
+    if editor::find_next_resident_pane(pane, &query, options, file_size) {
         if let Some(pane_obj) = shell.pane_for_editor(pane) {
             let total = pane_obj.search_status.get_untracked().1;
-            let num = editor::current_match_number(&query, options, total.unwrap_or(0));
+            let num = editor::current_match_number_pane(pane, &query, options, total.unwrap_or(0));
             pane_obj.search_status.set((num, total));
         }
         return;
     }
     if editor::fully_resident() {
-        if editor::find_next(&query, options, file_size) {
+        if editor::find_next_pane(pane, &query, options, file_size) {
             if let Some(pane_obj) = shell.pane_for_editor(pane) {
                 let total = pane_obj.search_status.get_untracked().1;
-                let num = editor::current_match_number(&query, options, total.unwrap_or(0));
+                let num = editor::current_match_number_pane(pane, &query, options, total.unwrap_or(0));
                 pane_obj.search_status.set((num, total));
             }
         }
@@ -207,19 +207,19 @@ pub(super) fn find_previous(
     options: editor::SearchOptions,
     file_size: Option<usize>,
 ) {
-    if editor::find_previous_resident(&query, options, file_size) {
+    if editor::find_previous_resident_pane(pane, &query, options, file_size) {
         if let Some(pane_obj) = shell.pane_for_editor(pane) {
             let total = pane_obj.search_status.get_untracked().1;
-            let num = editor::current_match_number(&query, options, total.unwrap_or(0));
+            let num = editor::current_match_number_pane(pane, &query, options, total.unwrap_or(0));
             pane_obj.search_status.set((num, total));
         }
         return;
     }
     if editor::fully_resident() {
-        if editor::find_previous(&query, options, file_size) {
+        if editor::find_previous_pane(pane, &query, options, file_size) {
             if let Some(pane_obj) = shell.pane_for_editor(pane) {
                 let total = pane_obj.search_status.get_untracked().1;
-                let num = editor::current_match_number(&query, options, total.unwrap_or(0));
+                let num = editor::current_match_number_pane(pane, &query, options, total.unwrap_or(0));
                 pane_obj.search_status.set((num, total));
             }
         }
@@ -405,7 +405,7 @@ async fn find_far(
     forward: bool,
 ) -> Result<Option<bool>, String> {
     use crate::format::document;
-    let Some((after, line_count)) = editor::far_search_start(forward) else {
+    let Some((after, line_count)) = editor::far_search_start_pane(pane, forward) else {
         return Ok(Some(false));
     };
     let start_line = after.0.line;

@@ -445,15 +445,17 @@ impl Source {
         Ok(mmap)
     }
 
-    /// ファイルサイズにかかわらず、mmap 生バイト列に対する直接 SIMD 走査を行い、
+    /// ファイルサイズにかかわらず、mmap 生バイト列に対する直接走査を行い、
     /// 一致箇所のみ O(log N) マーク二分探索で行・列番号を算出する超高速走査。
-    pub(crate) fn fast_mmap_search(
+    /// DocumentMatcher trait により、リテラル・正規表現・bi-gram ブロック刈り込みを完全統一。
+    pub(crate) fn scan_matches(
         &self,
-        query: &str,
-        case_sensitive: bool,
+        matcher: &dyn crate::search::DocumentMatcher,
+        search_index: Option<&crate::search_index::SearchIndex>,
         marker: char,
         limit: usize,
-    ) -> Result<Vec<crate::search::ScanHit>, String> {
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<crate::search::RawHit>, String> {
         let mmap = self.mmap()?;
         let content_offset = self.content_offset as usize;
         if content_offset >= mmap.len() {
@@ -462,41 +464,36 @@ impl Source {
         let haystack = &mmap[content_offset..];
         let encoding = self.encoding;
         let delimiter = self.delimiter();
-        let encoded_query = encoding.encode_str(query);
         let encoded_marker = if marker != '\0' {
             encoding.encode_str(&marker.to_string())
         } else {
             Vec::new()
         };
-        let unit = encoding.unit_bytes();
-        let query_chars = query.chars().count();
+        let fixed_char_count = matcher.fixed_char_count();
 
-        // 1. 生バイト一致位置の抽出
-        let has_casing = query.chars().any(|c| c.is_alphabetic() && (c.to_lowercase().collect::<String>() != c.to_uppercase().collect::<String>()));
-        let raw_positions = if case_sensitive || !has_casing {
-            memchr::memmem::find_iter(haystack, &encoded_query).collect::<Vec<_>>()
-        } else if unit == 1 {
-            crate::search::literal_positions(haystack, &encoded_query, false)
-        } else {
-            return Err("fallback".to_string());
-        };
+        let raw_matches = matcher.find_in_bytes(haystack, encoding);
 
-        let aligned_positions: Vec<usize> = if unit > 1 {
-            raw_positions.into_iter().filter(|&p| p.is_multiple_of(unit)).collect()
-        } else {
-            raw_positions
-        };
-
-        if aligned_positions.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut hits = Vec::with_capacity(aligned_positions.len().min(limit));
-        for at in aligned_positions {
+        let mut hits = Vec::new();
+        let mut count = 0;
+        for (start, end) in raw_matches {
+            count += 1;
+            if count % 256 == 0 && cancelled() {
+                return Ok(Vec::new());
+            }
             if hits.len() >= limit {
                 break;
             }
-            let abs_byte = content_offset + at;
+            let abs_byte = content_offset + start;
+            let abs_end_byte = content_offset + end;
+
+            // bi-gram 索引が存在する場合、ブロック刈り込みをチェック
+            if let Some(index) = search_index {
+                let block = abs_byte / crate::search_index::INDEX_BLOCK_BYTES;
+                if !matcher.may_contain_in_block(index, block) {
+                    continue;
+                }
+            }
+
             let (mark_idx, mark_byte) = self.index.mark_before_offset(abs_byte as u64);
             let mark_byte = mark_byte as usize;
             let slice_to_count = &mmap[mark_byte..abs_byte];
@@ -527,6 +524,14 @@ impl Source {
             let col_slice = &mmap[line_start_byte..line_start_byte + col_bytes];
             let col = encoding.decode_line(col_slice).chars().count();
 
+            // 一致箇所の文字数
+            let match_chars = if let Some(fc) = fixed_char_count {
+                fc
+            } else {
+                let match_slice = &mmap[abs_byte..abs_end_byte];
+                encoding.decode_line(match_slice).chars().count()
+            };
+
             // 行末バイト位置
             let rest_slice = &mmap[abs_byte..];
             let line_end_byte = if delimiter.len() == 1 {
@@ -550,15 +555,32 @@ impl Source {
                 false
             };
 
-            hits.push(crate::search::ScanHit {
-                line,
-                notation: has_marker,
-                start: col,
-                end: col + query_chars,
+            hits.push(crate::search::RawHit {
+                hit: crate::search::ScanHit {
+                    line,
+                    notation: has_marker,
+                    start: col,
+                    end: col + match_chars,
+                },
+                start_byte: abs_byte,
+                end_byte: abs_end_byte,
             });
         }
 
         Ok(hits)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn fast_mmap_search(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+        marker: char,
+        limit: usize,
+    ) -> Result<Vec<crate::search::ScanHit>, String> {
+        let matcher = crate::search::LiteralMatcher::new(query, case_sensitive)?;
+        let raw = self.scan_matches(&matcher, None, marker, limit, &|| false)?;
+        Ok(raw.into_iter().map(|r| r.hit).collect())
     }
 
     pub(crate) fn delimiter(&self) -> Vec<u8> {

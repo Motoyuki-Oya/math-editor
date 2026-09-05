@@ -333,7 +333,6 @@ impl Document {
         };
         self.search_index = search_index;
         self.background_index = bg_index;
-        self.search_cache = None;
         self.source = Some(new_source);
         Ok(scan)
     }
@@ -456,6 +455,15 @@ impl Document {
             col_bytes
         };
         Some((line, col))
+    }
+
+    /// 元ファイル（ベースリビジョン）のバイト区間 [from, to) を現在リビジョンの座標へ写像する。
+    pub(crate) fn map_range_from_base(
+        &self,
+        from: usize,
+        to: usize,
+    ) -> Result<(usize, usize), String> {
+        self.log.map_range(self.log.base_revision, from, to)
     }
 
     /// スナップショット時点で得られた検索結果を、現在のリビジョンにおける座標へ写像する。
@@ -1512,6 +1520,7 @@ impl Document {
 
     /// 通常の大小区別あり文字列検索。ディスクのピースはバイト範囲をまとめて
     /// memmem で探し、編集で入った行も同じ結果形式へ合わせる。
+    #[allow(dead_code)]
     pub(crate) fn scan_literal(
         &mut self,
         query: &str,

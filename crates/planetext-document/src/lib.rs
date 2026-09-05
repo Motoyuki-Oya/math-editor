@@ -697,7 +697,7 @@ impl Application {
         case_sensitive: bool,
     ) -> Result<usize, String> {
         let query = CompiledQuery::compile(&query, regex, case_sensitive, '\0')?;
-        self.with_doc(handle, |doc| doc.estimate_matches(&query.pattern))
+        self.with_doc(handle, |doc| doc.estimate_matches(query.matcher.as_ref()))
     }
 
     pub fn search_index_progress(&self, handle: u64) -> Result<Option<(usize, usize)>, String> {

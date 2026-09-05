@@ -36,16 +36,17 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
     // `forward`: true なら +1（次を検索）、false なら -1（前を検索）。
     let step_match = move |forward: bool| {
         shell.focus_on(pane);
+        let epane = pane.editor_pane();
         let q = query.get_untracked();
         let (pane_cur, pane_total) = pane.search_status.get_untracked();
         let total = pane_total.or_else(|| estimated_count.get_untracked()).unwrap_or(0);
-        let cur_cursor = editor::current_cursor_pos();
+        let cur_cursor = editor::current_cursor_pos_pane(epane);
         let caret_moved = last_matched_pos.get_untracked() != cur_cursor || cur_cursor.is_none();
 
         let base = if pane_cur > 0 {
             pane_cur
         } else if caret_moved {
-            editor::current_match_number(&q, options(), total)
+            editor::current_match_number_pane(epane, &q, options(), total)
         } else {
             current_match.get_untracked()
         };
@@ -89,22 +90,23 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
 
     // 検索ジャンプの後に呼ぶ: ジャンプ先をキャレット移動検知用に記録する。
     let record_pos = move || {
-        last_matched_pos.set(editor::current_cursor_pos());
+        last_matched_pos.set(editor::current_cursor_pos_pane(pane.editor_pane()));
     };
 
     // on:focus で現在位置を同期する。
     let sync_on_focus = move || {
         shell.focus_on(pane);
+        let epane = pane.editor_pane();
         let q = query.get_untracked();
         let (pane_cur, pane_total) = pane.search_status.get_untracked();
         let total = pane_total.or_else(|| estimated_count.get_untracked()).unwrap_or(0);
         let num = if pane_cur > 0 {
             pane_cur
         } else {
-            editor::current_match_number(&q, options(), total)
+            editor::current_match_number_pane(epane, &q, options(), total)
         };
         current_match.set(num);
-        last_matched_pos.set(editor::current_cursor_pos());
+        last_matched_pos.set(editor::current_cursor_pos_pane(epane));
     };
 
     let close_bar = move || {
@@ -285,7 +287,13 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
                                     step_match(true);
                                     spawn_local(async move {
                                         let size = file_size_for(pane).await;
-                                        editor::replace_and_find_next(&query, &replacement, options, size);
+                                        editor::replace_and_find_next_pane(
+                                            pane.editor_pane(),
+                                            &query,
+                                            &replacement,
+                                            options,
+                                            size,
+                                        );
                                         record_pos();
                                     });
                                 }
@@ -303,7 +311,13 @@ pub fn FindBar(shell: Shell, pane: Pane) -> impl IntoView {
                                 step_match(true);
                                 spawn_local(async move {
                                     let size = file_size_for(pane).await;
-                                    editor::replace_and_find_next(&query, &replacement, options, size);
+                                    editor::replace_and_find_next_pane(
+                                        pane.editor_pane(),
+                                        &query,
+                                        &replacement,
+                                        options,
+                                        size,
+                                    );
                                     record_pos();
                                 });
                             }
