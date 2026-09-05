@@ -40,6 +40,7 @@ pub(crate) struct Document {
     background_index: Option<BackgroundIndex>,
     pending_redo_diffs: Vec<DraftDiff>,
     pub(crate) search_cache: Option<SearchHitCache>,
+    pub(crate) search_progress: Arc<crate::search::SearchProgressTracker>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -211,6 +212,7 @@ impl Document {
                 background_index,
                 pending_redo_diffs: Vec::new(),
                 search_cache: None,
+                search_progress: Arc::new(crate::search::SearchProgressTracker::default()),
             },
             scan,
         ))
@@ -252,6 +254,7 @@ impl Document {
             background_index: None,
             pending_redo_diffs: Vec::new(),
             search_cache: None,
+            search_progress: Arc::new(crate::search::SearchProgressTracker::default()),
         }
     }
 
@@ -401,6 +404,7 @@ impl Document {
             background_index: None,
             pending_redo_diffs: Vec::new(),
             search_cache: self.search_cache.clone(),
+            search_progress: self.search_progress.clone(),
         };
         snapshot.confirm_scan_if_done();
         Ok(snapshot)
@@ -519,6 +523,31 @@ impl Document {
             background_index: None,
             pending_redo_diffs: Vec::new(),
             search_cache: None,
+            search_progress: Arc::new(crate::search::SearchProgressTracker::default()),
+        }
+    }
+
+    pub(crate) fn search_progress(&self) -> crate::search::SearchProgress {
+        let p = &self.search_progress;
+        let generation = p.generation.load(std::sync::atomic::Ordering::Relaxed);
+        let scanned_bytes = p.scanned_bytes.load(std::sync::atomic::Ordering::Relaxed);
+        let total_bytes = p.total_bytes.load(std::sync::atomic::Ordering::Relaxed);
+        let matches_found = p.matches_found.load(std::sync::atomic::Ordering::Relaxed);
+        let done = p.done.load(std::sync::atomic::Ordering::Relaxed);
+        let estimated_total = if done {
+            matches_found
+        } else if scanned_bytes > 0 && total_bytes > 0 {
+            ((matches_found as u128 * total_bytes as u128) / scanned_bytes as u128) as usize
+        } else {
+            matches_found
+        };
+        crate::search::SearchProgress {
+            generation,
+            scanned_bytes,
+            total_bytes,
+            matches_found,
+            estimated_total,
+            done,
         }
     }
 

@@ -559,6 +559,25 @@ pub async fn estimate_matches(
     serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
 }
 
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchProgress {
+    pub generation: u64,
+    pub scanned_bytes: usize,
+    pub total_bytes: usize,
+    pub matches_found: usize,
+    pub estimated_total: usize,
+    pub done: bool,
+}
+
+pub async fn search_progress(handle: u64) -> Result<Option<SearchProgress>, String> {
+    #[derive(Serialize)]
+    struct Args {
+        handle: u64,
+    }
+    let value = call("search_progress", Args { handle }).await?;
+    serde_wasm_bindgen::from_value(value).map_err(|e| e.to_string())
+}
+
 /// 文書の本体から下書きを書きます。
 pub async fn save_draft(handle: u64, id: usize, path: Option<&str>) {
     #[derive(Serialize)]

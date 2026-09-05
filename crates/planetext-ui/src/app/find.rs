@@ -385,25 +385,51 @@ fn update_preview(
             return;
         }
 
-        // バックグラウンドで全文並列走査を実行し、確定総数へ随時更新する。
-        let page = crate::framework::search_document(
-            handle,
-            &query,
-            options.regex,
-            options.case_sensitive,
-            crate::format::document::NOTATION_MARK,
-            0,
-            0,
-            None,
-            true,
-        )
-        .await;
-        if generation.get_untracked() == current {
-            if let Ok(page) = page {
-                if !page.cancelled {
-                    if let Some(total) = page.total_matches {
-                        estimated_count.set(Some(total));
+        // バックグラウンドで全文並列走査を実行
+        let query_bg = query.clone();
+        let finished = std::rc::Rc::new(std::cell::Cell::new(false));
+        let finished_poller = finished.clone();
+
+        spawn_local(async move {
+            let page = crate::framework::search_document(
+                handle,
+                &query_bg,
+                options.regex,
+                options.case_sensitive,
+                crate::format::document::NOTATION_MARK,
+                0,
+                0,
+                None,
+                true,
+            )
+            .await;
+            finished.set(true);
+            if generation.get_untracked() == current {
+                if let Ok(page) = page {
+                    if !page.cancelled {
+                        if let Some(total) = page.total_matches {
+                            estimated_count.set(Some(total));
+                        }
                     }
+                }
+            }
+        });
+
+        // 走査完了まで 0.5秒（500ms）ごとに進捗をポーリングして画面の推測値を随時更新する
+        loop {
+            tick(500).await;
+            if generation.get_untracked() != current || finished_poller.get() {
+                break;
+            }
+            if let Ok(Some(prog)) = crate::framework::search_progress(handle).await {
+                if generation.get_untracked() != current || finished_poller.get() {
+                    break;
+                }
+                if prog.done {
+                    estimated_count.set(Some(prog.matches_found));
+                    break;
+                } else if prog.scanned_bytes > 0 {
+                    estimated_count.set(Some(prog.estimated_total));
                 }
             }
         }

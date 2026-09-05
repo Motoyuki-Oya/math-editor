@@ -545,6 +545,7 @@ impl Source {
         marker: char,
         limit: usize,
         cancelled: &(dyn Fn() -> bool + Send + Sync),
+        progress: Option<&crate::search::SearchProgressTracker>,
     ) -> Result<Vec<crate::search::RawHit>, String> {
         let mmap = self.mmap()?;
         let content_offset = self.content_offset as usize;
@@ -562,13 +563,23 @@ impl Source {
         let fixed_char_count = matcher.fixed_char_count();
         let marks = self.index.state.lock().unwrap().marks.clone();
 
+        if let Some(p) = progress {
+            p.total_bytes.store(haystack.len(), std::sync::atomic::Ordering::Relaxed);
+            p.scanned_bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+            p.matches_found.store(0, std::sync::atomic::Ordering::Relaxed);
+            p.done.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        // リテラル検索はメモリ帯域競合を防ぐため最大2スレッド、正規表現はCPUバウンドのため最大4スレッド
+        let is_regex = matcher.literal().is_none();
+        let default_max = if is_regex { 4 } else { 2 };
         let override_threads = std::env::var("PLANETEXT_SEARCH_THREADS")
             .ok()
             .and_then(|s| s.parse::<usize>().ok());
         let available = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        let num_threads = override_threads.unwrap_or_else(|| available.clamp(2, 4));
+        let num_threads = override_threads.unwrap_or_else(|| available.clamp(1, default_max));
 
         if haystack.len() < PARALLEL_SEARCH_THRESHOLD || num_threads <= 1 {
             // シングルスレッド走査
@@ -577,8 +588,14 @@ impl Source {
             let mut count = 0;
             for (start, end) in raw_matches {
                 count += 1;
-                if count % 256 == 0 && cancelled() {
-                    return Ok(Vec::new());
+                if count % 256 == 0 {
+                    if cancelled() {
+                        return Ok(Vec::new());
+                    }
+                    if let Some(p) = progress {
+                        p.scanned_bytes.store(start, std::sync::atomic::Ordering::Relaxed);
+                        p.matches_found.store(hits.len(), std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
                 if hits.len() >= limit {
                     break;
@@ -605,10 +622,15 @@ impl Source {
                     &encoded_marker,
                 ));
             }
+            if let Some(p) = progress {
+                p.scanned_bytes.store(haystack.len(), std::sync::atomic::Ordering::Relaxed);
+                p.matches_found.store(hits.len(), std::sync::atomic::Ordering::Relaxed);
+                p.done.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             return Ok(hits);
         }
 
-        // 2〜4スレッド並列走査
+        // マルチスレッド並列走査
         let chunk_size = haystack.len() / num_threads;
         let mut chunk_ranges: Vec<(usize, usize)> = Vec::with_capacity(num_threads);
         let mut start = 0;
@@ -647,43 +669,76 @@ impl Source {
                 let delim_ref = &delimiter;
                 let enc_marker_ref = &encoded_marker;
                 let mmap_ref = &mmap;
+                let progress_ref = progress;
 
                 handles.push(s.spawn(move || {
-                    let raw_matches = matcher.find_in_bytes(chunk_slice, encoding);
+                    const SUB_CHUNK_SIZE: usize = 2 * 1024 * 1024; // 2MB サブブロックで行境界分割
                     let mut chunk_hits = Vec::new();
-                    let mut count = 0;
-                    for (rel_start, rel_end) in raw_matches {
-                        count += 1;
-                        if count % 256 == 0 {
-                            if cancel_ref.load(std::sync::atomic::Ordering::Relaxed) || cancelled() {
-                                cancel_ref.store(true, std::sync::atomic::Ordering::Relaxed);
-                                return Vec::new();
-                            }
+                    let mut sub_start = 0;
+
+                    while sub_start < chunk_slice.len() {
+                        if cancel_ref.load(std::sync::atomic::Ordering::Relaxed) || cancelled() {
+                            cancel_ref.store(true, std::sync::atomic::Ordering::Relaxed);
+                            return Vec::new();
                         }
+                        let ideal_sub_end = (sub_start + SUB_CHUNK_SIZE).min(chunk_slice.len());
+                        let sub_end = if ideal_sub_end < chunk_slice.len() {
+                            if delim_ref.len() == 1 {
+                                memchr::memchr(delim_ref[0], &chunk_slice[ideal_sub_end..])
+                                    .map(|p| ideal_sub_end + p + 1)
+                                    .unwrap_or(chunk_slice.len())
+                            } else {
+                                memchr::memmem::find(&chunk_slice[ideal_sub_end..], delim_ref)
+                                    .map(|p| ideal_sub_end + p + delim_ref.len())
+                                    .unwrap_or(chunk_slice.len())
+                            }
+                        } else {
+                            chunk_slice.len()
+                        };
+
+                        let sub_slice = &chunk_slice[sub_start..sub_end];
+                        let sub_offset = chunk_offset + sub_start;
+                        let sub_matches = matcher.find_in_bytes(sub_slice, encoding);
+                        let mut sub_hit_count = 0;
+
+                        for (rel_start, rel_end) in sub_matches {
+                            if chunk_hits.len() >= limit {
+                                break;
+                            }
+                            let abs_byte = sub_offset + rel_start;
+                            let abs_end_byte = sub_offset + rel_end;
+
+                            if let Some(index) = search_index {
+                                let block = abs_byte / crate::search_index::INDEX_BLOCK_BYTES;
+                                if !matcher.may_contain_in_block(index, block) {
+                                    continue;
+                                }
+                            }
+
+                            chunk_hits.push(resolve_raw_hit_helper(
+                                abs_byte,
+                                abs_end_byte,
+                                mmap_ref,
+                                marks_ref,
+                                delim_ref,
+                                encoding,
+                                fixed_char_count,
+                                enc_marker_ref,
+                            ));
+                            sub_hit_count += 1;
+                        }
+
+                        if let Some(p) = progress_ref {
+                            p.scanned_bytes.fetch_add(sub_slice.len(), std::sync::atomic::Ordering::Relaxed);
+                            p.matches_found.fetch_add(sub_hit_count, std::sync::atomic::Ordering::Relaxed);
+                        }
+
                         if chunk_hits.len() >= limit {
                             break;
                         }
-                        let abs_byte = chunk_offset + rel_start;
-                        let abs_end_byte = chunk_offset + rel_end;
-
-                        if let Some(index) = search_index {
-                            let block = abs_byte / crate::search_index::INDEX_BLOCK_BYTES;
-                            if !matcher.may_contain_in_block(index, block) {
-                                continue;
-                            }
-                        }
-
-                        chunk_hits.push(resolve_raw_hit_helper(
-                            abs_byte,
-                            abs_end_byte,
-                            mmap_ref,
-                            marks_ref,
-                            delim_ref,
-                            encoding,
-                            fixed_char_count,
-                            enc_marker_ref,
-                        ));
+                        sub_start = sub_end;
                     }
+
                     chunk_hits
                 }));
             }
@@ -706,6 +761,11 @@ impl Source {
                 break;
             }
         }
+        if let Some(p) = progress {
+            p.scanned_bytes.store(haystack.len(), std::sync::atomic::Ordering::Relaxed);
+            p.matches_found.store(total_hits.len(), std::sync::atomic::Ordering::Relaxed);
+            p.done.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         Ok(total_hits)
     }
 
@@ -718,7 +778,7 @@ impl Source {
         limit: usize,
     ) -> Result<Vec<crate::search::ScanHit>, String> {
         let matcher = crate::search::LiteralMatcher::new(query, case_sensitive)?;
-        let raw = self.scan_matches(&matcher, None, marker, limit, &|| false)?;
+        let raw = self.scan_matches(&matcher, None, marker, limit, &|| false, None)?;
         Ok(raw.into_iter().map(|r| r.hit).collect())
     }
 

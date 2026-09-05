@@ -64,6 +64,25 @@ pub(crate) struct SearchHitCache {
     pub(crate) fully_scanned: bool,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct SearchProgressTracker {
+    pub(crate) generation: std::sync::atomic::AtomicU64,
+    pub(crate) scanned_bytes: std::sync::atomic::AtomicUsize,
+    pub(crate) total_bytes: std::sync::atomic::AtomicUsize,
+    pub(crate) matches_found: std::sync::atomic::AtomicUsize,
+    pub(crate) done: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SearchProgress {
+    pub generation: u64,
+    pub scanned_bytes: usize,
+    pub total_bytes: usize,
+    pub matches_found: usize,
+    pub estimated_total: usize,
+    pub done: bool,
+}
+
 
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
@@ -840,6 +859,7 @@ impl Document {
                 marker,
                 usize::MAX,
                 cancelled,
+                Some(&self.search_progress),
             )?;
             if is_clean {
                 all_hits = raw_hits.into_iter().map(|r| r.hit).collect();
@@ -2061,6 +2081,46 @@ mod tests {
 
         assert!(cancelled.cancelled);
         assert!(cancelled.hits.is_empty());
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn test_search_progress_tracking() {
+        let lines: Vec<String> = (0..10_000)
+            .map(|i| {
+                if i % 100 == 0 {
+                    format!("line {i} with match target_token")
+                } else {
+                    format!("ordinary content line {i}")
+                }
+            })
+            .collect();
+        let line_refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        let (mut doc, path) = crate::test_utils::disk_doc("test_progress", &line_refs);
+
+        let query = super::CompiledQuery::compile("target_token", false, true, '\0').unwrap();
+        let candidates = doc
+            .search_candidates(
+                super::SearchSpec {
+                    query: &query,
+                    from: 0,
+                    end: doc.line_count(),
+                    after_col: None,
+                    forward: true,
+                },
+                &|| false,
+            )
+            .unwrap();
+
+        assert_eq!(candidates.hits.len(), 64);
+        assert_eq!(candidates.total_matches, Some(100));
+
+        let progress = doc.search_progress();
+        assert!(progress.done);
+        assert_eq!(progress.matches_found, 100);
+        assert_eq!(progress.estimated_total, 100);
+        assert_eq!(progress.scanned_bytes, progress.total_bytes);
 
         std::fs::remove_file(path).ok();
     }

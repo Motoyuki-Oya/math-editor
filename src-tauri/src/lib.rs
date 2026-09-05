@@ -313,6 +313,15 @@ async fn estimate_matches(
     application.estimate_matches(handle, query, regex, case_sensitive)
 }
 
+/// 検索の進捗（走査済みバイト数・発見件数・最新の推測値・完了状態）を返します。
+#[tauri::command(rename_all = "snake_case")]
+async fn search_progress(
+    application: State<'_, Application>,
+    handle: u64,
+) -> Result<Option<planetext_document::SearchProgress>, String> {
+    application.search_progress(handle)
+}
+
 /// 範囲内で `needle` を含む行。frontend が読み替えの必要な行を探すのに使います。
 /// 何の文字に意味があるか（保存形式）はこちらでは知りません。
 #[tauri::command]
@@ -760,6 +769,7 @@ pub fn run() {
             search_document,
             cancel_search,
             estimate_matches,
+            search_progress,
             set_dirty,
             frontend_ready,
             confirm_discard,

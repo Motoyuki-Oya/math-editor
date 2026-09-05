@@ -15,7 +15,7 @@ mod test_utils;
 pub use transaction::FileTransaction;
 
 use document::Document;
-pub use search::{CompiledQuery, ScanHit};
+pub use search::{CompiledQuery, ScanHit, SearchProgress};
 use search::SearchSpec;
 use source::{FileEncoding, LineEnding, ScanIndex};
 use std::collections::HashMap;
@@ -702,6 +702,10 @@ impl Application {
 
     pub fn search_index_progress(&self, handle: u64) -> Result<Option<(usize, usize)>, String> {
         self.with_doc(handle, |doc| Ok(doc.search_index_progress()))
+    }
+
+    pub fn search_progress(&self, handle: u64) -> Result<Option<SearchProgress>, String> {
+        self.with_doc(handle, |doc| Ok(Some(doc.search_progress())))
     }
 
     #[allow(clippy::too_many_arguments)]
