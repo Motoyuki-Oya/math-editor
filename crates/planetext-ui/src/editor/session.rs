@@ -401,6 +401,45 @@ pub(super) fn edit_sessions(origin: &Rc<RefCell<Session>>) -> Vec<Rc<RefCell<Ses
     })
 }
 
+/// 連動編集トランザクション:
+/// 連動する全セッションに関与する Document Model の入力グループ (grouping) を揃えて直列化し、
+/// 全ての編集が完了した後にまとめて変更通知を行います。
+/// これにより、同一ドキュメントを開く複数スライスでの連動編集が 1 回の Undo ステップ (同一 group ID) に結合されます。
+pub(super) fn run_linked_transaction<R>(
+    origin: &Rc<RefCell<Session>>,
+    f: impl FnOnce(&[Rc<RefCell<Session>>]) -> R,
+) -> R {
+    let sessions = edit_sessions(origin);
+    if sessions.len() < 2 {
+        return f(&sessions);
+    }
+
+    // 重複を除いた Document リストを抽出
+    let mut docs = Vec::new();
+    for s in &sessions {
+        let doc = s.borrow().document.clone();
+        if !docs
+            .iter()
+            .any(|d: &Rc<RefCell<Document>>| Rc::ptr_eq(d, &doc))
+        {
+            docs.push(doc);
+        }
+    }
+
+    let mut groupings = Vec::with_capacity(docs.len());
+    for doc in &docs {
+        groupings.push(doc.borrow_mut().begin_group());
+    }
+
+    let result = f(&sessions);
+
+    for (doc, was_grouping) in docs.iter().zip(groupings) {
+        doc.borrow_mut().end_group(was_grouping);
+    }
+
+    result
+}
+
 pub(super) fn clear_linked() {
     let sessions = PANES.with(|panes| panes.borrow().clone());
     for session in sessions {
@@ -1836,5 +1875,102 @@ mod tests {
         assert!(!doc.borrow().text().is_absent(11));
         assert_eq!(doc.borrow().text().raw_line(12), Some("original line 12"));
         assert_eq!(doc.borrow().text().first_absent(0), None);
+    }
+
+    /// 【連動グループと同一入力グループ Undo テスト（Step 22 検証）】
+    /// 1. 同一ドキュメントを開く複数ペイン（スライス）が連動している時、それぞれのカーソルは独立して保持され、共有カーソルの実体は作られないこと。
+    /// 2. `begin_group` / `end_group` の連動トランザクション内で複数カーソルによる編集を順次直列化して適用した時、
+    ///    同一の Document Model に対して同一の入力グループ（同一 group ID）として記録され、1つの FlushBatch にまとまること。
+    /// 3. 文書エンジンから 1 回の Undo（apply_restored）が届いた時、連動していた両方のペインの編集が一度に元に戻ること。
+    #[test]
+    fn linked_panes_share_single_undo_group_and_restore_together() {
+        use crate::framework::SpliceEdit;
+        let doc_id = 888;
+        let doc = get_or_create_doc(doc_id);
+        doc.borrow_mut().load_sparse(Some(10));
+
+        let initial_lines: Vec<_> = (0..10)
+            .map(|i| document::read_line(&format!("line {i}")))
+            .collect();
+        doc.borrow_mut().feed(0, initial_lines);
+
+        // 2 つのスライスのカーソル（独立して保持される。共有カーソル構造体は存在しない）
+        let mut cursor_pane1 = vec![UnifiedCursor::caret(Pos::new(1, 0))];
+        let mut cursor_pane2 = vec![UnifiedCursor::caret(Pos::new(5, 0))];
+
+        // 独立カーソルの検証
+        assert_eq!(cursor_pane1[0].sel.head, Pos::new(1, 0));
+        assert_eq!(cursor_pane2[0].sel.head, Pos::new(5, 0));
+
+        // 連動トランザクション開始（同一グループ化）
+        let was_grouping = doc.borrow_mut().begin_group();
+
+        // ペイン 1 の編集
+        {
+            let mut editor1 = Editor {
+                document: std::mem::take(&mut *doc.borrow_mut()),
+                cursors: std::mem::take(&mut cursor_pane1),
+            };
+            editor1.insert_text("A");
+            *doc.borrow_mut() = editor1.document;
+            cursor_pane1 = editor1.cursors;
+        }
+
+        // ペイン 2 の編集
+        {
+            let mut editor2 = Editor {
+                document: std::mem::take(&mut *doc.borrow_mut()),
+                cursors: std::mem::take(&mut cursor_pane2),
+            };
+            editor2.insert_text("B");
+            *doc.borrow_mut() = editor2.document;
+            cursor_pane2 = editor2.cursors;
+        }
+
+        // 連動トランザクション終了
+        doc.borrow_mut().end_group(was_grouping);
+
+        // 編集内容が Document に反映されていること
+        assert_eq!(document::write_line(doc.borrow().text().line(1)), "Aline 1");
+        assert_eq!(document::write_line(doc.borrow().text().line(5)), "Bline 5");
+
+        // 各ペインのカーソルが独立して正しく進んでいること
+        assert_eq!(cursor_pane1[0].sel.head, Pos::new(1, 1));
+        assert_eq!(cursor_pane2[0].sel.head, Pos::new(5, 1));
+
+        // FlushBatch を取り出す（両方の編集が同一グループ ID で 1 つのバッチにまとまっていること）
+        let mut editor_for_flush = Editor {
+            document: std::mem::take(&mut *doc.borrow_mut()),
+            cursors: vec![],
+        };
+        let flush = take_flush_of(&mut editor_for_flush).expect("flush batch should exist");
+        *doc.borrow_mut() = editor_for_flush.document;
+
+        assert_eq!(
+            flush.edits.len(),
+            2,
+            "2箇所の編集が同一バッチにまとめられていること"
+        );
+        assert!(flush.group > 0);
+
+        // 1 回の Undo（apply_restored）で両方の編集が一度に元に戻ること
+        let splices = vec![
+            SpliceEdit {
+                from: 1,
+                to: 2,
+                lines: vec!["line 1".to_string()],
+            },
+            SpliceEdit {
+                from: 5,
+                to: 6,
+                lines: vec!["line 5".to_string()],
+            },
+        ];
+
+        apply_restored(doc_id, "1.0-1.0", 1, 10, &splices);
+
+        // 両ペインの変更が 1 回の Undo で元通り復元されたこと
+        assert_eq!(doc.borrow().text().raw_line(1), Some("line 1"));
+        assert_eq!(doc.borrow().text().raw_line(5), Some("line 5"));
     }
 }

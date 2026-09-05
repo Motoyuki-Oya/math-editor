@@ -62,6 +62,20 @@ impl Document {
         self.modified_lines.iter().copied().collect()
     }
 
+    pub fn begin_group(&mut self) -> bool {
+        let was_grouping = self.recorder.grouping;
+        self.recorder.grouping = true;
+        was_grouping
+    }
+
+    pub fn end_group(&mut self, was_grouping: bool) {
+        self.recorder.grouping = was_grouping;
+        if !was_grouping {
+            self.recorder.grouped = false;
+        }
+        self.recorder.cut();
+    }
+
     pub fn clear_modified(&mut self) {
         self.modified_lines.clear();
     }

@@ -165,13 +165,23 @@ fn apply_linked_edit(
     if sessions.len() < 2 {
         return false;
     }
-    for session in sessions {
-        let did = session.borrow_mut().edit(&edit);
-        match did {
-            Did::Changed => changed(&session),
-            Did::Moved => redraw(&session),
-            Did::Nothing => {}
+    session::run_linked_transaction(origin, |sessions| {
+        let mut any_changed = Vec::new();
+        let mut any_moved = Vec::new();
+        for session in sessions {
+            let did = session.borrow_mut().edit(&edit);
+            match did {
+                Did::Changed => any_changed.push(session.clone()),
+                Did::Moved => any_moved.push(session.clone()),
+                Did::Nothing => {}
+            }
         }
-    }
+        for s in any_changed {
+            changed(&s);
+        }
+        for s in any_moved {
+            redraw(&s);
+        }
+    });
     true
 }

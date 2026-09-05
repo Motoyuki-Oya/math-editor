@@ -9,7 +9,7 @@ use super::clipboard::{self, Clip};
 use super::model::Did;
 use super::search::{self, Place, SearchOptions};
 use super::session::{
-    changed, edit_sessions, focus, pane_session, redraw, session, tail_locked, Session,
+    changed, focus, pane_session, redraw, run_linked_transaction, session, tail_locked, Session,
 };
 use super::trigger;
 use crate::structure::ast::Node;
@@ -66,18 +66,27 @@ fn composition_text(event_text: &str, textarea_text: String) -> String {
 }
 
 pub fn insert_text(session: &Rc<RefCell<Session>>, text: &str) {
-    for target in edit_sessions(session) {
-        insert_text_one(&target, text);
+    let changed_targets = run_linked_transaction(session, |targets| {
+        let mut changed_list = Vec::new();
+        for target in targets {
+            if insert_text_core(target, text) {
+                changed_list.push(target.clone());
+            }
+        }
+        changed_list
+    });
+    for target in changed_targets {
+        changed(&target);
     }
 }
 
-fn insert_text_one(session: &Rc<RefCell<Session>>, text: &str) {
+fn insert_text_core(session: &Rc<RefCell<Session>>, text: &str) -> bool {
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
     // 単一の文字で構造を開始することもできます。
     let mut chars = text.chars();
     if let (Some(c), None) = (chars.next(), chars.next()) {
         if trigger::type_char(session, c) {
-            return;
+            return false;
         }
     }
     // ドキュメントからコピーされた部分は、元の形状で戻ります。それ以外のテキストは、そのままの文字です。
@@ -88,7 +97,7 @@ fn insert_text_one(session: &Rc<RefCell<Session>>, text: &str) {
             Some(clip) => editor.insert_clip(&clip),
             None => editor.insert_text_with_mode(&text, overwrite),
         });
-    changed(session);
+    true
 }
 
 /// パレットから構造をキャレット位置へ配置し、その編集スロットへ入ります。
