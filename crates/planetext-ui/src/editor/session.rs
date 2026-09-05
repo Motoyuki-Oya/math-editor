@@ -105,6 +105,10 @@ impl Session {
 /// ドキュメントが変更されたペインで呼び出されます。呼び出し中に再び変更が起きてもよいよう、台帳の借用の外で呼べる共有の参照で持ちます。
 type OnChange = Rc<dyn Fn(usize)>;
 pub type OnRedraw = Rc<dyn Fn(usize)>;
+type OnFocus = Rc<dyn Fn(usize)>;
+type OnMissing = Rc<dyn Fn(usize, std::ops::Range<usize>)>;
+type OnTail = Rc<dyn Fn(usize)>;
+type OnFarCopy = Rc<dyn Fn(usize, super::commands::FarCopy)>;
 
 thread_local! {
     /// 全ての開いているドキュメントの Model (M)。タブID（doc_id）ごとに 1 つ保持される。
@@ -119,6 +123,10 @@ thread_local! {
     static NEXT_PANE: Cell<usize> = const { Cell::new(0) };
     static ON_CHANGE: RefCell<Option<OnChange>> = const { RefCell::new(None) };
     static ON_REDRAW: RefCell<Vec<OnRedraw>> = const { RefCell::new(Vec::new()) };
+    static ON_FOCUS: RefCell<Option<OnFocus>> = const { RefCell::new(None) };
+    static ON_MISSING: RefCell<Option<OnMissing>> = const { RefCell::new(None) };
+    static ON_TAIL: RefCell<Option<OnTail>> = const { RefCell::new(None) };
+    static ON_FAR_COPY: RefCell<Option<OnFarCopy>> = const { RefCell::new(None) };
 }
 
 pub fn add_on_redraw(callback: OnRedraw) {
@@ -266,6 +274,10 @@ pub fn init(root: &HtmlElement) -> Option<usize> {
     Some(pane)
 }
 
+pub fn pane_count() -> usize {
+    PANES.with(|panes| panes.borrow().len())
+}
+
 pub fn toggle_overwrite_mode(session: &Rc<RefCell<Session>>) -> bool {
     let new_mode = {
         let mut borrowed = session.borrow_mut();
@@ -314,13 +326,6 @@ pub fn close_pane(pane: usize) {
             focus_pane(pane);
         }
     }
-}
-
-/// フォーカスが変わった際にアプリケーション側へ通知します。
-type OnFocus = Rc<dyn Fn(usize)>;
-
-thread_local! {
-    static ON_FOCUS: RefCell<Option<OnFocus>> = const { RefCell::new(None) };
 }
 
 pub fn set_on_focus(callback: OnFocus) {
@@ -410,23 +415,8 @@ pub fn set_on_change(callback: OnChange) {
     ON_CHANGE.with(|slot| *slot.borrow_mut() = Some(callback));
 }
 
-/// 画面に入ったのにまだ届いていない行の範囲をアプリへ知らせます。
-/// 取り寄せ自体は文書の取っ手を知っているアプリの仕事です。
-type OnMissing = Rc<dyn Fn(usize, std::ops::Range<usize>)>;
-
-thread_local! {
-    static ON_MISSING: RefCell<Option<OnMissing>> = const { RefCell::new(None) };
-}
-
 pub fn set_on_missing(callback: OnMissing) {
     ON_MISSING.with(|slot| *slot.borrow_mut() = Some(callback));
-}
-
-/// 行数未確定中のCtrl+Endが、EOF基準の末尾読みをアプリへ頼む入口。
-type OnTail = Rc<dyn Fn(usize)>;
-
-thread_local! {
-    static ON_TAIL: RefCell<Option<OnTail>> = const { RefCell::new(None) };
 }
 
 pub fn set_on_tail(callback: OnTail) {
@@ -447,13 +437,6 @@ pub(super) fn tail_locked(session: &Rc<RefCell<Session>>) -> bool {
             let line = borrowed.primary().head.line;
             line >= *from && line < *from + lines.len()
         })
-}
-
-/// まだ届いていない行を含む選択のコピーを、文書の本体を知るアプリへ頼みます。
-type OnFarCopy = Rc<dyn Fn(usize, super::commands::FarCopy)>;
-
-thread_local! {
-    static ON_FAR_COPY: RefCell<Option<OnFarCopy>> = const { RefCell::new(None) };
 }
 
 pub fn set_on_far_copy(callback: OnFarCopy) {

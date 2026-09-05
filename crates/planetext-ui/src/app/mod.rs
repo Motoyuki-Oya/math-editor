@@ -26,9 +26,10 @@ use crate::settings;
 pub fn App() -> impl IntoView {
     let shell = Shell {
         root: StoredValue::new_local(Owner::current().expect("the app has an owner")),
-        panes: RwSignal::new(vec![Pane::new(0)]),
+        panes: RwSignal::new(vec![Pane::new(0, 1)]),
         focused: RwSignal::new(0),
         next_key: RwSignal::new(1),
+        next_tab_id: RwSignal::new(2),
         status: RwSignal::new(String::new()),
         stats: RwSignal::new(editor::DocStats::default()),
         searching: RwSignal::new(false),

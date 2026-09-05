@@ -18,17 +18,6 @@ async fn create_document_from_draft(contents: String) -> Result<framework::Opene
     framework::create_document_from_draft(&lines).await
 }
 
-thread_local! {
-    /// 次のタブに名前を付けます。タブの番号はそのドラフトの名前でもあるため、タブ自体よりも存続する必要があります。復元されたドラフトではその番号が保持されます。
-    static NEXT_ID: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
-}
-
-fn next_id() -> usize {
-    let id = NEXT_ID.get();
-    NEXT_ID.set(id + 1);
-    id
-}
-
 /// ワークスペース全体の保存・復元用データ構造
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub(super) struct SessionState {
@@ -74,9 +63,9 @@ pub(super) struct Tab {
 }
 
 impl Tab {
-    pub(super) fn new() -> Tab {
+    pub(super) fn new(id: usize) -> Tab {
         Tab {
-            id: RwSignal::new(next_id()),
+            id: RwSignal::new(id),
             untitled_num: RwSignal::new(Some(1)),
             path: RwSignal::new(None),
             dirty: RwSignal::new(false),
@@ -163,8 +152,8 @@ pub(super) struct Pane {
 }
 
 impl Pane {
-    pub(super) fn new(key: usize) -> Pane {
-        let tab = Tab::new();
+    pub(super) fn new(key: usize, tab_id: usize) -> Pane {
+        let tab = Tab::new(tab_id);
         tab.assign_document();
         Pane {
             editor: StoredValue::new(None),
@@ -217,6 +206,7 @@ pub(super) struct Shell {
     /// どのペインが入力を必要とするか。
     pub(super) focused: RwSignal<usize>,
     pub(super) next_key: RwSignal<usize>,
+    pub(super) next_tab_id: RwSignal<usize>,
     pub(super) status: RwSignal<String>,
     pub(super) stats: RwSignal<editor::DocStats>,
     pub(super) searching: RwSignal<bool>,
@@ -298,8 +288,15 @@ impl Shell {
         num
     }
 
+    pub(super) fn next_tab_id(&self) -> usize {
+        let id = self.next_tab_id.get_untracked();
+        self.next_tab_id.set(id + 1);
+        id
+    }
+
     pub(super) fn new_tab(&self) -> Tab {
-        let tab = self.root.with_value(|owner| owner.with(Tab::new));
+        let id = self.next_tab_id();
+        let tab = self.root.with_value(|owner| owner.with(|| Tab::new(id)));
         let num = self.next_untitled_num();
         tab.untitled_num.set(Some(num));
         tab.assign_document();
@@ -308,7 +305,9 @@ impl Shell {
 
     #[allow(dead_code)]
     pub(super) fn new_pane(&self, key: usize) -> Pane {
-        self.root.with_value(|owner| owner.with(|| Pane::new(key)))
+        let id = self.next_tab_id();
+        self.root
+            .with_value(|owner| owner.with(|| Pane::new(key, id)))
     }
 
     pub(super) fn new_pane_with_tab(&self, key: usize, tab: Tab) -> Pane {
@@ -632,7 +631,7 @@ impl Shell {
                     return;
                 }
                 // 単一ペインの場合：最後のタブは空のままなので、常にドキュメントが存在します。下書きに関しては、新しいタブになります。
-                tab.id.set(next_id());
+                tab.id.set(shell.next_tab_id());
                 tab.path.set(None);
                 tab.syntax_override.set(None);
                 tab.assign_document();
@@ -1211,7 +1210,11 @@ impl Shell {
                     .max()
                     .unwrap_or(0);
                 let draft_highest = draft_map.keys().copied().max().unwrap_or(0);
-                NEXT_ID.set(NEXT_ID.get().max(highest_id.max(draft_highest) + 1));
+                self.next_tab_id.set(
+                    self.next_tab_id
+                        .get_untracked()
+                        .max(highest_id.max(draft_highest) + 1),
+                );
 
                 let initial_pane = self.pane_untracked();
                 let mut created_panes = Vec::new();
@@ -1228,7 +1231,9 @@ impl Shell {
 
                     let mut pane_tabs = Vec::new();
                     for t_state in p_state.tabs {
-                        let tab = self.root.with_value(|owner| owner.with(Tab::new));
+                        let tab = self
+                            .root
+                            .with_value(|owner| owner.with(|| Tab::new(t_state.id)));
                         tab.id.set(t_state.id);
                         tab.untitled_num.set(t_state.untitled_num);
                         tab.path.set(t_state.path.clone());
@@ -1418,11 +1423,14 @@ impl Shell {
             return;
         }
         let highest = drafts.iter().map(|draft| draft.id).max().unwrap_or(0);
-        NEXT_ID.set(NEXT_ID.get().max(highest + 1));
+        self.next_tab_id
+            .set(self.next_tab_id.get_untracked().max(highest + 1));
         let pane = self.pane_untracked();
         let mut tabs = Vec::new();
         for (i, draft) in drafts.into_iter().enumerate() {
-            let tab = self.root.with_value(|owner| owner.with(Tab::new));
+            let tab = self
+                .root
+                .with_value(|owner| owner.with(|| Tab::new(draft.id)));
             tab.id.set(draft.id);
             if draft.path.is_none() {
                 tab.untitled_num.set(Some(i + 1));

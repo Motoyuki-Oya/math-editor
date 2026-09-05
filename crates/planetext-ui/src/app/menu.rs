@@ -12,13 +12,8 @@ use crate::framework::{gui, GuiEvent, GuiFramework, MenuState};
 use crate::settings;
 use crate::settings::Settings;
 
-thread_local! {
-    static SHELL: std::cell::Cell<Option<Shell>> = const { std::cell::Cell::new(None) };
-}
-
 /// メニュー バーから選択された内容のリッスンを開始し、現在何がオンであるかをメニューに伝えます。
 pub(super) fn install(shell: Shell) {
-    SHELL.set(Some(shell));
     let _ = gui().on_event(Box::new(move |event| match event {
         GuiEvent::MenuSelected(name) => choose(shell, &name, From::Menu),
     }));
@@ -94,11 +89,7 @@ pub(super) fn show_state(shell: Shell) {
 /// 設定変更時にシェル参照なしでメニューのチェック状態を同期します。
 pub(super) fn update_menu_state() {
     let settings = settings::current();
-    let split = SHELL.with(|s| {
-        s.get()
-            .map(|shell| shell.panes.with_untracked(Vec::len) > 1)
-            .unwrap_or(false)
-    });
+    let split = editor::pane_count() > 1;
     spawn_local(async move {
         let _ = gui()
             .set_menu(MenuState {
